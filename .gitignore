@@ -1,0 +1,62 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# Build directories
+.build/
+build/
+
+# IDE settings
+.vscode/.browse.c_cpp.db*
+.vscode/c_cpp_properties.json
+.vscode/launch.json
+.vscode/ipch
+
+# Clangd
+.cache/
+
+# Compiled files
+*.o
+*.elf
+*.bin
+*.hex
+*.map
+
+# Library dependencies (managed by PlatformIO)
+lib/*/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+*~
+
+# IDE and editor files
+*.swp
+*.swo
+*.swn
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+
+# Secrets and credentials (if any)
+secrets.h
+credentials.h

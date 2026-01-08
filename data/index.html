@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BigDashVesc - VESC Dashboard</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="header-left">
+            <h1 class="logo">BigDashVesc</h1>
+        </div>
+        <div class="header-center">
+            <nav class="tabs">
+                <button class="tab active" data-tab="dashboard">Dashboard</button>
+                <button class="tab" data-tab="settings">Settings</button>
+            </nav>
+        </div>
+        <div class="header-right">
+            <div class="connection-status">
+                <span class="status-dot" id="statusDot"></span>
+                <span class="status-text" id="statusText">Connecting...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Dashboard Tab -->
+    <main class="tab-content active" id="tab-dashboard">
+        <!-- Primary Metrics Row -->
+        <section class="metrics-primary">
+            <div class="metric-card large">
+                <div class="metric-label">Battery</div>
+                <div class="metric-value" id="batteryPercent">--</div>
+                <div class="metric-unit">%</div>
+                <div class="battery-bar">
+                    <div class="battery-fill" id="batteryFill"></div>
+                </div>
+                <div class="metric-sub" id="cellInfo">-- cells @ --V/cell</div>
+            </div>
+            
+            <div class="metric-card large">
+                <div class="metric-label">Voltage</div>
+                <div class="metric-value accent-green" id="voltage">--</div>
+                <div class="metric-unit">V</div>
+            </div>
+            
+            <div class="metric-card large">
+                <div class="metric-label">Current</div>
+                <div class="metric-value accent-cyan" id="currentIn">--</div>
+                <div class="metric-unit">A</div>
+                <div class="metric-sub">Peak: <span id="peakCurrent">--</span>A</div>
+            </div>
+            
+            <div class="metric-card large">
+                <div class="metric-label">Power</div>
+                <div class="metric-value accent-yellow" id="power">--</div>
+                <div class="metric-unit">W</div>
+            </div>
+        </section>
+
+        <!-- Secondary Metrics Row -->
+        <section class="metrics-secondary">
+            <div class="metric-card">
+                <div class="metric-label">ERPM</div>
+                <div class="metric-value" id="rpm">--</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label" id="inputLabel">Input</div>
+                <div class="metric-value" id="inputValue">--</div>
+                <div class="metric-unit">%</div>
+                <div class="input-bar-container">
+                    <div class="input-bar">
+                        <div class="input-bar-center"></div>
+                        <div class="input-bar-fill" id="inputBarFill"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Duty</div>
+                <div class="metric-value" id="duty">--</div>
+                <div class="metric-unit">%</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">mAh Used</div>
+                <div class="metric-value" id="mahUsed">--</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Wh Used</div>
+                <div class="metric-value" id="whUsed">--</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">FET Temp</div>
+                <div class="metric-value" id="tempFet">--</div>
+                <div class="metric-unit">°F</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Motor Temp</div>
+                <div class="metric-value" id="tempMotor">--</div>
+                <div class="metric-unit">°F</div>
+            </div>
+        </section>
+
+        <!-- Warning Banner -->
+        <div class="warning-banner" id="warningBanner">
+            <span class="warning-icon">⚠</span>
+            <span class="warning-text" id="warningText"></span>
+        </div>
+
+        <!-- System Info -->
+        <section class="system-info">
+            <div class="info-item">
+                <span class="info-label">Device:</span>
+                <span class="info-value" id="deviceName">--</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Uptime:</span>
+                <span class="info-value" id="uptime">--</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Heap:</span>
+                <span class="info-value" id="freeHeap">--</span>
+            </div>
+        </section>
+    </main>
+
+    <!-- Settings Tab -->
+    <main class="tab-content" id="tab-settings">
+        <div class="settings-container">
+            <h2>System Information</h2>
+            <div class="info-grid">
+                <div class="info-card">
+                    <div class="info-label">Device</div>
+                    <div class="info-value" id="settingsDevice">BigDashVesc</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Platform</div>
+                    <div class="info-value" id="settingsPlatform">M5Stack Tab5</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Free Heap</div>
+                    <div class="info-value" id="settingsHeap">--</div>
+                </div>
+                <div class="info-card">
+                    <div class="info-label">Free PSRAM</div>
+                    <div class="info-value" id="settingsPsram">--</div>
+                </div>
+            </div>
+            
+            <h2>VESC Actions</h2>
+            <div class="action-buttons">
+                <button class="btn btn-danger" id="rebootVesc">Reboot VESC</button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toast Notifications -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- Scripts -->
+    <script src="/js/app.js"></script>
+</body>
+</html>
