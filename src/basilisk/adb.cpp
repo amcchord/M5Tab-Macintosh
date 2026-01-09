@@ -334,6 +334,43 @@ void ADBKeyUp(int code)
 
 
 /*
+ *  Get keyboard LED state (for USB keyboard LED sync)
+ *  Returns bitmask in USB HID format:
+ *    Bit 0: Num Lock
+ *    Bit 1: Caps Lock
+ *    Bit 2: Scroll Lock
+ */
+
+uint8 ADBGetKeyboardLEDs(void)
+{
+	uint8 leds = 0;
+	
+	// ADB key_reg_2[1] contains LED state (active low in Mac ADB)
+	// Bit 7: Num Lock LED (0 = on)
+	// Bit 6: Scroll Lock LED (0 = on)
+	// Mac ADB typically uses bit 2 of key_reg_2[1] for Caps Lock LED
+	
+	// Also check the key matrix for current key state as fallback
+	// Mac keycode 0x39 is Caps Lock
+	if (MATRIX(0x39)) {
+		leds |= 0x02;  // Caps Lock (USB HID bit 1)
+	}
+	
+	// Check Num Lock (Mac keycode 0x47)
+	if (MATRIX(0x47)) {
+		leds |= 0x01;  // Num Lock (USB HID bit 0)
+	}
+	
+	// Check Scroll Lock (Mac keycode 0x6B)
+	if (MATRIX(0x6b)) {
+		leds |= 0x04;  // Scroll Lock (USB HID bit 2)
+	}
+	
+	return leds;
+}
+
+
+/*
  *  ADB interrupt function (executed as part of 60Hz interrupt)
  */
 

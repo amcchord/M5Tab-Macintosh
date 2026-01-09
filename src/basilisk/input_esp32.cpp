@@ -5,8 +5,10 @@
  *
  *  Handles:
  *  - Touch panel input (as mouse via M5Unified)
- *  - USB HID keyboard input (future: via ESP-IDF USB Host)
- *  - USB HID mouse input (future: via ESP-IDF USB Host)
+ *  - USB HID keyboard input (via EspUsbHost library)
+ *  - USB HID mouse input (via EspUsbHost library)
+ *
+ *  USB Host uses USB2 port on M5Stack Tab5
  */
 
 #include "sysdeps.h"
@@ -15,8 +17,9 @@
 #include "video.h"
 
 #include <M5Unified.h>
+#include <EspUsbHost.h>
 
-#define DEBUG 0
+#define DEBUG 1
 #include "debug.h"
 
 // ============================================================================
@@ -231,19 +234,254 @@ static bool keyboard_enabled = true;
 static bool touch_was_pressed = false;
 static int last_touch_x = 0;
 static int last_touch_y = 0;
-static uint32_t touch_press_time = 0;
-
-// Click timing constants (in milliseconds)
-static const uint32_t CLICK_HOLD_THRESHOLD = 200;  // Time to register as click vs drag
-
-// Keyboard state tracking (for detecting key up events)
-// USB HID reports up to 6 simultaneous keys (boot protocol)
-static uint8_t prev_keys[6] = {0, 0, 0, 0, 0, 0};
-static uint8_t prev_modifiers = 0;
 
 // USB device connection state
 static bool keyboard_connected = false;
 static bool mouse_connected = false;
+
+// USB mouse button state
+static uint8_t usb_mouse_buttons = 0;
+
+// LED state tracking
+static uint8_t last_led_state = 0;
+static uint32_t last_led_check_time = 0;
+static const uint32_t LED_CHECK_INTERVAL_MS = 100;  // Check every 100ms
+
+// ============================================================================
+// Forward declarations
+// ============================================================================
+
+class MacUsbHost;
+static MacUsbHost *usbHost = NULL;
+
+// ============================================================================
+// MacUsbHost - Custom USB Host class for Mac emulation
+// ============================================================================
+
+class MacUsbHost : public EspUsbHost {
+public:
+    // Track modifier state with bitmask for proper left/right handling
+    // Bit 0: Left Control pressed
+    // Bit 1: Left Shift pressed
+    // Bit 2: Left Alt pressed
+    // Bit 3: Left GUI pressed
+    // Bit 4: Right Control pressed
+    // Bit 5: Right Shift pressed
+    // Bit 6: Right Alt pressed
+    // Bit 7: Right GUI pressed
+    uint8_t modifier_state = 0;
+    
+    // Track if keyboard is connected for LED control
+    bool has_keyboard = false;
+    
+    // Helper to check if a specific modifier is held (combining left+right)
+    bool isControlHeld() { return (modifier_state & 0x11) != 0; }
+    bool isShiftHeld() { return (modifier_state & 0x22) != 0; }
+    bool isAltHeld() { return (modifier_state & 0x44) != 0; }
+    bool isCommandHeld() { return (modifier_state & 0x88) != 0; }
+    
+    // Process a single modifier bit change
+    void handleModifierBit(uint8_t bit, bool pressed, uint8_t mac_keycode) {
+        uint8_t mask = (1 << bit);
+        bool was_pressed = (modifier_state & mask) != 0;
+        
+        if (pressed && !was_pressed) {
+            modifier_state |= mask;
+            ADBKeyDown(mac_keycode);
+            Serial.printf("[INPUT] Modifier DOWN: bit %d -> Mac 0x%02X\n", bit, mac_keycode);
+        } else if (!pressed && was_pressed) {
+            modifier_state &= ~mask;
+            ADBKeyUp(mac_keycode);
+            Serial.printf("[INPUT] Modifier UP: bit %d -> Mac 0x%02X\n", bit, mac_keycode);
+        }
+    }
+    
+    // Called when USB keyboard report is received
+    void onKeyboard(hid_keyboard_report_t report, hid_keyboard_report_t last_report) override {
+        if (!keyboard_enabled) return;
+        
+        has_keyboard = true;
+        keyboard_connected = true;
+        
+        // Process modifier keys FIRST (important for key chords)
+        // USB modifier byte: [RGui][RAlt][RShift][RCtrl][LGui][LAlt][LShift][LCtrl]
+        handleModifierBit(0, (report.modifier & 0x01) != 0, 0x36);  // Left Control
+        handleModifierBit(1, (report.modifier & 0x02) != 0, 0x38);  // Left Shift
+        handleModifierBit(2, (report.modifier & 0x04) != 0, 0x3A);  // Left Alt/Option
+        handleModifierBit(3, (report.modifier & 0x08) != 0, 0x37);  // Left GUI/Command
+        handleModifierBit(4, (report.modifier & 0x10) != 0, 0x36);  // Right Control
+        handleModifierBit(5, (report.modifier & 0x20) != 0, 0x38);  // Right Shift
+        handleModifierBit(6, (report.modifier & 0x40) != 0, 0x3A);  // Right Alt/Option
+        handleModifierBit(7, (report.modifier & 0x80) != 0, 0x37);  // Right GUI/Command
+        
+        // Process key releases BEFORE key presses (important for key transitions)
+        for (int i = 0; i < 6; i++) {
+            uint8_t old_key = last_report.keycode[i];
+            if (old_key == 0) continue;
+            
+            // Check if this key is still pressed
+            bool still_pressed = false;
+            for (int j = 0; j < 6; j++) {
+                if (report.keycode[j] == old_key) {
+                    still_pressed = true;
+                    break;
+                }
+            }
+            
+            if (!still_pressed) {
+                uint8_t mac_code = usb_to_mac_keycode[old_key];
+                if (mac_code != 0xFF) {
+                    ADBKeyUp(mac_code);
+                    Serial.printf("[INPUT] Key UP: USB 0x%02X -> Mac 0x%02X\n", old_key, mac_code);
+                }
+            }
+        }
+        
+        // Process key presses
+        for (int i = 0; i < 6; i++) {
+            uint8_t new_key = report.keycode[i];
+            if (new_key == 0) continue;
+            
+            // Check if this is a new key press
+            bool was_pressed = false;
+            for (int j = 0; j < 6; j++) {
+                if (last_report.keycode[j] == new_key) {
+                    was_pressed = true;
+                    break;
+                }
+            }
+            
+            if (!was_pressed) {
+                uint8_t mac_code = usb_to_mac_keycode[new_key];
+                if (mac_code != 0xFF) {
+                    ADBKeyDown(mac_code);
+                    // Log with modifier state for debugging key chords
+                    Serial.printf("[INPUT] Key DOWN: USB 0x%02X -> Mac 0x%02X (mods: %s%s%s%s)\n", 
+                        new_key, mac_code,
+                        isCommandHeld() ? "Cmd+" : "",
+                        isControlHeld() ? "Ctrl+" : "",
+                        isAltHeld() ? "Opt+" : "",
+                        isShiftHeld() ? "Shift+" : "");
+                }
+            }
+        }
+    }
+    
+    // Called when USB mouse moves
+    void onMouseMove(hid_mouse_report_t report) override {
+        mouse_connected = true;
+        
+        // Set relative mouse mode for USB mouse
+        ADBSetRelMouseMode(true);
+        
+        // Forward relative movement to ADB
+        if (report.x != 0 || report.y != 0) {
+            ADBMouseMoved(report.x, report.y);
+        }
+    }
+    
+    // Called when USB mouse buttons change
+    void onMouseButtons(hid_mouse_report_t report, uint8_t last_buttons) override {
+        uint8_t changed = report.buttons ^ last_buttons;
+        
+        // Left button (bit 0)
+        if (changed & 0x01) {
+            if (report.buttons & 0x01) {
+                ADBMouseDown(0);
+                Serial.println("[INPUT] USB Mouse: Left button DOWN");
+            } else {
+                ADBMouseUp(0);
+                Serial.println("[INPUT] USB Mouse: Left button UP");
+            }
+        }
+        
+        // Right button (bit 1)
+        if (changed & 0x02) {
+            if (report.buttons & 0x02) {
+                ADBMouseDown(1);
+                Serial.println("[INPUT] USB Mouse: Right button DOWN");
+            } else {
+                ADBMouseUp(1);
+                Serial.println("[INPUT] USB Mouse: Right button UP");
+            }
+        }
+        
+        // Middle button (bit 2)
+        if (changed & 0x04) {
+            if (report.buttons & 0x04) {
+                ADBMouseDown(2);
+                Serial.println("[INPUT] USB Mouse: Middle button DOWN");
+            } else {
+                ADBMouseUp(2);
+                Serial.println("[INPUT] USB Mouse: Middle button UP");
+            }
+        }
+        
+        usb_mouse_buttons = report.buttons;
+    }
+    
+    // Called when USB device is disconnected
+    void onGone(const usb_host_client_event_msg_t *eventMsg) override {
+        Serial.println("[INPUT] USB device disconnected");
+        keyboard_connected = false;
+        mouse_connected = false;
+        has_keyboard = false;
+        modifier_state = 0;  // Reset modifier state
+    }
+    
+    // Send LED state to keyboard
+    void setKeyboardLEDs(uint8_t leds) {
+        if (!has_keyboard || !isReady || deviceHandle == NULL) {
+            return;
+        }
+        
+        // USB HID SET_REPORT for keyboard LEDs
+        // Report ID 0, Output report, LED byte
+        usb_transfer_t *transfer;
+        esp_err_t err = usb_host_transfer_alloc(8 + 1, 0, &transfer);
+        if (err != ESP_OK) {
+            Serial.printf("[INPUT] Failed to allocate transfer for LED: %x\n", err);
+            return;
+        }
+        
+        // Build SET_REPORT request
+        // bmRequestType: 0x21 (Host to Device, Class, Interface)
+        // bRequest: 0x09 (SET_REPORT)
+        // wValue: 0x0200 (Report Type: Output, Report ID: 0)
+        // wIndex: Interface number (0 for boot keyboard)
+        // wLength: 1 (one byte for LED state)
+        transfer->num_bytes = 8 + 1;
+        transfer->data_buffer[0] = 0x21;  // bmRequestType
+        transfer->data_buffer[1] = 0x09;  // bRequest (SET_REPORT)
+        transfer->data_buffer[2] = 0x00;  // wValue low (Report ID)
+        transfer->data_buffer[3] = 0x02;  // wValue high (Report Type: Output)
+        transfer->data_buffer[4] = 0x00;  // wIndex low (Interface)
+        transfer->data_buffer[5] = 0x00;  // wIndex high
+        transfer->data_buffer[6] = 0x01;  // wLength low
+        transfer->data_buffer[7] = 0x00;  // wLength high
+        transfer->data_buffer[8] = leds;  // LED state byte
+        
+        transfer->device_handle = deviceHandle;
+        transfer->bEndpointAddress = 0x00;
+        transfer->callback = NULL;  // We don't need callback for LED
+        transfer->context = NULL;
+        
+        err = usb_host_transfer_submit_control(clientHandle, transfer);
+        if (err != ESP_OK) {
+            Serial.printf("[INPUT] Failed to submit LED control transfer: %x\n", err);
+        } else {
+            Serial.printf("[INPUT] LED state sent: 0x%02X (Num:%d Caps:%d Scroll:%d)\n", 
+                leds, 
+                (leds & 0x01) ? 1 : 0,
+                (leds & 0x02) ? 1 : 0,
+                (leds & 0x04) ? 1 : 0);
+        }
+        
+        // Note: transfer will be freed when it completes
+        // For simplicity, we're using synchronous approach here
+        usb_host_transfer_free(transfer);
+    }
+};
 
 // ============================================================================
 // Touch Input Handling
@@ -287,8 +525,8 @@ static void processTouchInput(void)
     
     if (is_pressed) {
         if (!touch_was_pressed) {
-            // Touch just started
-            touch_press_time = millis();
+            // Touch just started - switch to absolute mode for touch
+            ADBSetRelMouseMode(false);
             touch_was_pressed = true;
             
             // Move cursor to touch position
@@ -297,8 +535,8 @@ static void processTouchInput(void)
             // Immediately press mouse button for responsive feel
             ADBMouseDown(0);
             
-            D(bug("[INPUT] Touch down at (%d, %d) -> Mac (%d, %d)\n", 
-                  touch_x, touch_y, mac_x, mac_y));
+            Serial.printf("[INPUT] Touch DOWN at (%d, %d) -> Mac (%d, %d)\n", 
+                  touch_x, touch_y, mac_x, mac_y);
         } else {
             // Touch is being held/dragged
             // Only update if position changed significantly (reduce noise)
@@ -317,218 +555,34 @@ static void processTouchInput(void)
             ADBMouseUp(0);
             touch_was_pressed = false;
             
-            D(bug("[INPUT] Touch up\n"));
+            Serial.println("[INPUT] Touch UP");
         }
     }
 }
 
-// ============================================================================
-// USB Keyboard Input Handling
-// ============================================================================
-
 /*
- *  Process USB HID keyboard modifiers
- *  Modifier byte format: [RGui][RAlt][RShift][RCtrl][LGui][LAlt][LShift][LCtrl]
+ *  Check and update keyboard LED state
  */
-static void processKeyboardModifiers(uint8_t modifiers)
+static void updateKeyboardLEDs(void)
 {
-    uint8_t changed = modifiers ^ prev_modifiers;
-    
-    if (changed == 0) return;
-    
-    // Check each modifier bit
-    // Bit 0: Left Control
-    if (changed & 0x01) {
-        if (modifiers & 0x01) {
-            ADBKeyDown(0x36);  // Control
-        } else {
-            ADBKeyUp(0x36);
-        }
+    if (usbHost == NULL || !usbHost->has_keyboard) {
+        return;
     }
     
-    // Bit 1: Left Shift
-    if (changed & 0x02) {
-        if (modifiers & 0x02) {
-            ADBKeyDown(0x38);  // Shift
-        } else {
-            ADBKeyUp(0x38);
-        }
+    uint32_t now = millis();
+    if ((now - last_led_check_time) < LED_CHECK_INTERVAL_MS) {
+        return;
     }
+    last_led_check_time = now;
     
-    // Bit 2: Left Alt (Option)
-    if (changed & 0x04) {
-        if (modifiers & 0x04) {
-            ADBKeyDown(0x3A);  // Option
-        } else {
-            ADBKeyUp(0x3A);
-        }
-    }
+    // Get current LED state from Mac
+    uint8_t current_leds = ADBGetKeyboardLEDs();
     
-    // Bit 3: Left GUI (Command)
-    if (changed & 0x08) {
-        if (modifiers & 0x08) {
-            ADBKeyDown(0x37);  // Command
-        } else {
-            ADBKeyUp(0x37);
-        }
-    }
-    
-    // Bit 4: Right Control
-    if (changed & 0x10) {
-        if (modifiers & 0x10) {
-            ADBKeyDown(0x36);  // Control
-        } else {
-            ADBKeyUp(0x36);
-        }
-    }
-    
-    // Bit 5: Right Shift
-    if (changed & 0x20) {
-        if (modifiers & 0x20) {
-            ADBKeyDown(0x38);  // Shift
-        } else {
-            ADBKeyUp(0x38);
-        }
-    }
-    
-    // Bit 6: Right Alt (Option)
-    if (changed & 0x40) {
-        if (modifiers & 0x40) {
-            ADBKeyDown(0x3A);  // Option
-        } else {
-            ADBKeyUp(0x3A);
-        }
-    }
-    
-    // Bit 7: Right GUI (Command)
-    if (changed & 0x80) {
-        if (modifiers & 0x80) {
-            ADBKeyDown(0x37);  // Command
-        } else {
-            ADBKeyUp(0x37);
-        }
-    }
-    
-    prev_modifiers = modifiers;
-}
-
-/*
- *  Check if a key is in the key array
- */
-static bool keyInArray(uint8_t key, const uint8_t *keys, int count)
-{
-    for (int i = 0; i < count; i++) {
-        if (keys[i] == key) return true;
-    }
-    return false;
-}
-
-/*
- *  Process USB HID keyboard key array
- *  Called when new keyboard report is received
- *  keys[] contains up to 6 currently pressed keys (0 = no key)
- */
-static void processKeyboardKeys(const uint8_t *keys)
-{
-    // Find keys that were released (in prev but not in current)
-    for (int i = 0; i < 6; i++) {
-        uint8_t key = prev_keys[i];
-        if (key != 0 && !keyInArray(key, keys, 6)) {
-            // Key was released
-            uint8_t mac_code = usb_to_mac_keycode[key];
-            if (mac_code != 0xFF) {
-                ADBKeyUp(mac_code);
-                D(bug("[INPUT] Key up: USB 0x%02X -> Mac 0x%02X\n", key, mac_code));
-            }
-        }
-    }
-    
-    // Find keys that were pressed (in current but not in prev)
-    for (int i = 0; i < 6; i++) {
-        uint8_t key = keys[i];
-        if (key != 0 && !keyInArray(key, prev_keys, 6)) {
-            // Key was pressed
-            uint8_t mac_code = usb_to_mac_keycode[key];
-            if (mac_code != 0xFF) {
-                ADBKeyDown(mac_code);
-                D(bug("[INPUT] Key down: USB 0x%02X -> Mac 0x%02X\n", key, mac_code));
-            }
-        }
-    }
-    
-    // Update previous state
-    memcpy(prev_keys, keys, 6);
-}
-
-/*
- *  Process a complete USB HID keyboard report (boot protocol)
- *  Format: [modifier][reserved][key1][key2][key3][key4][key5][key6]
- */
-void InputProcessKeyboardReport(const uint8_t *report, int length)
-{
-    if (!keyboard_enabled || length < 8) return;
-    
-    uint8_t modifiers = report[0];
-    // report[1] is reserved
-    const uint8_t *keys = &report[2];
-    
-    processKeyboardModifiers(modifiers);
-    processKeyboardKeys(keys);
-}
-
-// ============================================================================
-// USB Mouse Input Handling (Placeholder for future implementation)
-// ============================================================================
-
-/*
- *  Process a USB HID mouse report
- *  Format varies by device, typically: [buttons][x_delta][y_delta][wheel]
- */
-void InputProcessMouseReport(const uint8_t *report, int length)
-{
-    if (length < 3) return;
-    
-    uint8_t buttons = report[0];
-    int8_t dx = (int8_t)report[1];
-    int8_t dy = (int8_t)report[2];
-    
-    // Handle button changes
-    static uint8_t prev_buttons = 0;
-    
-    // Left button
-    if ((buttons & 0x01) != (prev_buttons & 0x01)) {
-        if (buttons & 0x01) {
-            ADBMouseDown(0);
-        } else {
-            ADBMouseUp(0);
-        }
-    }
-    
-    // Right button
-    if ((buttons & 0x02) != (prev_buttons & 0x02)) {
-        if (buttons & 0x02) {
-            ADBMouseDown(1);
-        } else {
-            ADBMouseUp(1);
-        }
-    }
-    
-    // Middle button
-    if ((buttons & 0x04) != (prev_buttons & 0x04)) {
-        if (buttons & 0x04) {
-            ADBMouseDown(2);
-        } else {
-            ADBMouseUp(2);
-        }
-    }
-    
-    prev_buttons = buttons;
-    
-    // Handle mouse movement (relative mode)
-    if (dx != 0 || dy != 0) {
-        // Ensure we're in relative mouse mode for USB mouse
-        ADBSetRelMouseMode(true);
-        ADBMouseMoved(dx, dy);
+    // Update keyboard if state changed
+    if (current_leds != last_led_state) {
+        Serial.printf("[INPUT] LED state changed: 0x%02X -> 0x%02X\n", last_led_state, current_leds);
+        usbHost->setKeyboardLEDs(current_leds);
+        last_led_state = current_leds;
     }
 }
 
@@ -552,19 +606,24 @@ bool InputInit(void)
     last_touch_x = 0;
     last_touch_y = 0;
     
-    // Reset keyboard state
-    memset(prev_keys, 0, sizeof(prev_keys));
-    prev_modifiers = 0;
+    // Initialize LED state
+    last_led_state = 0;
+    last_led_check_time = 0;
     
-    // Set mouse to absolute mode for touch input
+    // Set mouse to absolute mode for touch input (USB mouse will switch to relative)
     ADBSetRelMouseMode(false);
     
-    // TODO: Initialize USB Host for HID devices
-    // This requires ESP-IDF USB Host stack integration
-    // For now, touch input works immediately via M5Unified
-    
     Serial.println("[INPUT] Touch input enabled");
-    Serial.println("[INPUT] USB keyboard support: pending USB Host integration");
+    
+    // Initialize USB Host for keyboard/mouse on USB2 port
+    Serial.println("[INPUT] Initializing USB Host on USB2...");
+    usbHost = new MacUsbHost();
+    if (usbHost != NULL) {
+        usbHost->begin();
+        Serial.println("[INPUT] USB Host initialized - connect keyboard/mouse to USB2 port");
+    } else {
+        Serial.println("[INPUT] ERROR: Failed to create USB Host instance");
+    }
     
     return true;
 }
@@ -579,7 +638,11 @@ void InputExit(void)
         touch_was_pressed = false;
     }
     
-    // TODO: Cleanup USB Host resources
+    // Cleanup USB Host
+    if (usbHost != NULL) {
+        delete usbHost;
+        usbHost = NULL;
+    }
 }
 
 void InputPoll(void)
@@ -587,8 +650,13 @@ void InputPoll(void)
     // Process touch input
     processTouchInput();
     
-    // USB keyboard/mouse processing happens via callbacks from USB Host
-    // (InputProcessKeyboardReport / InputProcessMouseReport)
+    // Process USB Host events
+    if (usbHost != NULL) {
+        usbHost->task();
+    }
+    
+    // Update keyboard LEDs (Caps Lock, etc.)
+    updateKeyboardLEDs();
 }
 
 void InputSetScreenSize(int width, int height)
@@ -620,4 +688,22 @@ bool InputIsKeyboardConnected(void)
 bool InputIsMouseConnected(void)
 {
     return mouse_connected;
+}
+
+// ============================================================================
+// Legacy functions (kept for compatibility, now handled via EspUsbHost callbacks)
+// ============================================================================
+
+void InputProcessKeyboardReport(const uint8_t *report, int length)
+{
+    // No longer used - keyboard input comes via EspUsbHost callbacks
+    (void)report;
+    (void)length;
+}
+
+void InputProcessMouseReport(const uint8_t *report, int length)
+{
+    // No longer used - mouse input comes via EspUsbHost callbacks
+    (void)report;
+    (void)length;
 }

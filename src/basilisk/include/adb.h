@@ -37,4 +37,8 @@ extern void ADBInterrupt(void);
 
 extern void ADBSetRelMouseMode(bool relative);
 
+// Get keyboard LED state (for USB keyboard LED sync)
+// Returns bitmask: bit 0 = Num Lock, bit 1 = Caps Lock, bit 2 = Scroll Lock
+extern uint8 ADBGetKeyboardLEDs(void);
+
 #endif
