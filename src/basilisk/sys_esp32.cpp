@@ -193,6 +193,8 @@ void Sys_close(void *arg)
     D(bug("[SYS] Sys_close: %s\n", fh->path));
     
     if (fh->is_open) {
+        // Flush any pending writes before closing to ensure data integrity
+        fh->file.flush();
         fh->file.close();
         fh->is_open = false;
     }
@@ -265,6 +267,11 @@ size_t Sys_write(void *arg, void *buffer, loff_t offset, size_t length)
     
     // Write data
     size_t bytes_written = fh->file.write((uint8_t *)buffer, length);
+    
+    // Flush to ensure data is written to SD card (prevents data loss on reboot)
+    if (bytes_written > 0) {
+        fh->file.flush();
+    }
     
     // Log write operations to track disk activity
     static int disk_writes = 0;

@@ -81,11 +81,13 @@ void EmulOp(uint16 opcode, M68kRegisters *r)
 		}
 
 		case M68K_EMUL_OP_SHUTDOWN:			// Quit emulator
+			SaveXPRAM();					// Save PRAM before shutdown
 			QuitEmulator();
 			break;
 
 		case M68K_EMUL_OP_RESET: {			// MacOS reset
 			D(bug("*** RESET ***\n"));
+			SaveXPRAM();					// Save PRAM before reset
 			tick_inhibit = true;
 			CDROMRemount(); // for System 7.x
 			TimerReset();

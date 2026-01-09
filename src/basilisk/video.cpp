@@ -804,7 +804,7 @@ int16 monitor_desc::driver_status(uint16 code, uint32 param)
 
 		case cscGetConnection:		// Get monitor information
 			D(bug(" GetConnection\n"));
-			WriteMacInt16(param + csDisplayType, 8);		// Modeless connection
+			WriteMacInt16(param + csDisplayType, 2);		// RGB color monitor (kRGBConnect)
 			WriteMacInt8(param + csConnectTaggedType, 0);
 			WriteMacInt8(param + csConnectTaggedData, 0);
 			WriteMacInt32(param + csConnectFlags, 0x43);	// All modes valid and safe, non-standard tagging
@@ -938,7 +938,7 @@ int16 monitor_desc::driver_status(uint16 code, uint32 param)
 				WriteMacInt32(param + csDisplayCountOrNumber, 1); // Single-headed
 				return noErr;
 			} else if (conn == 1) {		// Get information about first connection
-				WriteMacInt16(param + csConnectInfo + csDisplayType, 8);		// Modeless connection
+				WriteMacInt16(param + csConnectInfo + csDisplayType, 2);		// RGB color monitor (kRGBConnect)
 				WriteMacInt8(param + csConnectInfo + csConnectTaggedType, 0);
 				WriteMacInt8(param + csConnectInfo + csConnectTaggedData, 0);
 				WriteMacInt32(param + csConnectInfo + csConnectFlags, 0x43);	// All modes valid and safe, non-standard tagging

@@ -11,6 +11,8 @@
 #include <SPI.h>
 #include <SD.h>
 
+#include "boot_gui.h"
+
 // M5Stack Tab5 SD Card SPI pins (ESP32-P4)
 #define SD_SPI_SCK   43
 #define SD_SPI_MOSI  44
@@ -133,6 +135,18 @@ void setup() {
             delay(1000);
         }
     }
+    
+    // Initialize and run boot configuration GUI
+    if (!BootGUI_Init()) {
+        showErrorScreen("Boot GUI initialization failed");
+        Serial.println("[MAIN] Halting - Boot GUI initialization failed");
+        while (1) {
+            delay(1000);
+        }
+    }
+    
+    // Run the boot GUI (countdown + optional settings screen)
+    BootGUI_Run();
     
     // Launch BasiliskII emulator
     Serial.println("[MAIN] Starting BasiliskII emulator...");
