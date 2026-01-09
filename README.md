@@ -2,12 +2,6 @@
 
 A full port of the **BasiliskII** Macintosh 68k emulator to the ESP32-P4 microcontroller, running on the M5Stack Tab5 hardware. This project brings classic Mac OS (System 7.x through Mac OS 8.1) to a portable embedded device with touchscreen input and USB peripheral support.
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Platform-ESP32--P4-blue" alt="Platform"/>
-  <img src="https://img.shields.io/badge/Hardware-M5Stack%20Tab5-orange" alt="Hardware"/>
-  <img src="https://img.shields.io/badge/Emulates-Motorola%2068040-green" alt="CPU"/>
-  <img src="https://img.shields.io/badge/Display-1280x720-purple" alt="Display"/>
-</p>
 
 ---
 
@@ -412,17 +406,7 @@ This project is based on BasiliskII, which is licensed under the **GNU General P
 
 ---
 
-## Contributing
 
-Contributions are welcome! Areas that could use improvement:
-
-- [ ] Audio output support (ES8388 codec)
-- [ ] Networking via ESP32-C6 WiFi
-- [ ] Floppy disk write support
-- [ ] Higher color depth modes (16-bit)
-- [ ] JIT compilation for faster emulation
-
----
 
 *This project was built with the assistance of [Claude Opus 4.5](https://anthropic.com). I am in no way smart enough to have done this on my own.* 🤖🍎
 
