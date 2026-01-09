@@ -402,6 +402,7 @@ Look for initialization messages:
 - **UAE** (Unix Amiga Emulator) — the CPU emulation core
 - **M5Stack** — for the excellent Tab5 hardware and M5Unified/M5GFX libraries
 - **EspUsbHost** — USB HID support for ESP32
+- **Claude Opus 4.5** (Anthropic) — AI pair programmer that made this port possible
 
 ---
 
@@ -409,10 +410,20 @@ Look for initialization messages:
 
 This project is based on BasiliskII, which is licensed under the **GNU General Public License v2**.
 
-See [COPYING](docs/BasiliskII/COPYING) for the full license text.
+---
+
+## Contributing
+
+Contributions are welcome! Areas that could use improvement:
+
+- [ ] Audio output support (ES8388 codec)
+- [ ] Networking via ESP32-C6 WiFi
+- [ ] Floppy disk write support
+- [ ] Higher color depth modes (16-bit)
+- [ ] JIT compilation for faster emulation
 
 ---
 
+*This project was built with the assistance of [Claude Opus 4.5](https://anthropic.com). I am in no way smart enough to have done this on my own.* 🤖🍎
 
-
-*Run classic Mac OS on an ESP32*
+*Run classic Mac OS in your pocket.*
