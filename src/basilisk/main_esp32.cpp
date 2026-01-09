@@ -30,6 +30,7 @@
 #include "main.h"
 #include "macos_util.h"
 #include "user_strings.h"
+#include "input.h"
 
 #define DEBUG 1
 #include "debug.h"
@@ -375,6 +376,12 @@ static bool InitEmulator(void)
         Serial.println("[MAIN] WARNING: 60Hz timer failed, using polling fallback");
     }
     
+    // Initialize input handling (touch panel, USB keyboard/mouse)
+    if (!InputInit()) {
+        // Non-fatal - emulator can run without input
+        Serial.println("[MAIN] WARNING: Input initialization failed");
+    }
+    
     Serial.println("[MAIN] Emulator initialized successfully!");
     Serial.printf("[MAIN] Tick quantum: %d instructions\n", emulated_ticks_quantum);
     
@@ -429,6 +436,7 @@ void basilisk_setup(void)
     
     // Cleanup
     stop60HzTimer();
+    InputExit();
     ExitAll();
     SysExit();
     PrefsExit();
@@ -443,6 +451,7 @@ void basilisk_setup(void)
  *  With dual-core optimization:
  *  - 60Hz tick is polled here (safer than async timer)
  *  - Video refresh is handled by video task on Core 0 (doesn't block here)
+ *  - Input polling happens here (touch panel, USB HID)
  *  - This function is lightweight - no rendering happens here
  */
 void basilisk_loop(void)
@@ -467,6 +476,11 @@ void basilisk_loop(void)
         last_video_signal = current_time;
         VideoRefresh();  // Now just signals the video task, doesn't render
     }
+    
+    // Poll for input events (touch panel, USB keyboard/mouse)
+    // This updates M5.Touch state and forwards events to ADB
+    M5.update();
+    InputPoll();
     
     // Yield to allow FreeRTOS tasks to run
     taskYIELD();

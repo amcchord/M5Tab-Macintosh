@@ -85,6 +85,7 @@ static ESP32_monitor_desc *the_monitor = NULL;
  */
 static inline uint16 rgb888_to_rgb565(uint8 r, uint8 g, uint8 b)
 {
+
     // Swap R and B to match display's BGR565 format
     return ((b & 0xF8) << 8) | ((g & 0xFC) << 3) | (r >> 3);
 }
