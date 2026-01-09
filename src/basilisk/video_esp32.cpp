@@ -134,8 +134,7 @@ bool VideoInit(bool classic)
     MacFrameSize = frame_buffer_size;
     MacFrameLayout = FLAYOUT_DIRECT;
     
-    // Create canvas for rendering (scaled to fit 1280x720)
-    // We'll use a 640x480 canvas and scale it up
+    // Create canvas for rendering
     canvas = new M5Canvas(&M5.Display);
     if (!canvas) {
         Serial.println("[VIDEO] ERROR: Failed to create canvas!");
@@ -144,15 +143,17 @@ bool VideoInit(bool classic)
         return false;
     }
     
-    // Create 8-bit canvas (we'll convert to RGB565 when pushing)
+    // Create sprite with 16-bit color depth
     canvas->createSprite(MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT);
     canvas->setColorDepth(16);  // RGB565 output
     
     Serial.println("[VIDEO] Canvas created");
     
-    // Initialize default palette (grayscale)
+    // Initialize default palette (grayscale with Mac-style inversion)
+    // Classic Mac: 0=white, 255=black
     for (int i = 0; i < 256; i++) {
-        palette_rgb565[i] = rgb888_to_rgb565(i, i, i);
+        uint8 gray = 255 - i;  // Invert for Mac palette
+        palette_rgb565[i] = rgb888_to_rgb565(gray, gray, gray);
     }
     
     // Set up video mode
@@ -234,7 +235,7 @@ void VideoRefresh(void)
     int x_offset = (display_width - MAC_SCREEN_WIDTH) / 2;
     int y_offset = (display_height - MAC_SCREEN_HEIGHT) / 2;
     
-    // Push canvas to display (no scaling for now, just center)
+    // Push canvas to display
     canvas->pushSprite(x_offset, y_offset);
 }
 

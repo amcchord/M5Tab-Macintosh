@@ -16,14 +16,6 @@
 #define DEBUG 1
 #include "debug.h"
 
-// SD card configuration for M5Stack Tab5
-#define SD_CLK  39
-#define SD_CMD  44
-#define SD_D0   40
-#define SD_D1   41
-#define SD_D2   42
-#define SD_D3   43
-
 // File handle structure
 struct file_handle {
     File file;
@@ -47,37 +39,8 @@ static bool init_sd_card(void)
         return true;
     }
     
-    Serial.println("[SYS] Initializing SD card...");
-    
-    // Initialize SD card with SDMMC (4-bit mode)
-    if (!SD.begin(SD_D3, SPI, 25000000, "/sd", 5, false)) {
-        // Try with SD_MMC
-        Serial.println("[SYS] SPI SD init failed, trying SD_MMC...");
-        
-        // Note: On Tab5, SD card is connected via SDMMC interface
-        // This may need adjustment based on actual hardware
-        if (!SD.begin()) {
-            Serial.println("[SYS] ERROR: SD card initialization failed!");
-            return false;
-        }
-    }
-    
+    Serial.println("[SYS] SD card should already be initialized by main.cpp");
     sd_initialized = true;
-    
-    uint64_t cardSize = SD.cardSize() / (1024 * 1024);
-    Serial.printf("[SYS] SD card initialized. Size: %lluMB\n", cardSize);
-    
-    // List root directory for debugging
-    File root = SD.open("/");
-    if (root) {
-        Serial.println("[SYS] SD card contents:");
-        File file = root.openNextFile();
-        while (file) {
-            Serial.printf("  %s (%d bytes)\n", file.name(), file.size());
-            file = root.openNextFile();
-        }
-        root.close();
-    }
     
     return true;
 }
@@ -95,7 +58,6 @@ void SysInit(void)
  */
 void SysExit(void)
 {
-    // Close any open files handled elsewhere
     sd_initialized = false;
 }
 
@@ -105,7 +67,6 @@ void SysExit(void)
 void SysAddFloppyPrefs(void)
 {
     // Add default floppy disk image paths
-    // The actual mounting is handled by prefs
 }
 
 /*
@@ -114,7 +75,6 @@ void SysAddFloppyPrefs(void)
 void SysAddDiskPrefs(void)
 {
     // Add default hard disk image paths
-    // The actual mounting is handled by prefs
 }
 
 /*
@@ -140,12 +100,6 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
 {
     if (!name || strlen(name) == 0) {
         D(bug("[SYS] Sys_open: empty name\n"));
-        return NULL;
-    }
-    
-    // Initialize SD card if not done yet
-    if (!init_sd_card()) {
-        D(bug("[SYS] Sys_open: SD card not initialized\n"));
         return NULL;
     }
     

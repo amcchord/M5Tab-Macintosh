@@ -15,8 +15,8 @@
 // XPRAM file on SD card
 const char XPRAM_FILE_PATH[] = "/BasiliskII_XPRAM";
 
-// XPRAM buffer (256 bytes)
-uint8 XPRAM[XPRAM_SIZE];
+// XPRAM buffer (defined in xpram.cpp)
+extern uint8 XPRAM[XPRAM_SIZE];
 
 /*
  *  Load XPRAM from SD card

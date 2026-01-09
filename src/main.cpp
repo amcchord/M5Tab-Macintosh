@@ -9,20 +9,11 @@
 #include <M5Unified.h>
 #include <M5GFX.h>
 #include <SD.h>
-#include "config.h"
 
 // Forward declarations for BasiliskII functions
 extern void basilisk_setup(void);
 extern void basilisk_loop(void);
 extern bool basilisk_is_running(void);
-
-// SD card pins for M5Stack Tab5
-#define SD_CLK  39
-#define SD_CMD  44
-#define SD_D0   40
-#define SD_D1   41
-#define SD_D2   42
-#define SD_D3   43
 
 // ============================================================================
 // Display Functions
@@ -64,17 +55,10 @@ void showErrorScreen(const char* error) {
 bool initSDCard() {
     Serial.println("[MAIN] Initializing SD card...");
     
-    // Try to initialize SD card
-    // M5Stack Tab5 uses SDMMC interface
+    // Try to initialize SD card using default pins
     if (!SD.begin()) {
-        Serial.println("[MAIN] SD.begin() failed, trying with explicit pins...");
-        
-        // Try with SPI mode as fallback
-        SPI.begin(SD_CLK, SD_D0, SD_CMD, SD_D3);
-        if (!SD.begin(SD_D3, SPI, 25000000)) {
-            Serial.println("[MAIN] ERROR: SD card initialization failed!");
-            return false;
-        }
+        Serial.println("[MAIN] ERROR: SD card initialization failed!");
+        return false;
     }
     
     uint64_t cardSize = SD.cardSize() / (1024 * 1024);

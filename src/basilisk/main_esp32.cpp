@@ -17,7 +17,7 @@
 #include "timer.h"
 #include "video.h"
 #include "prefs.h"
-#include "include/prefs_items.h"
+#include "prefs_items.h"
 #include "main.h"
 #include "macos_util.h"
 #include "user_strings.h"
@@ -37,10 +37,10 @@ extern uint32 ROMBaseMac;
 extern uint8 *ROMBaseHost;
 extern uint32 ROMSize;
 
-// Frame buffer pointers
-uint8 *MacFrameBaseHost = NULL;
-uint32 MacFrameSize = 0;
-int MacFrameLayout = 0;
+// Frame buffer pointers (defined in basilisk_glue.cpp)
+extern uint8 *MacFrameBaseHost;
+extern uint32 MacFrameSize;
+extern int MacFrameLayout;
 
 // CPU and FPU type
 int CPUType = 4;           // 68040
@@ -50,6 +50,25 @@ bool TwentyFourBitAddressing = false;
 
 // Interrupt flags
 uint32 InterruptFlags = 0;
+
+// Forward declaration
+void basilisk_loop(void);
+
+// CPU tick counter for timing (used by newcpu.cpp)
+int32 emulated_ticks = 1000;
+static int32 emulated_ticks_quantum = 1000;
+
+/*
+ *  CPU tick check - called periodically during emulation
+ */
+void cpu_do_check_ticks(void)
+{
+    // Call basilisk_loop to handle periodic tasks
+    basilisk_loop();
+    
+    // Reset tick counter
+    emulated_ticks = emulated_ticks_quantum;
+}
 
 // Global emulator state
 static bool emulator_running = false;

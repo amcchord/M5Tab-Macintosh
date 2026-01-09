@@ -50,9 +50,6 @@ using std::vector;
 // No UDP tunnel support
 #define SUPPORTS_UDP_TUNNEL 0
 
-// No pthreads - single threaded emulation
-// #define HAVE_PTHREADS 0
-
 // Use CPU emulation for periodic tasks (no threads)
 #define USE_CPU_EMUL_SERVICES 1
 
@@ -307,5 +304,11 @@ extern void Delay_usec(uint64 usec);
 #ifndef DEBUG
 #define DEBUG 0
 #endif
+
+/*
+ * PSRAM allocation helper - use Arduino's ps_malloc
+ */
+#define psram_malloc(size) ps_malloc(size)
+#define psram_calloc(n, size) ps_calloc(n, size)
 
 #endif /* SYSDEPS_H */
