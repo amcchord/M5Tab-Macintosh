@@ -72,7 +72,8 @@ extern uae_u8 *REGPARAM2 default_xlate(uaecptr addr) REGPARAM;
 #define bankindex(addr) (((uaecptr)(addr)) >> 16)
 
 #ifdef SAVE_MEMORY_BANKS
-extern addrbank *mem_banks[65536];
+// Note: mem_banks is dynamically allocated in PSRAM on ESP32
+extern addrbank **mem_banks;
 #define get_mem_bank(addr) (*mem_banks[bankindex(addr)])
 #define put_mem_bank(addr, b) (mem_banks[bankindex(addr)] = (b))
 #else

@@ -14,8 +14,12 @@
 #include "newcpu.h"
 #include "fpu/fpu.h"
 
-/* Global FPU context */
-fpu_t fpu;
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
+
+/* Global FPU context - dynamically allocated */
+fpu_t *fpu_ptr = NULL;
 
 /*
  *  FPU initialization
@@ -24,6 +28,19 @@ void fpu_init(bool integral_68040)
 {
     (void)integral_68040;
     
+    // Allocate FPU context in PSRAM if not already allocated
+    if (fpu_ptr == NULL) {
+#ifdef ARDUINO
+        fpu_ptr = (fpu_t *)heap_caps_malloc(sizeof(fpu_t), MALLOC_CAP_SPIRAM);
+#else
+        fpu_ptr = (fpu_t *)malloc(sizeof(fpu_t));
+#endif
+        if (fpu_ptr == NULL) {
+            write_log("[FPU] ERROR: Failed to allocate FPU context\n");
+            return;
+        }
+    }
+    
     // Initialize FPU context to zeros
     memset(&fpu, 0, sizeof(fpu));
     
@@ -31,7 +48,7 @@ void fpu_init(bool integral_68040)
     fpu.fpcr.rounding_precision = FPCR_PRECISION_EXTENDED;
     fpu.fpcr.rounding_mode = FPCR_ROUND_NEAR;
     
-    Serial.println("[FPU] Initialized (stub - FPU disabled)");
+    write_log("[FPU] Initialized (stub - FPU disabled)\n");
 }
 
 /*
@@ -76,16 +93,17 @@ void fpuop_scc(uae_u32 opcode, uae_u32 extra)
     Exception(11, 0);
 }
 
-void fpuop_trapcc(uae_u32 opcode, uae_u32 extra)
+void fpuop_trapcc(uae_u32 opcode, uaecptr oldpc)
 {
     (void)opcode;
-    (void)extra;
+    (void)oldpc;
     Exception(11, 0);
 }
 
-void fpuop_bcc(uae_u32 opcode, uae_u32 extra)
+void fpuop_bcc(uae_u32 opcode, uaecptr pc, uae_u32 extra)
 {
     (void)opcode;
+    (void)pc;
     (void)extra;
     Exception(11, 0);
 }

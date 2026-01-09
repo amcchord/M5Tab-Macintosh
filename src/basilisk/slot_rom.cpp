@@ -26,6 +26,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "sysdeps.h"
 #include "cpu_emulation.h"
@@ -35,9 +36,13 @@
 #include "version.h"
 #include "slot_rom.h"
 
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
 
-// Temporary buffer for slot ROM
-static uint8 srom[4096];
+
+// Temporary buffer for slot ROM - dynamically allocated
+static uint8 *srom = NULL;
 
 // Index in srom
 static uint32 p;
@@ -245,6 +250,23 @@ bool InstallSlotROM(void)
 
 	char str[256];
 	int i;
+
+	// Allocate srom buffer in PSRAM if not already allocated
+	if (srom == NULL) {
+#ifdef ARDUINO
+		srom = (uint8 *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM);
+		if (srom == NULL) {
+			Serial.println("[SLOT ROM] ERROR: Failed to allocate srom in PSRAM");
+			return false;
+		}
+#else
+		srom = (uint8 *)malloc(4096);
+		if (srom == NULL) {
+			return false;
+		}
+#endif
+	}
+
 	p = 0;
 
 	// Board sResource

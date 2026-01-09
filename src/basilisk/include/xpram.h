@@ -27,7 +27,8 @@ const int XPRAM_SIZE = 8192;
 const int XPRAM_SIZE = 256;
 #endif
 
-extern uint8 XPRAM[XPRAM_SIZE];
+// XPRAM is dynamically allocated in PSRAM on ESP32
+extern uint8 *XPRAM;
 
 extern void XPRAMInit(const char *vmdir);
 extern void XPRAMExit(void);

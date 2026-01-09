@@ -8,7 +8,14 @@
 #include <Arduino.h>
 #include <M5Unified.h>
 #include <M5GFX.h>
+#include <SPI.h>
 #include <SD.h>
+
+// M5Stack Tab5 SD Card SPI pins (ESP32-P4)
+#define SD_SPI_SCK   43
+#define SD_SPI_MOSI  44
+#define SD_SPI_MISO  39
+#define SD_SPI_CS    42
 
 // Forward declarations for BasiliskII functions
 extern void basilisk_setup(void);
@@ -54,10 +61,16 @@ void showErrorScreen(const char* error) {
 
 bool initSDCard() {
     Serial.println("[MAIN] Initializing SD card...");
+    Serial.printf("[MAIN] SD pins: SCK=%d, MOSI=%d, MISO=%d, CS=%d\n", 
+                  SD_SPI_SCK, SD_SPI_MOSI, SD_SPI_MISO, SD_SPI_CS);
     
-    // Try to initialize SD card using default pins
-    if (!SD.begin()) {
+    // Initialize SPI with Tab5 SD card pins
+    SPI.begin(SD_SPI_SCK, SD_SPI_MISO, SD_SPI_MOSI, SD_SPI_CS);
+    
+    // Try to initialize SD card with explicit CS pin
+    if (!SD.begin(SD_SPI_CS, SPI, 25000000)) {
         Serial.println("[MAIN] ERROR: SD card initialization failed!");
+        Serial.println("[MAIN] Make sure SD card is inserted and formatted as FAT32");
         return false;
     }
     

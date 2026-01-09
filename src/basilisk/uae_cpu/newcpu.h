@@ -40,9 +40,9 @@
 extern int areg_byteinc[];
 extern int imm8_table[];
 
-extern int movem_index1[256];
-extern int movem_index2[256];
-extern int movem_next[256];
+extern const int movem_index1[256];
+extern const int movem_index2[256];
+extern const int movem_next[256];
 
 extern int broken_in;
 
@@ -67,7 +67,8 @@ struct cputbl {
     uae_u16 opcode;
 };
 
-extern cpuop_func *cpufunctbl[65536] ASM_SYM("cpufunctbl");
+// Note: cpufunctbl is dynamically allocated in PSRAM on ESP32
+extern cpuop_func **cpufunctbl;
 
 #if USE_JIT
 typedef void compop_func (uae_u32) REGPARAM;
@@ -114,7 +115,9 @@ struct regstruct {
 #endif
 };
 
-extern regstruct regs, lastint_regs;
+extern regstruct regs;
+extern regstruct *lastint_regs_ptr;
+#define lastint_regs (*lastint_regs_ptr)
 
 #define m68k_dreg(r,num) ((r).regs[(num)])
 #define m68k_areg(r,num) (((r).regs + 8)[(num)])

@@ -27,8 +27,8 @@
 static uint8 *frame_buffer = NULL;
 static uint32 frame_buffer_size = 0;
 
-// Palette (256 RGB entries)
-static uint16 palette_rgb565[256];
+// Palette (256 RGB entries) - dynamically allocated in PSRAM
+static uint16 *palette_rgb565 = NULL;
 
 // Display dimensions
 static int display_width = 0;
@@ -112,6 +112,14 @@ bool VideoInit(bool classic)
     display_width = M5.Display.width();
     display_height = M5.Display.height();
     Serial.printf("[VIDEO] Display size: %dx%d\n", display_width, display_height);
+    
+    // Allocate palette in PSRAM
+    palette_rgb565 = (uint16 *)ps_malloc(256 * sizeof(uint16));
+    if (!palette_rgb565) {
+        Serial.println("[VIDEO] ERROR: Failed to allocate palette in PSRAM!");
+        return false;
+    }
+    memset(palette_rgb565, 0, 256 * sizeof(uint16));
     
     // Allocate frame buffer in PSRAM
     // For 640x480 @ 8-bit = 307,200 bytes

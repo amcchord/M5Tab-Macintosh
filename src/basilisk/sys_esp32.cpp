@@ -119,8 +119,36 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
     fh->is_floppy = (strstr(name, ".img") != NULL || strstr(name, ".IMG") != NULL);
     
     // Open file
-    const char *mode = read_only ? FILE_READ : FILE_WRITE;
-    fh->file = SD.open(name, mode);
+    // ESP32 SD library quirks:
+    // - FILE_READ = "r" (read only)
+    // - FILE_WRITE = "w" (truncates file!)
+    // - FILE_APPEND = "a" (append mode)
+    // For disk images, we always open read-only first to get size, then use FILE_APPEND
+    // which allows seeking and writing to existing files on ESP32
+    
+    // First, open in read mode to check file exists and get size
+    File testFile = SD.open(name, FILE_READ);
+    if (testFile) {
+        fh->size = testFile.size();
+        testFile.close();
+        Serial.printf("[SYS] File exists: %s (size=%lld bytes)\n", name, (long long)fh->size);
+    } else {
+        fh->size = 0;
+        Serial.printf("[SYS] File not found or empty: %s\n", name);
+    }
+    
+    // Now open for actual access
+    if (read_only) {
+        fh->file = SD.open(name, FILE_READ);
+    } else {
+        // Use FILE_APPEND for read+write access to existing file
+        // FILE_APPEND ("a+") allows reading and writing, and doesn't truncate
+        fh->file = SD.open(name, FILE_APPEND);
+        if (fh->file) {
+            // Seek to beginning for random access
+            fh->file.seek(0);
+        }
+    }
     
     if (!fh->file) {
         Serial.printf("[SYS] ERROR: Cannot open file: %s\n", name);
@@ -129,7 +157,6 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
     }
     
     fh->is_open = true;
-    fh->size = fh->file.size();
     
     Serial.printf("[SYS] Opened: %s (size=%lld bytes, ro=%d)\n", name, (long long)fh->size, read_only);
     

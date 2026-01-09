@@ -28,10 +28,6 @@
 #include "sysdeps.h"
 #include "readcpu.h"
 
-#ifdef ARDUINO
-#include <esp_heap_caps.h>
-#endif
-
 int nr_cpuop_funcs;
 
 struct mnemolookup lookuptab[] = {
@@ -819,13 +815,7 @@ void read_table68k (void)
 {
     int i;
 
-#ifdef ARDUINO
-    // Allocate in PSRAM on ESP32 (~1.5MB)
-    table68k = (struct instr *)heap_caps_malloc (65536 * sizeof (struct instr), MALLOC_CAP_SPIRAM);
-    write_log("Allocated table68k (%d bytes) in PSRAM\n", 65536 * sizeof(struct instr));
-#else
     table68k = (struct instr *)malloc (65536 * sizeof (struct instr));
-#endif
     for (i = 0; i < 65536; i++) {
 	table68k[i].mnemo = i_ILLG;
 	table68k[i].handler = -1;
@@ -946,7 +936,7 @@ const char *get_instruction_name (unsigned int opcode)
 
 static char *get_ea_string (amodes mode, wordsizes size)
 {
-    static char buffer[48];  // Reduced for ESP32
+    static char buffer[80];
 
     buffer[0] = 0;
     switch (mode){
@@ -1019,7 +1009,7 @@ static char *get_ea_string (amodes mode, wordsizes size)
 
 const char *get_instruction_string (unsigned int opcode)
 {
-    static char out[64];  // Reduced for ESP32
+    static char out[100];
     struct instr *ins;
 
     strcpy (out, get_instruction_name (opcode));

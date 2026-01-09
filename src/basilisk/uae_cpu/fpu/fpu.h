@@ -67,8 +67,9 @@ struct fpu_t {
     bool is_integral;
 };
 
-/* Global FPU context */
-extern fpu_t fpu;
+/* Global FPU context - dynamically allocated in PSRAM */
+extern fpu_t *fpu_ptr;
+#define fpu (*fpu_ptr)
 
 /* FPU functions */
 extern void fpu_init(bool integral_68040);
@@ -79,8 +80,8 @@ extern void fpu_reset(void);
 extern void fpuop_arithmetic(uae_u32 opcode, uae_u32 extra);
 extern void fpuop_dbcc(uae_u32 opcode, uae_u32 extra);
 extern void fpuop_scc(uae_u32 opcode, uae_u32 extra);
-extern void fpuop_trapcc(uae_u32 opcode, uae_u32 extra);
-extern void fpuop_bcc(uae_u32 opcode, uae_u32 extra);
+extern void fpuop_trapcc(uae_u32 opcode, uaecptr oldpc);
+extern void fpuop_bcc(uae_u32 opcode, uaecptr pc, uae_u32 extra);
 extern void fpuop_save(uae_u32 opcode);
 extern void fpuop_restore(uae_u32 opcode);
 

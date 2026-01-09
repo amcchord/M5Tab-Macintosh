@@ -24,13 +24,19 @@
  */
 
 #include <string.h>
+#include <stdlib.h>
 
 #include "sysdeps.h"
 #include "xpram.h"
 
+#ifdef ARDUINO
+#include <Arduino.h>
+#include <esp_heap_caps.h>
+#endif
 
-// Extended parameter RAM
-uint8 XPRAM[XPRAM_SIZE];
+
+// Extended parameter RAM - dynamically allocated
+uint8 *XPRAM = NULL;
 
 
 /*
@@ -39,6 +45,23 @@ uint8 XPRAM[XPRAM_SIZE];
 
 void XPRAMInit(const char *vmdir)
 {
+	// Allocate XPRAM in PSRAM if not already allocated
+	if (XPRAM == NULL) {
+#ifdef ARDUINO
+		XPRAM = (uint8 *)heap_caps_malloc(XPRAM_SIZE, MALLOC_CAP_SPIRAM);
+		if (XPRAM == NULL) {
+			Serial.println("[XPRAM] ERROR: Failed to allocate XPRAM in PSRAM");
+			return;
+		}
+		Serial.println("[XPRAM] Allocated in PSRAM");
+#else
+		XPRAM = (uint8 *)malloc(XPRAM_SIZE);
+		if (XPRAM == NULL) {
+			return;
+		}
+#endif
+	}
+
 	// Clear XPRAM
 	memset(XPRAM, 0, XPRAM_SIZE);
 

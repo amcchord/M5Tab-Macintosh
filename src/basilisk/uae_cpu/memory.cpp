@@ -25,6 +25,10 @@
 
 #include "sysdeps.h"
 
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
+
 #include "cpu_emulation.h"
 #include "main.h"
 #include "video.h"
@@ -39,7 +43,8 @@
 static bool illegal_mem = false;
 
 #ifdef SAVE_MEMORY_BANKS
-addrbank *mem_banks[65536];
+// 256KB pointer array - dynamically allocated in PSRAM on ESP32
+addrbank **mem_banks = NULL;
 #else
 addrbank mem_banks[65536];
 #endif
@@ -583,6 +588,18 @@ addrbank fram24_bank = {
 
 void memory_init(void)
 {
+#if defined(ARDUINO) && defined(SAVE_MEMORY_BANKS)
+	// Allocate 256KB memory bank pointer array in PSRAM
+	if (mem_banks == NULL) {
+		mem_banks = (addrbank **)heap_caps_malloc(65536 * sizeof(addrbank *), MALLOC_CAP_SPIRAM);
+		if (mem_banks == NULL) {
+			write_log("ERROR: Failed to allocate mem_banks in PSRAM!\n");
+			return;
+		}
+		write_log("Allocated mem_banks (256KB) in PSRAM\n");
+	}
+#endif
+
 	for(long i=0; i<65536; i++)
 		put_mem_bank(i<<16, &dummy_bank);
 

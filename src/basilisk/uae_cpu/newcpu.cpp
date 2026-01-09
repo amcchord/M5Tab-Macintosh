@@ -26,6 +26,11 @@
 
 #include "sysdeps.h"
 
+// ESP32 PSRAM support for large data structures
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
+
 #include "cpu_emulation.h"
 #include "main.h"
 #include "emul_op.h"
@@ -56,11 +61,69 @@ uaecptr last_fault_for_exception_3;
 int areg_byteinc[] = { 1,1,1,1,1,1,1,2 };
 int imm8_table[] = { 8,1,2,3,4,5,6,7 };
 
-int movem_index1[256];
-int movem_index2[256];
-int movem_next[256];
+// Pre-computed movem tables (const to place in flash, not BSS)
+// movem_index1: for each byte mask, find the lowest set bit index (0-7)
+const int movem_index1[256] = {
+    0,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    5,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    6,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    5,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    7,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    5,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    6,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    5,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+    4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
+};
 
-cpuop_func *cpufunctbl[65536];
+// movem_index2: 7 - movem_index1
+const int movem_index2[256] = {
+    7,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    2,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    1,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    2,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    0,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    2,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    1,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    2,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+    3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
+};
+
+// movem_next: i & (~(1 << j)) where j is the lowest set bit
+const int movem_next[256] = {
+    0,0,0,2,0,4,4,6,0,8,8,10,8,12,12,14,
+    0,16,16,18,16,20,20,22,16,24,24,26,24,28,28,30,
+    0,32,32,34,32,36,36,38,32,40,40,42,40,44,44,46,
+    32,48,48,50,48,52,52,54,48,56,56,58,56,60,60,62,
+    0,64,64,66,64,68,68,70,64,72,72,74,72,76,76,78,
+    64,80,80,82,80,84,84,86,80,88,88,90,88,92,92,94,
+    64,96,96,98,96,100,100,102,96,104,104,106,104,108,108,110,
+    96,112,112,114,112,116,116,118,112,120,120,122,120,124,124,126,
+    0,128,128,130,128,132,132,134,128,136,136,138,136,140,140,142,
+    128,144,144,146,144,148,148,150,144,152,152,154,152,156,156,158,
+    128,160,160,162,160,164,164,166,160,168,168,170,168,172,172,174,
+    160,176,176,178,176,180,180,182,176,184,184,186,184,188,188,190,
+    128,192,192,194,192,196,196,198,192,200,200,202,200,204,204,206,
+    192,208,208,210,208,212,212,214,208,216,216,218,216,220,220,222,
+    192,224,224,226,224,228,228,230,224,232,232,234,232,236,236,238,
+    224,240,240,242,240,244,244,246,240,248,248,250,248,252,252,254,
+};
+
+// 256KB opcode lookup table - dynamically allocated in PSRAM on ESP32
+cpuop_func **cpufunctbl = NULL;
 
 #if FLIGHT_RECORDER
 struct rec_step {
@@ -253,15 +316,21 @@ void init_m68k (void)
 {
 	int i;
 
-	for (i = 0 ; i < 256 ; i++) {
-		int j;
-		for (j = 0 ; j < 8 ; j++) {
-			if (i & (1 << j)) break;
+	// movem tables are now const and pre-computed at compile time
+	(void)i;  // silence unused variable warning
+
+	// Allocate lastint_regs in PSRAM (only used for debugging)
+	if (lastint_regs_ptr == NULL) {
+#ifdef ARDUINO
+		lastint_regs_ptr = (struct regstruct *)heap_caps_malloc(sizeof(struct regstruct), MALLOC_CAP_SPIRAM);
+#else
+		lastint_regs_ptr = (struct regstruct *)malloc(sizeof(struct regstruct));
+#endif
+		if (lastint_regs_ptr) {
+			memset(lastint_regs_ptr, 0, sizeof(struct regstruct));
 		}
-		movem_index1[i] = j;
-		movem_index2[i] = 7-j;
-		movem_next[i] = i & (~(1 << j));
 	}
+
 #if COUNT_INSTRS
 	{
 		FILE *f = fopen (icountfilename (), "r");
@@ -297,9 +366,10 @@ void exit_m68k (void)
 #endif
 }
 
-struct regstruct regs, lastint_regs;
-static struct regstruct regs_backup[16];
-static int backup_pointer = 0;
+struct regstruct regs;
+struct regstruct *lastint_regs_ptr = NULL;
+#define lastint_regs (*lastint_regs_ptr)
+// regs_backup removed - was 1856 bytes and never used
 static long int m68kpc_offset;
 int lastint_no;
 

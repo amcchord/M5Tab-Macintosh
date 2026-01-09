@@ -20,6 +20,10 @@
 
 #include "sysdeps.h"
 
+#ifdef ARDUINO
+#include <esp_heap_caps.h>
+#endif
+
 #include "cpu_emulation.h"
 #include "main.h"
 #include "prefs.h"
@@ -66,6 +70,18 @@ extern bool quit_program;
 
 bool Init680x0(void)
 {
+#ifdef ARDUINO
+	// Allocate 256KB opcode table in PSRAM
+	if (cpufunctbl == NULL) {
+		cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_SPIRAM);
+		if (cpufunctbl == NULL) {
+			write_log("ERROR: Failed to allocate cpufunctbl in PSRAM!\n");
+			return false;
+		}
+		write_log("Allocated cpufunctbl (256KB) in PSRAM\n");
+	}
+#endif
+
 #if REAL_ADDRESSING
 	// Mac address space = host address space
 	RAMBaseMac = (uintptr)RAMBaseHost;
