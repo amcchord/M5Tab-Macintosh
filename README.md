@@ -8,6 +8,14 @@ A full port of the **BasiliskII** Macintosh 68k emulator to the ESP32-P4 microco
 ## Screenshots
 
 <p align="center">
+  <img src="screenshots/MacOS753.gif" width="60%" alt="System 7.5.3 Booting"/>
+</p>
+
+<p align="center">
+  <em>System 7.5.3 booting on the M5Stack Tab5</em>
+</p>
+
+<p align="center">
   <img src="screenshots/MacOS8.1_Booted.jpeg" width="45%" alt="Mac OS 8.1 Desktop"/>
   <img src="screenshots/MacOS8.1_About.jpeg" width="45%" alt="Mac OS 8.1 About This Macintosh"/>
 </p>
@@ -15,6 +23,14 @@ A full port of the **BasiliskII** Macintosh 68k emulator to the ESP32-P4 microco
 <p align="center">
   <img src="screenshots/MacOS8.1_Booting.jpeg" width="45%" alt="Mac OS 8.1 Booting"/>
   <img src="screenshots/MacOS753_About.jpeg" width="45%" alt="System 7.5.3 About This Macintosh"/>
+</p>
+
+<p align="center">
+  <img src="screenshots/Toasters.gif" width="60%" alt="Flying Toasters Screensaver"/>
+</p>
+
+<p align="center">
+  <em>The classic After Dark Flying Toasters screensaver</em>
 </p>
 
 <p align="center">
