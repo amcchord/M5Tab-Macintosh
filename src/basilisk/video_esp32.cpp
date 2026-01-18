@@ -142,6 +142,14 @@ static int display_height = 0;
 // Video mode info
 static video_mode current_mode;
 
+// Current video state cache - updated on mode switch for fast access during rendering
+// These are used by the render loops and dirty tracking to handle different bit depths
+static volatile video_depth current_depth = VDEPTH_8BIT;  // Current color depth
+static volatile uint32 current_bytes_per_row = MAC_SCREEN_WIDTH;  // Bytes per row in frame buffer
+static volatile int current_pixels_per_byte = 1;  // Pixels packed per byte (8=1bit, 4=2bit, 2=4bit, 1=8bit)
+static volatile int current_bit_shift = 0;  // Bits to shift per pixel (7=1bit, 6=2bit, 4=4bit, 0=8bit)
+static volatile uint8 current_pixel_mask = 0xFF;  // Mask for extracting pixel value
+
 // ============================================================================
 // Performance profiling counters (lightweight, always enabled)
 // ============================================================================
@@ -219,14 +227,257 @@ void ESP32_monitor_desc::set_gamma(uint8 *gamma, int num)
 }
 
 /*
+ *  Helper to update the video state cache based on depth
+ */
+static void updateVideoStateCache(video_depth depth, uint32 bytes_per_row)
+{
+    current_depth = depth;
+    current_bytes_per_row = bytes_per_row;
+    
+    switch (depth) {
+        case VDEPTH_1BIT:
+            current_pixels_per_byte = 8;
+            current_bit_shift = 7;
+            current_pixel_mask = 0x01;
+            break;
+        case VDEPTH_2BIT:
+            current_pixels_per_byte = 4;
+            current_bit_shift = 6;
+            current_pixel_mask = 0x03;
+            break;
+        case VDEPTH_4BIT:
+            current_pixels_per_byte = 2;
+            current_bit_shift = 4;
+            current_pixel_mask = 0x0F;
+            break;
+        case VDEPTH_8BIT:
+        default:
+            current_pixels_per_byte = 1;
+            current_bit_shift = 0;
+            current_pixel_mask = 0xFF;
+            break;
+    }
+    
+    Serial.printf("[VIDEO] Mode cache updated: depth=%d, bpr=%d, ppb=%d\n", 
+                  (int)depth, (int)bytes_per_row, current_pixels_per_byte);
+}
+
+/*
+ *  Initialize palette with default colors for the specified depth
+ *  
+ *  This sets up appropriate default colors:
+ *  - 1-bit: Black and white (standard Mac B&W)
+ *  - 2-bit: 4-color grayscale (white, light gray, dark gray, black)
+ *  - 4-bit: Classic Mac 16-color palette
+ *  - 8-bit: Mac 256-color palette (6x6x6 color cube + grayscale ramp)
+ *  
+ *  Classic Mac convention: index 0 = white, highest index = black
+ */
+static void initDefaultPalette(video_depth depth)
+{
+    portENTER_CRITICAL(&frame_spinlock);
+    
+    switch (depth) {
+        case VDEPTH_1BIT:
+            // 1-bit: Black and white
+            // Index 0 = white, Index 1 = black
+            palette_rgb565[0] = rgb888_to_rgb565(255, 255, 255);  // White
+            palette_rgb565[1] = rgb888_to_rgb565(0, 0, 0);        // Black
+            Serial.println("[VIDEO] Initialized 1-bit B&W palette");
+            break;
+            
+        case VDEPTH_2BIT:
+            // 2-bit: 4 levels of gray
+            // Index 0 = white, Index 3 = black
+            palette_rgb565[0] = rgb888_to_rgb565(255, 255, 255);  // White
+            palette_rgb565[1] = rgb888_to_rgb565(170, 170, 170);  // Light gray
+            palette_rgb565[2] = rgb888_to_rgb565(85, 85, 85);     // Dark gray
+            palette_rgb565[3] = rgb888_to_rgb565(0, 0, 0);        // Black
+            Serial.println("[VIDEO] Initialized 2-bit grayscale palette");
+            break;
+            
+        case VDEPTH_4BIT:
+            // 4-bit: Classic Mac 16-color palette
+            // This matches the standard Mac 16-color CLUT
+            {
+                static const uint8 mac16[16][3] = {
+                    {255, 255, 255},  // 0: White
+                    {255, 255, 0},    // 1: Yellow
+                    {255, 102, 0},    // 2: Orange
+                    {221, 0, 0},      // 3: Red
+                    {255, 0, 153},    // 4: Magenta
+                    {51, 0, 153},     // 5: Purple
+                    {0, 0, 204},      // 6: Blue
+                    {0, 153, 255},    // 7: Cyan
+                    {0, 170, 0},      // 8: Green
+                    {0, 102, 0},      // 9: Dark Green
+                    {102, 51, 0},     // 10: Brown
+                    {153, 102, 51},   // 11: Tan
+                    {187, 187, 187},  // 12: Light Gray
+                    {136, 136, 136},  // 13: Medium Gray
+                    {68, 68, 68},     // 14: Dark Gray
+                    {0, 0, 0}         // 15: Black
+                };
+                for (int i = 0; i < 16; i++) {
+                    palette_rgb565[i] = rgb888_to_rgb565(mac16[i][0], mac16[i][1], mac16[i][2]);
+                }
+            }
+            Serial.println("[VIDEO] Initialized 4-bit 16-color palette");
+            break;
+            
+        case VDEPTH_8BIT:
+        default:
+            // 8-bit: Mac 256-color palette
+            // Uses a 6x6x6 color cube (216 colors) plus grayscale ramp
+            // This provides a good default color palette for 256-color mode
+            {
+                int idx = 0;
+                
+                // First, create a 6x6x6 color cube (216 colors)
+                // This gives 6 levels each of R, G, B: 0, 51, 102, 153, 204, 255
+                for (int r = 0; r < 6; r++) {
+                    for (int g = 0; g < 6; g++) {
+                        for (int b = 0; b < 6; b++) {
+                            uint8 rv = r * 51;
+                            uint8 gv = g * 51;
+                            uint8 bv = b * 51;
+                            palette_rgb565[idx++] = rgb888_to_rgb565(rv, gv, bv);
+                        }
+                    }
+                }
+                
+                // Fill remaining 40 entries with a grayscale ramp
+                // This provides smooth grays for UI elements
+                for (int i = 0; i < 40; i++) {
+                    uint8 gray = (i * 255) / 39;
+                    palette_rgb565[idx++] = rgb888_to_rgb565(gray, gray, gray);
+                }
+            }
+            Serial.println("[VIDEO] Initialized 8-bit 256-color palette");
+            break;
+    }
+    
+    portEXIT_CRITICAL(&frame_spinlock);
+    
+    // Force a full screen update since palette changed
+    force_full_update = true;
+}
+
+/*
  *  Switch to current video mode
  */
 void ESP32_monitor_desc::switch_to_current_mode(void)
 {
-    D(bug("[VIDEO] switch_to_current_mode\n"));
+    const video_mode &mode = get_current_mode();
+    D(bug("[VIDEO] switch_to_current_mode: %dx%d, depth=%d, bpr=%d\n", 
+          mode.x, mode.y, mode.depth, mode.bytes_per_row));
+    
+    // Update the video state cache for rendering
+    updateVideoStateCache(mode.depth, mode.bytes_per_row);
+    
+    // Initialize default palette for this depth
+    // MacOS will set its own palette shortly after, but this ensures
+    // the display looks reasonable immediately after the mode switch
+    initDefaultPalette(mode.depth);
     
     // Update frame buffer base address
     set_mac_frame_base(MacFrameBaseMac);
+    
+    // Force a full screen update on mode change (already done by initDefaultPalette)
+    force_full_update = true;
+}
+
+// ============================================================================
+// Packed pixel decoding helpers for 1/2/4-bit modes
+// ============================================================================
+
+/*
+ *  Decode a row of packed pixels to 8-bit palette indices
+ *  
+ *  In packed modes, multiple pixels are stored per byte:
+ *  - 1-bit: 8 pixels per byte, MSB first (bit 7 = leftmost pixel)
+ *  - 2-bit: 4 pixels per byte, MSB first (bits 7-6 = leftmost pixel)
+ *  - 4-bit: 2 pixels per byte, MSB first (bits 7-4 = leftmost pixel)
+ *  - 8-bit: 1 pixel per byte (no decoding needed)
+ *  
+ *  @param src       Source row in frame buffer (packed)
+ *  @param dst       Destination buffer for 8-bit indices (must hold width pixels)
+ *  @param width     Number of pixels to decode
+ *  @param depth     Current video depth
+ */
+static void decodePackedRow(const uint8 *src, uint8 *dst, int width, video_depth depth)
+{
+    switch (depth) {
+        case VDEPTH_1BIT: {
+            // 8 pixels per byte, MSB first
+            for (int x = 0; x < width; x++) {
+                int byte_idx = x / 8;
+                int bit_idx = 7 - (x % 8);  // MSB first
+                dst[x] = (src[byte_idx] >> bit_idx) & 0x01;
+            }
+            break;
+        }
+        case VDEPTH_2BIT: {
+            // 4 pixels per byte, MSB first
+            for (int x = 0; x < width; x++) {
+                int byte_idx = x / 4;
+                int shift = 6 - ((x % 4) * 2);  // MSB first: 6, 4, 2, 0
+                dst[x] = (src[byte_idx] >> shift) & 0x03;
+            }
+            break;
+        }
+        case VDEPTH_4BIT: {
+            // 2 pixels per byte, MSB first
+            for (int x = 0; x < width; x++) {
+                int byte_idx = x / 2;
+                int shift = (x % 2 == 0) ? 4 : 0;  // MSB first: high nibble, low nibble
+                dst[x] = (src[byte_idx] >> shift) & 0x0F;
+            }
+            break;
+        }
+        case VDEPTH_8BIT:
+        default:
+            // Direct copy, no decoding needed
+            memcpy(dst, src, width);
+            break;
+    }
+}
+
+/*
+ *  Get pixel index from packed framebuffer at given (x, y) coordinate
+ *  Used for single-pixel access when full row decode is overkill
+ *  
+ *  @param fb        Frame buffer pointer
+ *  @param x         X coordinate (pixel)
+ *  @param y         Y coordinate (row)
+ *  @param bpr       Bytes per row
+ *  @param depth     Current video depth
+ *  @return          8-bit palette index for the pixel
+ */
+static inline uint8 getPackedPixel(const uint8 *fb, int x, int y, uint32 bpr, video_depth depth)
+{
+    const uint8 *row = fb + y * bpr;
+    
+    switch (depth) {
+        case VDEPTH_1BIT: {
+            int byte_idx = x / 8;
+            int bit_idx = 7 - (x % 8);
+            return (row[byte_idx] >> bit_idx) & 0x01;
+        }
+        case VDEPTH_2BIT: {
+            int byte_idx = x / 4;
+            int shift = 6 - ((x % 4) * 2);
+            return (row[byte_idx] >> shift) & 0x03;
+        }
+        case VDEPTH_4BIT: {
+            int byte_idx = x / 2;
+            int shift = (x % 2 == 0) ? 4 : 0;
+            return (row[byte_idx] >> shift) & 0x0F;
+        }
+        case VDEPTH_8BIT:
+        default:
+            return row[x];
+    }
 }
 
 /*
@@ -248,32 +499,63 @@ static inline void flushCacheForDMA(void *buffer, size_t size)
  *  Detect which tiles have changed between current and previous frame
  *  Uses 32-bit word comparisons for speed
  *  Returns the number of dirty tiles found
+ *  
+ *  Handles packed pixel modes by calculating correct byte offsets using
+ *  current_bytes_per_row and current_pixels_per_byte.
  */
 static int detectDirtyTiles(uint8 *current, uint8 *previous)
 {
     memset(dirty_tiles, 0, sizeof(dirty_tiles));
     int count = 0;
     
+    // Get current bytes per row and pixels per byte (volatile)
+    uint32 bpr = current_bytes_per_row;
+    int ppb = current_pixels_per_byte;
+    
+    // Calculate bytes per tile row based on current mode
+    // In packed modes, TILE_WIDTH pixels takes fewer bytes
+    int bytes_per_tile_row = TILE_WIDTH / ppb;
+    if (bytes_per_tile_row < 4) bytes_per_tile_row = 4;  // Minimum for 32-bit comparison
+    
     for (int ty = 0; ty < TILES_Y; ty++) {
         for (int tx = 0; tx < TILES_X; tx++) {
             int tile_idx = ty * TILES_X + tx;
             bool is_dirty = false;
             
-            // Compare tile row by row using 32-bit words
+            // Calculate pixel and byte positions for this tile
+            int tile_pixel_x = tx * TILE_WIDTH;
+            int tile_byte_x = tile_pixel_x / ppb;  // Starting byte column for this tile
+            
+            // Compare tile row by row
             for (int row = 0; row < TILE_HEIGHT; row++) {
                 if (is_dirty) break;  // Early exit once we know tile is dirty
                 
                 int y = ty * TILE_HEIGHT + row;
-                int offset = y * MAC_SCREEN_WIDTH + tx * TILE_WIDTH;
+                int row_offset = y * bpr + tile_byte_x;
                 
-                // Compare 40 bytes (10 x 32-bit words)
-                uint32 *curr = (uint32 *)(current + offset);
-                uint32 *prev = (uint32 *)(previous + offset);
+                // Compare bytes for this tile row
+                uint8 *curr = current + row_offset;
+                uint8 *prev = previous + row_offset;
                 
-                for (int w = 0; w < TILE_WIDTH / 4; w++) {
-                    if (curr[w] != prev[w]) {
+                // Compare using 32-bit words where possible
+                int bytes_to_compare = bytes_per_tile_row;
+                int words = bytes_to_compare / 4;
+                
+                for (int w = 0; w < words; w++) {
+                    if (((uint32 *)curr)[w] != ((uint32 *)prev)[w]) {
                         is_dirty = true;
                         break;
+                    }
+                }
+                
+                // Compare remaining bytes
+                if (!is_dirty) {
+                    int remaining = bytes_to_compare % 4;
+                    for (int b = words * 4; b < words * 4 + remaining; b++) {
+                        if (curr[b] != prev[b]) {
+                            is_dirty = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -300,27 +582,55 @@ static inline bool isTileDirty(int tile_idx)
  *  Mark a tile as dirty at write-time (called from frame buffer put functions)
  *  This is MUCH faster than per-frame comparison as it only runs on actual writes.
  *  
- *  @param offset  Byte offset into the Mac framebuffer (0 to MAC_SCREEN_WIDTH*MAC_SCREEN_HEIGHT-1)
+ *  Handles packed pixel modes by mapping byte offset to pixel coordinates using
+ *  current_bytes_per_row and current_pixels_per_byte.
+ *  
+ *  @param offset  Byte offset into the Mac framebuffer
  */
 void VideoMarkDirtyOffset(uint32 offset)
 {
     if (!use_write_dirty_tracking) return;
     if (offset >= frame_buffer_size) return;
     
-    // Calculate tile coordinates from framebuffer offset
-    int y = offset / MAC_SCREEN_WIDTH;
-    int x = offset % MAC_SCREEN_WIDTH;
-    int tile_x = x / TILE_WIDTH;
-    int tile_y = y / TILE_HEIGHT;
-    int tile_idx = tile_y * TILES_X + tile_x;
+    // Get current bytes per row (volatile)
+    uint32 bpr = current_bytes_per_row;
+    int ppb = current_pixels_per_byte;
     
-    // Mark tile dirty using atomic OR (thread-safe for concurrent CPU writes)
-    __atomic_or_fetch(&write_dirty_tiles[tile_idx / 32], (1u << (tile_idx % 32)), __ATOMIC_RELAXED);
+    // Calculate row from byte offset
+    int y = offset / bpr;
+    if (y >= MAC_SCREEN_HEIGHT) return;
+    
+    // Calculate byte position within row
+    int byte_in_row = offset % bpr;
+    
+    // Calculate pixel range that this byte affects
+    int pixel_start = byte_in_row * ppb;
+    int pixel_end = pixel_start + ppb - 1;
+    
+    // Clamp to screen width
+    if (pixel_start >= MAC_SCREEN_WIDTH) return;
+    if (pixel_end >= MAC_SCREEN_WIDTH) pixel_end = MAC_SCREEN_WIDTH - 1;
+    
+    // Calculate tile range
+    int tile_x_start = pixel_start / TILE_WIDTH;
+    int tile_x_end = pixel_end / TILE_WIDTH;
+    int tile_y = y / TILE_HEIGHT;
+    
+    // Mark all affected tiles dirty
+    for (int tile_x = tile_x_start; tile_x <= tile_x_end; tile_x++) {
+        int tile_idx = tile_y * TILES_X + tile_x;
+        if (tile_idx < TOTAL_TILES) {
+            __atomic_or_fetch(&write_dirty_tiles[tile_idx / 32], (1u << (tile_idx % 32)), __ATOMIC_RELAXED);
+        }
+    }
 }
 
 /*
  *  Mark a range of tiles as dirty at write-time
  *  Used for multi-byte writes (lput, wput)
+ *  
+ *  For packed pixel modes, a multi-byte write can span many pixels across
+ *  potentially multiple rows and tiles.
  *  
  *  @param offset  Starting byte offset into the Mac framebuffer
  *  @param size    Number of bytes being written
@@ -335,12 +645,56 @@ void VideoMarkDirtyRange(uint32 offset, uint32 size)
         size = frame_buffer_size - offset;
     }
     
-    // Mark start tile
-    VideoMarkDirtyOffset(offset);
+    // Get current bytes per row (volatile)
+    uint32 bpr = current_bytes_per_row;
+    int ppb = current_pixels_per_byte;
     
-    // Mark end tile if different from start
-    if (size > 1) {
-        VideoMarkDirtyOffset(offset + size - 1);
+    // Calculate start and end rows
+    int start_y = offset / bpr;
+    int end_y = (offset + size - 1) / bpr;
+    
+    // For small writes or writes within a single row, just mark individual bytes
+    if (end_y == start_y && size <= 4) {
+        // Simple case: mark start and end bytes
+        VideoMarkDirtyOffset(offset);
+        if (size > 1) {
+            VideoMarkDirtyOffset(offset + size - 1);
+        }
+        return;
+    }
+    
+    // For larger writes spanning multiple rows, calculate affected tile columns
+    // This is more efficient than marking every byte individually
+    int start_byte_in_row = offset % bpr;
+    int end_byte_in_row = (offset + size - 1) % bpr;
+    
+    // Calculate pixel columns affected
+    int pixel_col_start = start_byte_in_row * ppb;
+    int pixel_col_end = (end_byte_in_row + 1) * ppb - 1;
+    
+    // For writes spanning multiple rows, the middle rows are fully affected
+    // So we need to consider columns from 0 to end for complex cases
+    if (end_y > start_y) {
+        // Multi-row write: could affect any column
+        pixel_col_start = 0;
+        pixel_col_end = MAC_SCREEN_WIDTH - 1;
+    }
+    
+    // Calculate tile ranges
+    int tile_x_start = pixel_col_start / TILE_WIDTH;
+    int tile_x_end = pixel_col_end / TILE_WIDTH;
+    if (tile_x_end >= TILES_X) tile_x_end = TILES_X - 1;
+    
+    int tile_y_start = start_y / TILE_HEIGHT;
+    int tile_y_end = end_y / TILE_HEIGHT;
+    if (tile_y_end >= TILES_Y) tile_y_end = TILES_Y - 1;
+    
+    // Mark all affected tiles dirty
+    for (int tile_y = tile_y_start; tile_y <= tile_y_end; tile_y++) {
+        for (int tile_x = tile_x_start; tile_x <= tile_x_end; tile_x++) {
+            int tile_idx = tile_y * TILES_X + tile_x;
+            __atomic_or_fetch(&write_dirty_tiles[tile_idx / 32], (1u << (tile_idx % 32)), __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -391,6 +745,11 @@ static void swapBuffers(void)
 
 /*
  *  Render a single tile from Mac framebuffer to DSI framebuffer with 2x2 scaling
+ *  
+ *  NOTE: This function is LEGACY CODE and not currently used in the active rendering path.
+ *  The active path uses snapshotTile() + renderTileFromSnapshot() instead.
+ *  This version assumes 8-bit mode and does not support packed pixel modes.
+ *  Kept for reference only.
  *  
  *  @param src_buffer   Mac framebuffer (8-bit indexed)
  *  @param tile_x       Tile column index (0 to TILES_X-1)
@@ -459,7 +818,11 @@ static void renderTile(uint8 *src_buffer, int tile_x, int tile_y, uint16 *local_
 
 /*
  *  Render a single tile directly to a contiguous buffer (for partial updates)
- *  OPTIMIZED: Renders directly to push buffer, avoiding the DSI framebuffer copy.
+ *  
+ *  NOTE: This function is LEGACY CODE and not currently used in the active rendering path.
+ *  The active path uses snapshotTile() + renderTileFromSnapshot() instead.
+ *  This version assumes 8-bit mode and does not support packed pixel modes.
+ *  Kept for reference only.
  *  
  *  @param src_buffer      Mac framebuffer (8-bit indexed)
  *  @param tile_x          Tile column index (0 to TILES_X-1)
@@ -537,22 +900,67 @@ static void renderTileToBuffer(uint8 *src_buffer, int tile_x, int tile_y,
  *  This creates a consistent snapshot of the tile to avoid race conditions
  *  when the CPU is writing to the framebuffer while we're rendering.
  *  
- *  @param src_buffer     Mac framebuffer (8-bit indexed)
+ *  For packed pixel modes, decodes to 8-bit indices in the snapshot buffer.
+ *  
+ *  @param src_buffer     Mac framebuffer (may be packed or 8-bit)
  *  @param tile_x         Tile column index (0 to TILES_X-1)
  *  @param tile_y         Tile row index (0 to TILES_Y-1)
- *  @param snapshot       Output buffer (TILE_WIDTH * TILE_HEIGHT bytes)
+ *  @param snapshot       Output buffer (TILE_WIDTH * TILE_HEIGHT bytes, always 8-bit indices)
  */
 static void snapshotTile(uint8 *src_buffer, int tile_x, int tile_y, uint8 *snapshot)
 {
     int src_start_x = tile_x * TILE_WIDTH;
     int src_start_y = tile_y * TILE_HEIGHT;
     
-    // Copy each row of the tile to the contiguous snapshot buffer
+    // Get current depth and bytes per row (volatile, so copy locally)
+    video_depth depth = current_depth;
+    uint32 bpr = current_bytes_per_row;
+    
+    // Copy and decode each row of the tile to the contiguous snapshot buffer
     uint8 *dst = snapshot;
-    for (int row = 0; row < TILE_HEIGHT; row++) {
-        uint8 *src = src_buffer + (src_start_y + row) * MAC_SCREEN_WIDTH + src_start_x;
-        memcpy(dst, src, TILE_WIDTH);
-        dst += TILE_WIDTH;
+    
+    if (depth == VDEPTH_8BIT) {
+        // 8-bit mode: direct copy, no decoding needed
+        for (int row = 0; row < TILE_HEIGHT; row++) {
+            uint8 *src = src_buffer + (src_start_y + row) * bpr + src_start_x;
+            memcpy(dst, src, TILE_WIDTH);
+            dst += TILE_WIDTH;
+        }
+    } else {
+        // Packed mode: need to decode pixels
+        // For each row, extract the tile's pixel range from the packed source
+        for (int row = 0; row < TILE_HEIGHT; row++) {
+            uint8 *src_row = src_buffer + (src_start_y + row) * bpr;
+            
+            // Decode TILE_WIDTH pixels starting at src_start_x
+            for (int x = 0; x < TILE_WIDTH; x++) {
+                int pixel_x = src_start_x + x;
+                
+                switch (depth) {
+                    case VDEPTH_1BIT: {
+                        int byte_idx = pixel_x / 8;
+                        int bit_idx = 7 - (pixel_x % 8);
+                        *dst++ = (src_row[byte_idx] >> bit_idx) & 0x01;
+                        break;
+                    }
+                    case VDEPTH_2BIT: {
+                        int byte_idx = pixel_x / 4;
+                        int shift = 6 - ((pixel_x % 4) * 2);
+                        *dst++ = (src_row[byte_idx] >> shift) & 0x03;
+                        break;
+                    }
+                    case VDEPTH_4BIT: {
+                        int byte_idx = pixel_x / 2;
+                        int shift = (pixel_x % 2 == 0) ? 4 : 0;
+                        *dst++ = (src_row[byte_idx] >> shift) & 0x0F;
+                        break;
+                    }
+                    default:
+                        *dst++ = src_row[pixel_x];
+                        break;
+                }
+            }
+        }
     }
 }
 
@@ -683,6 +1091,8 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette)
  *  
  *  This writes directly to the MIPI-DSI DMA buffer which is continuously
  *  streamed to the display by hardware - no explicit push call needed.
+ *  
+ *  Supports all bit depths (1/2/4/8-bit) by decoding packed pixels first.
  */
 static void renderFrameToDSI(uint8 *src_buffer)
 {
@@ -694,23 +1104,42 @@ static void renderFrameToDSI(uint8 *src_buffer)
     memcpy(local_palette, palette_rgb565, 256 * sizeof(uint16));
     portEXIT_CRITICAL(&frame_spinlock);
     
+    // Get current depth and bytes per row (volatile, so copy locally)
+    video_depth depth = current_depth;
+    uint32 bpr = current_bytes_per_row;
+    
+    // Row decode buffer for packed pixel modes
+    // Static to avoid stack allocation on each call
+    static uint8 decoded_row[MAC_SCREEN_WIDTH];
+    
     // Process source buffer line by line
     // For each Mac line, write two display lines (2x vertical scaling)
     // For each Mac pixel, write two display pixels (2x horizontal scaling)
     
-    uint8 *src = src_buffer;
-    
     for (int y = 0; y < MAC_SCREEN_HEIGHT; y++) {
+        // Get source row pointer
+        uint8 *src_row = src_buffer + y * bpr;
+        
+        // Decode the row if needed (converts packed pixels to 8-bit indices)
+        uint8 *pixel_row;
+        if (depth == VDEPTH_8BIT) {
+            // 8-bit mode: direct access, no decoding needed
+            pixel_row = src_row;
+        } else {
+            // Packed mode: decode to 8-bit indices
+            decodePackedRow(src_row, decoded_row, MAC_SCREEN_WIDTH, depth);
+            pixel_row = decoded_row;
+        }
+        
         // Calculate destination row pointers for the two scaled rows
         uint16 *dst_row0 = dsi_framebuffer + (y * 2) * DISPLAY_WIDTH;
         uint16 *dst_row1 = dst_row0 + DISPLAY_WIDTH;
         
-        // Process 4 source pixels at a time for better memory bandwidth
+        // Process 4 decoded pixels at a time for better memory bandwidth
         int x = 0;
         for (; x < MAC_SCREEN_WIDTH - 3; x += 4) {
-            // Read 4 source pixels at once (32-bit read)
-            uint32 src4 = *((uint32 *)src);
-            src += 4;
+            // Read 4 decoded pixels at once (32-bit read from 8-bit indices)
+            uint32 src4 = *((uint32 *)(pixel_row + x));
             
             // Convert each pixel through palette and write 2x2 scaled
             uint16 c0 = local_palette[src4 & 0xFF];
@@ -736,7 +1165,7 @@ static void renderFrameToDSI(uint8 *src_buffer)
         
         // Handle remaining pixels (if width not divisible by 4)
         for (; x < MAC_SCREEN_WIDTH; x++) {
-            uint16 c = local_palette[*src++];
+            uint16 c = local_palette[pixel_row[x]];
             dst_row0[0] = c; dst_row0[1] = c;
             dst_row1[0] = c; dst_row1[1] = c;
             dst_row0 += 2;
@@ -1158,27 +1587,54 @@ bool VideoInit(bool classic)
     MacFrameSize = frame_buffer_size;
     MacFrameLayout = FLAYOUT_DIRECT;
     
-    // Initialize default palette (grayscale with Mac-style inversion)
-    // Classic Mac: 0=white, 255=black
-    for (int i = 0; i < 256; i++) {
-        uint8 gray = 255 - i;  // Invert for Mac palette
-        palette_rgb565[i] = rgb888_to_rgb565(gray, gray, gray);
-    }
+    // Initialize default palette for 8-bit mode (256 colors)
+    // This sets up a proper color palette instead of grayscale,
+    // so MacOS will default to "256 colors" instead of "256 grays"
+    initDefaultPalette(VDEPTH_8BIT);
     
-    // Set up video mode
-    current_mode.x = MAC_SCREEN_WIDTH;
-    current_mode.y = MAC_SCREEN_HEIGHT;
-    current_mode.resolution_id = 0x80;
-    current_mode.depth = MAC_SCREEN_DEPTH;
-    current_mode.bytes_per_row = MAC_SCREEN_WIDTH;  // 8-bit = 1 byte per pixel
-    current_mode.user_data = 0;
-    
-    // Create video mode vector
+    // Create video mode vector with all supported depths
+    // Per Basilisk II rules: lowest depth must be available in all resolutions,
+    // and if a resolution has a depth, it must have all lower depths too.
+    // We support 1/2/4/8 bit depths at 640x360.
     vector<video_mode> modes;
-    modes.push_back(current_mode);
+    video_mode mode;
+    mode.x = MAC_SCREEN_WIDTH;
+    mode.y = MAC_SCREEN_HEIGHT;
+    mode.resolution_id = 0x80;
+    mode.user_data = 0;
     
-    // Create monitor descriptor
-    the_monitor = new ESP32_monitor_desc(modes, MAC_SCREEN_DEPTH, 0x80);
+    // Add 1-bit mode (black and white)
+    mode.depth = VDEPTH_1BIT;
+    mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_1BIT);  // 80 bytes
+    modes.push_back(mode);
+    Serial.printf("[VIDEO] Added mode: 1-bit, %d bytes/row\n", mode.bytes_per_row);
+    
+    // Add 2-bit mode (4 colors)
+    mode.depth = VDEPTH_2BIT;
+    mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_2BIT);  // 160 bytes
+    modes.push_back(mode);
+    Serial.printf("[VIDEO] Added mode: 2-bit, %d bytes/row\n", mode.bytes_per_row);
+    
+    // Add 4-bit mode (16 colors)
+    mode.depth = VDEPTH_4BIT;
+    mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_4BIT);  // 320 bytes
+    modes.push_back(mode);
+    Serial.printf("[VIDEO] Added mode: 4-bit, %d bytes/row\n", mode.bytes_per_row);
+    
+    // Add 8-bit mode (256 colors) - this is our default
+    mode.depth = VDEPTH_8BIT;
+    mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_8BIT);  // 640 bytes
+    modes.push_back(mode);
+    Serial.printf("[VIDEO] Added mode: 8-bit, %d bytes/row\n", mode.bytes_per_row);
+    
+    // Store current mode info (8-bit default)
+    current_mode = mode;
+    
+    // Initialize the video state cache for 8-bit mode
+    updateVideoStateCache(VDEPTH_8BIT, mode.bytes_per_row);
+    
+    // Create monitor descriptor with 8-bit as default depth
+    the_monitor = new ESP32_monitor_desc(modes, VDEPTH_8BIT, 0x80);
     VideoMonitors.push_back(the_monitor);
     
     // Set Mac frame buffer base address
