@@ -103,8 +103,13 @@ static portMUX_TYPE frame_spinlock = portMUX_INITIALIZER_UNLOCKED;
 static TaskHandle_t video_task_handle = NULL;
 static volatile bool video_task_running = false;
 
-// Palette (256 RGB565 entries) - in regular RAM for fast access
+// Palette (256 RGB565 entries) - in internal SRAM for fast access during rendering
+// This is accessed for every pixel during video conversion
+#ifdef ARDUINO
+__attribute__((section(".dram0.data"))) static uint16 palette_rgb565[256];
+#else
 static uint16 palette_rgb565[256];
+#endif
 
 // Triple buffering for race-free dirty tracking
 // - mac_frame_buffer: CPU writes here (owned by emulation, can't change)
@@ -113,6 +118,10 @@ static uint16 palette_rgb565[256];
 // This eliminates race conditions where CPU writes during our compare/render
 static uint8 *snapshot_buffer = NULL;                        // Current frame snapshot (in PSRAM)
 static uint8 *compare_buffer = NULL;                         // Previous rendered frame (in PSRAM)
+// Dirty tile bitmap - in internal SRAM for fast access during video frame processing
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap of dirty tiles
 static volatile bool force_full_update = true;               // Force full update on first frame or palette change
 static int dirty_tile_count = 0;                             // Count of dirty tiles for threshold check
@@ -694,7 +703,7 @@ static void videoRenderTaskOptimized(void *param)
                 // Partial update: render and push only dirty tiles
                 renderAndPushDirtyTiles(snapshot_buffer, local_palette);
                 
-                D(bug("[VIDEO] Partial update: %d/%d tiles\n", dirty_tile_count, TOTAL_TILES));
+                // D(bug("[VIDEO] Partial update: %d/%d tiles\n", dirty_tile_count, TOTAL_TILES));
             }
             // else: no tiles dirty, nothing to do!
             

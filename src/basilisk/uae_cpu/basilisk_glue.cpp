@@ -71,21 +71,29 @@ extern bool quit_program;
 bool Init680x0(void)
 {
 #ifdef ARDUINO
-	// Allocate 256KB opcode table - prefer internal SRAM for ~10x faster access
-	// This table is accessed on EVERY instruction, so speed is critical
+	// Allocate 256KB opcode table
+	// This table is accessed once per instruction for opcode dispatch
+	// NOTE: mem_banks gets priority for internal SRAM since it's accessed more frequently
+	// (multiple memory operations per instruction)
 	if (cpufunctbl == NULL) {
-		// Try internal SRAM first (much faster than PSRAM)
-		cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-		if (cpufunctbl != NULL) {
-			write_log("Allocated cpufunctbl (256KB) in internal SRAM - FAST PATH\n");
-		} else {
-			// Fall back to PSRAM if internal SRAM not available
-			cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_SPIRAM);
+		// Report available internal SRAM before allocation
+		size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+		size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+		write_log("cpufunctbl allocation: need 256KB, internal SRAM has %d bytes free (largest: %d)\n",
+		          free_before, largest_block);
+		
+		// Allocate in PSRAM - mem_banks gets priority for internal SRAM
+		cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_SPIRAM);
+		if (cpufunctbl == NULL) {
+			// Last resort: try internal SRAM
+			cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
 			if (cpufunctbl == NULL) {
 				write_log("ERROR: Failed to allocate cpufunctbl!\n");
 				return false;
 			}
-			write_log("Allocated cpufunctbl (256KB) in PSRAM - fallback\n");
+			write_log("Allocated cpufunctbl (256KB) in internal SRAM\n");
+		} else {
+			write_log("Allocated cpufunctbl (256KB) in PSRAM (mem_banks has SRAM priority)\n");
 		}
 	}
 #endif

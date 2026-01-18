@@ -13,6 +13,7 @@
 #include <M5Unified.h>
 #include <M5GFX.h>
 #include <SD.h>
+#include <esp_heap_caps.h>
 
 // FreeRTOS for dual-core support and timers
 #include "freertos/FreeRTOS.h"
@@ -88,10 +89,14 @@ static bool emulator_running = false;
 static uint32 last_60hz_time = 0;
 static uint32 last_second_time = 0;
 static uint32 last_video_signal = 0;
+static uint32 last_disk_flush_time = 0;
 
 // Video signal interval (ms) - how often to signal video task
 // The video task runs at its own pace, this just triggers buffer swap
 #define VIDEO_SIGNAL_INTERVAL 67  // ~15 FPS
+
+// Disk flush interval (ms) - how often to flush write buffer to SD card
+#define DISK_FLUSH_INTERVAL 2000  // 2 seconds
 
 // FreeRTOS timer for 60Hz tick
 static TimerHandle_t timer_60hz = NULL;
@@ -328,10 +333,18 @@ static bool InitEmulator(void)
     Serial.println("  Dual-Core Optimized Edition");
     Serial.println("========================================\n");
     
-    // Print memory info
+    // Print memory info including internal SRAM breakdown
     Serial.printf("[MAIN] Free heap: %d bytes\n", ESP.getFreeHeap());
     Serial.printf("[MAIN] Free PSRAM: %d bytes\n", ESP.getFreePsram());
     Serial.printf("[MAIN] Total PSRAM: %d bytes\n", ESP.getPsramSize());
+    
+    // Report internal SRAM availability (critical for performance)
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t total_internal = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    size_t largest_internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    Serial.printf("[MAIN] Internal SRAM: %d/%d bytes free, largest block: %d bytes\n", 
+                  free_internal, total_internal, largest_internal);
+    
     Serial.printf("[MAIN] CPU Frequency: %d MHz\n", ESP.getCpuFreqMHz());
     Serial.printf("[MAIN] Running on Core: %d\n", xPortGetCoreID());
     
@@ -389,6 +402,14 @@ static bool InitEmulator(void)
     Serial.printf("[MAIN] Free heap after init: %d bytes\n", ESP.getFreeHeap());
     Serial.printf("[MAIN] Free PSRAM after init: %d bytes\n", ESP.getFreePsram());
     
+    // Report internal SRAM usage after all allocations
+    size_t free_internal_after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t total_internal_final = heap_caps_get_total_size(MALLOC_CAP_INTERNAL);
+    Serial.printf("[MAIN] Internal SRAM after init: %d/%d bytes free\n", 
+                  free_internal_after, total_internal_final);
+    Serial.printf("[MAIN] Internal SRAM used: %d bytes\n", 
+                  total_internal_final - free_internal_after);
+    
     return true;
 }
 
@@ -404,6 +425,7 @@ static void RunEmulator(void)
     last_60hz_time = millis();
     last_second_time = millis();
     last_video_signal = millis();
+    last_disk_flush_time = millis();
     
     // Start the 68k CPU - this function runs the emulation loop
     // It will return when QuitEmulator() is called
@@ -477,9 +499,12 @@ void basilisk_loop(void)
         VideoRefresh();  // Now just signals the video task, doesn't render
     }
     
-    // Periodic disk cache flush (every 2 seconds)
-    // This ensures dirty sectors are written to SD card without blocking writes
-    Sys_periodic_flush();
+    // Periodic disk write buffer flush (every 2 seconds)
+    // Time check done here to avoid function call overhead on every tick
+    if (current_time - last_disk_flush_time >= DISK_FLUSH_INTERVAL) {
+        last_disk_flush_time = current_time;
+        Sys_periodic_flush();
+    }
     
     // Poll for input events (touch panel, USB keyboard/mouse)
     // This updates M5.Touch state and forwards events to ADB

@@ -589,14 +589,29 @@ addrbank fram24_bank = {
 void memory_init(void)
 {
 #if defined(ARDUINO) && defined(SAVE_MEMORY_BANKS)
-	// Allocate 256KB memory bank pointer array in PSRAM
+	// Allocate 256KB memory bank pointer array
+	// This is accessed on EVERY memory operation (multiple times per instruction)
+	// Gets PRIORITY for internal SRAM since it's the hottest path
 	if (mem_banks == NULL) {
-		mem_banks = (addrbank **)heap_caps_malloc(65536 * sizeof(addrbank *), MALLOC_CAP_SPIRAM);
-		if (mem_banks == NULL) {
-			write_log("ERROR: Failed to allocate mem_banks in PSRAM!\n");
-			return;
+		// Report available internal SRAM before allocation
+		size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+		size_t largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+		write_log("mem_banks allocation: need 256KB, internal SRAM has %d bytes free (largest: %d)\n",
+		          free_before, largest_block);
+		
+		// Try internal SRAM first - this is the hottest path in the emulator
+		mem_banks = (addrbank **)heap_caps_malloc(65536 * sizeof(addrbank *), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+		if (mem_banks != NULL) {
+			write_log("Allocated mem_banks (256KB) in internal SRAM - FAST PATH\n");
+		} else {
+			// Fall back to PSRAM if internal SRAM not available
+			mem_banks = (addrbank **)heap_caps_malloc(65536 * sizeof(addrbank *), MALLOC_CAP_SPIRAM);
+			if (mem_banks == NULL) {
+				write_log("ERROR: Failed to allocate mem_banks!\n");
+				return;
+			}
+			write_log("WARNING: Allocated mem_banks (256KB) in PSRAM - slower fallback\n");
 		}
-		write_log("Allocated mem_banks (256KB) in PSRAM\n");
 	}
 #endif
 

@@ -38,27 +38,41 @@
 #include "thunks.h"
 #endif
 
-#define DEBUG 1
+#define DEBUG 0
 #include "debug.h"
 
 
 // Global variables
+// Mouse and keyboard state - in internal SRAM for fast access during ADB interrupt
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static int mouse_x = 0, mouse_y = 0;							// Mouse position
 static int old_mouse_x = 0, old_mouse_y = 0;
 static bool mouse_button[3] = {false, false, false};			// Mouse button states
 static bool old_mouse_button[3] = {false, false, false};
 static bool relative_mouse = false;
 
+// Key states matrix - accessed frequently during ADB processing
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static uint8 key_states[16];				// Key states (Mac keycodes)
 #define MATRIX(code) (key_states[code >> 3] & (1 << (~code & 7)))
 
 // Keyboard event buffer (Mac keycodes with up/down flag)
 const int KEY_BUFFER_SIZE = 16;
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static uint8 key_buffer[KEY_BUFFER_SIZE];
 static unsigned int key_read_ptr = 0, key_write_ptr = 0;
 
 // O2S: Button event buffer (Mac button with up/down flag) -> avoid to loose tap on a trackpad
 const int BUTTON_BUFFER_SIZE = 32;
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static uint8 button_buffer[BUTTON_BUFFER_SIZE];
 static unsigned int button_read_ptr = 0, button_write_ptr = 0;
 
@@ -396,11 +410,6 @@ void ADBInterrupt(void)
 	uint32 mouse_base = adb_base + 16;
 
 	if (relative_mouse) {
-        // Debug: log initial accumulated movement
-        if (mx != 0 || my != 0) {
-            D(bug("[ADB] Relative mouse: accumulated mx=%d, my=%d\n", mx, my));
-        }
-        
         while (mx != 0 || my != 0 || button_read_ptr != button_write_ptr) {
             if (button_read_ptr != button_write_ptr) {
                 // Read button event
@@ -423,9 +432,6 @@ void ADBInterrupt(void)
             } else if (dy < -64) {
                 dy = -64;
             }
-            
-            // Debug: log clamped values being sent
-            D(bug("[ADB] Sending dx=%d, dy=%d (raw mx=%d, my=%d)\n", dx, dy, mx, my));
             
             // Call mouse ADB handler with clamped values
             if (mouse_reg_3[1] == 4) {

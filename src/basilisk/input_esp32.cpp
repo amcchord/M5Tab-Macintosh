@@ -19,7 +19,7 @@
 #include <M5Unified.h>
 #include <EspUsbHost.h>
 
-#define DEBUG 1
+#define DEBUG 0
 #include "debug.h"
 
 // ============================================================================
@@ -34,6 +34,11 @@
 // https://usb.org/sites/default/files/hut1_4.pdf
 //
 
+// USB HID to Mac ADB keycode translation - in internal SRAM for fast lookup
+// Accessed on every keystroke
+#ifdef ARDUINO
+__attribute__((section(".dram0.data")))
+#endif
 static const uint8_t usb_to_mac_keycode[256] = {
     // 0x00-0x03: Reserved/Error codes
     0xFF, 0xFF, 0xFF, 0xFF,
@@ -232,6 +237,7 @@ static bool keyboard_enabled = true;
 
 // Touch state
 static bool touch_was_pressed = false;
+static bool touch_pending_click = false;  // Defer click until cursor has moved
 static int last_touch_x = 0;
 static int last_touch_y = 0;
 
@@ -288,11 +294,9 @@ public:
         if (pressed && !was_pressed) {
             modifier_state |= mask;
             ADBKeyDown(mac_keycode);
-            Serial.printf("[INPUT] Modifier DOWN: bit %d -> Mac 0x%02X\n", bit, mac_keycode);
         } else if (!pressed && was_pressed) {
             modifier_state &= ~mask;
             ADBKeyUp(mac_keycode);
-            Serial.printf("[INPUT] Modifier UP: bit %d -> Mac 0x%02X\n", bit, mac_keycode);
         }
     }
     
@@ -332,7 +336,6 @@ public:
                 uint8_t mac_code = usb_to_mac_keycode[old_key];
                 if (mac_code != 0xFF) {
                     ADBKeyUp(mac_code);
-                    Serial.printf("[INPUT] Key UP: USB 0x%02X -> Mac 0x%02X\n", old_key, mac_code);
                 }
             }
         }
@@ -355,13 +358,6 @@ public:
                 uint8_t mac_code = usb_to_mac_keycode[new_key];
                 if (mac_code != 0xFF) {
                     ADBKeyDown(mac_code);
-                    // Log with modifier state for debugging key chords
-                    Serial.printf("[INPUT] Key DOWN: USB 0x%02X -> Mac 0x%02X (mods: %s%s%s%s)\n", 
-                        new_key, mac_code,
-                        isCommandHeld() ? "Cmd+" : "",
-                        isControlHeld() ? "Ctrl+" : "",
-                        isAltHeld() ? "Opt+" : "",
-                        isShiftHeld() ? "Shift+" : "");
                 }
             }
         }
@@ -390,13 +386,6 @@ public:
         
         mouse_connected = true;
         
-        // Debug: print ALL raw bytes to understand the report format
-        Serial.printf("[INPUT] USB Mouse raw (%d bytes): [", transfer->actual_num_bytes);
-        for (int i = 0; i < transfer->actual_num_bytes && i < 16; i++) {
-            Serial.printf("%02x ", transfer->data_buffer[i]);
-        }
-        Serial.printf("] proto=%d\n", ep_data->bInterfaceProtocol);
-        
         // Try to detect report format based on data
         uint8_t buttons = 0;
         int16_t dx = 0;
@@ -415,25 +404,21 @@ public:
             buttons = transfer->data_buffer[1];
             dx = (int16_t)(transfer->data_buffer[3] | (transfer->data_buffer[4] << 8));
             dy = (int16_t)(transfer->data_buffer[5] | (transfer->data_buffer[6] << 8));
-            Serial.printf("[INPUT] Logitech format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
         } else if (transfer->actual_num_bytes >= 4 && transfer->data_buffer[0] <= 0x07) {
             // Standard boot protocol: buttons, X, Y, wheel
             buttons = transfer->data_buffer[0];
             dx = (int8_t)transfer->data_buffer[1];
             dy = (int8_t)transfer->data_buffer[2];
-            Serial.printf("[INPUT] Boot format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
         } else if (transfer->actual_num_bytes >= 5) {
             // Try format with report ID: ReportID, buttons, X, Y
             buttons = transfer->data_buffer[1];
             dx = (int8_t)transfer->data_buffer[2];
             dy = (int8_t)transfer->data_buffer[3];
-            Serial.printf("[INPUT] Report ID format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
         } else {
             // Fallback: assume boot protocol
             buttons = transfer->data_buffer[0];
             dx = (int8_t)transfer->data_buffer[1];
             dy = (int8_t)transfer->data_buffer[2];
-            Serial.printf("[INPUT] Fallback format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
         }
         
         // Handle button changes
@@ -442,30 +427,24 @@ public:
         if (changed & 0x01) {
             if (buttons & 0x01) {
                 ADBMouseDown(0);
-                Serial.println("[INPUT] USB Mouse: Left button DOWN");
             } else {
                 ADBMouseUp(0);
-                Serial.println("[INPUT] USB Mouse: Left button UP");
             }
         }
         
         if (changed & 0x02) {
             if (buttons & 0x02) {
                 ADBMouseDown(1);
-                Serial.println("[INPUT] USB Mouse: Right button DOWN");
             } else {
                 ADBMouseUp(1);
-                Serial.println("[INPUT] USB Mouse: Right button UP");
             }
         }
         
         if (changed & 0x04) {
             if (buttons & 0x04) {
                 ADBMouseDown(2);
-                Serial.println("[INPUT] USB Mouse: Middle button DOWN");
             } else {
                 ADBMouseUp(2);
-                Serial.println("[INPUT] USB Mouse: Middle button UP");
             }
         }
         
@@ -536,12 +515,6 @@ public:
         err = usb_host_transfer_submit_control(clientHandle, transfer);
         if (err != ESP_OK) {
             Serial.printf("[INPUT] Failed to submit LED control transfer: %x\n", err);
-        } else {
-            Serial.printf("[INPUT] LED state sent: 0x%02X (Num:%d Caps:%d Scroll:%d)\n", 
-                leds, 
-                (leds & 0x01) ? 1 : 0,
-                (leds & 0x02) ? 1 : 0,
-                (leds & 0x04) ? 1 : 0);
         }
         
         // Note: transfer will be freed when it completes
@@ -596,15 +569,21 @@ static void processTouchInput(void)
             ADBSetRelMouseMode(false);
             touch_was_pressed = true;
             
-            // Move cursor to touch position
+            // Move cursor to touch position first
             ADBMouseMoved(mac_x, mac_y);
             
-            // Immediately press mouse button for responsive feel
-            ADBMouseDown(0);
-            
-            Serial.printf("[INPUT] Touch DOWN at (%d, %d) -> Mac (%d, %d)\n", 
-                  touch_x, touch_y, mac_x, mac_y);
+            // Defer the click until next poll cycle to ensure cursor has moved
+            // This prevents the "click before move" issue where the Mac processes
+            // the button event before the cursor position update takes effect
+            touch_pending_click = true;
         } else {
+            // Check if we have a pending click from the previous cycle
+            if (touch_pending_click) {
+                // Now that cursor position has been processed, send the click
+                ADBMouseDown(0);
+                touch_pending_click = false;
+            }
+            
             // Touch is being held/dragged
             // Only update if position changed significantly (reduce noise)
             int dx = mac_x - last_touch_x;
@@ -619,10 +598,14 @@ static void processTouchInput(void)
     } else {
         if (touch_was_pressed) {
             // Touch just released
+            // If there was a pending click that never got sent (very quick tap),
+            // send click and release together
+            if (touch_pending_click) {
+                ADBMouseDown(0);
+                touch_pending_click = false;
+            }
             ADBMouseUp(0);
             touch_was_pressed = false;
-            
-            Serial.println("[INPUT] Touch UP");
         }
     }
 }
@@ -647,7 +630,6 @@ static void updateKeyboardLEDs(void)
     
     // Update keyboard if state changed
     if (current_leds != last_led_state) {
-        Serial.printf("[INPUT] LED state changed: 0x%02X -> 0x%02X\n", last_led_state, current_leds);
         usbHost->setKeyboardLEDs(current_leds);
         last_led_state = current_leds;
     }
@@ -670,6 +652,7 @@ bool InputInit(void)
     
     // Initialize touch state
     touch_was_pressed = false;
+    touch_pending_click = false;
     last_touch_x = 0;
     last_touch_y = 0;
     
@@ -701,6 +684,7 @@ void InputExit(void)
     
     // Release any held buttons
     if (touch_was_pressed) {
+        touch_pending_click = false;
         ADBMouseUp(0);
         touch_was_pressed = false;
     }
@@ -737,6 +721,9 @@ void InputSetTouchEnabled(bool enabled)
 {
     touch_enabled = enabled;
     if (!enabled && touch_was_pressed) {
+        if (touch_pending_click) {
+            touch_pending_click = false;
+        }
         ADBMouseUp(0);
         touch_was_pressed = false;
     }
