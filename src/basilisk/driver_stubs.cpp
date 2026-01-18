@@ -139,12 +139,77 @@ void timer_current_time(uint64 &time) {
     time = (uint64)tv.tv_sec * 1000000 + tv.tv_usec;
 }
 
+// Build date/time as base for Mac clock
+// ESP32 doesn't have RTC, so we use build time as the starting point
+static time_t get_build_timestamp(void) {
+    // Parse __DATE__ (format: "Jan 17 2026") and __TIME__ (format: "14:30:00")
+    static time_t build_time = 0;
+    static bool initialized = false;
+    
+    if (!initialized) {
+        const char *date_str = __DATE__;  // "Mmm DD YYYY"
+        const char *time_str = __TIME__;  // "HH:MM:SS"
+        
+        // Month lookup
+        const char *months[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+        int month = 0;
+        for (int i = 0; i < 12; i++) {
+            if (strncmp(date_str, months[i], 3) == 0) {
+                month = i;
+                break;
+            }
+        }
+        
+        int day = atoi(date_str + 4);
+        int year = atoi(date_str + 7);
+        int hour = atoi(time_str);
+        int minute = atoi(time_str + 3);
+        int second = atoi(time_str + 6);
+        
+        struct tm tm_build;
+        memset(&tm_build, 0, sizeof(tm_build));
+        tm_build.tm_year = year - 1900;
+        tm_build.tm_mon = month;
+        tm_build.tm_mday = day;
+        tm_build.tm_hour = hour;
+        tm_build.tm_min = minute;
+        tm_build.tm_sec = second;
+        
+        build_time = mktime(&tm_build);
+        initialized = true;
+        
+        Serial.printf("[TIME] Build timestamp: %s %s -> %ld\n", date_str, time_str, (long)build_time);
+    }
+    
+    return build_time;
+}
+
 // Return current date/time as Mac seconds since 1904
 uint32 TimerDateTime(void) {
     // Mac epoch is Jan 1, 1904
     // Unix epoch is Jan 1, 1970
     // Difference is 2082844800 seconds
+    
+    // Get time from ESP32 - if not set via NTP, use build time as base
     time_t t = time(NULL);
+    
+    // If time appears to be near Unix epoch (before year 2020), use build time instead
+    // This handles ESP32 without RTC or NTP
+    if (t < 1577836800) {  // Jan 1, 2020
+        // Use build time + seconds since boot
+        static time_t boot_time = 0;
+        static uint32_t boot_millis = 0;
+        
+        if (boot_time == 0) {
+            boot_time = get_build_timestamp();
+            boot_millis = millis();
+        }
+        
+        // Add elapsed time since boot
+        t = boot_time + ((millis() - boot_millis) / 1000);
+    }
+    
     return (uint32)(t + 2082844800UL);
 }
 

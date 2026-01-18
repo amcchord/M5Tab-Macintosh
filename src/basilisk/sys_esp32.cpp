@@ -94,6 +94,178 @@ void SysAddSerialPrefs(void)
 }
 
 /*
+ *  Repair HFS volume - fix common corruption issues from improper shutdown
+ *  Called before opening disk images to fix boot problems.
+ *  
+ *  HFS Master Directory Block (MDB) is at offset 1024 (block 2):
+ *  - drSigWord at offset 0: signature 0x4244 ('BD') for HFS
+ *  - drAtrb at offset 10: volume attributes (big-endian)
+ *  - drFndrInfo at offset 92: Finder info (32 bytes)
+ *    - drFndrInfo[0] at offset 92: System Folder CNID (blessed folder for boot)
+ *    - drFndrInfo[2] at offset 100: Open folder CNID (should be 0)
+ *    - drFndrInfo[3] at offset 104: Reserved (should be 0)
+ *  
+ *  The Alternate MDB (AMDB) at the end of the disk preserves original values.
+ *  AMDB is at second-to-last 512-byte block.
+ *    
+ *  Common corruption patterns after improper shutdown:
+ *  1. drAtrb changes from original value (often 0x0100) to 0x4000
+ *  2. drFndrInfo[2] gets set to open folder CNID (should be 0)
+ *  3. These can cause "blinking question mark" boot failure
+ *  
+ *  Solution: Restore drAtrb from AMDB and clear drFndrInfo[2]
+ */
+static void Sys_repair_hfs_volume(const char *path)
+{
+    // Only repair .dsk files (not floppies or ISOs)
+    if (strstr(path, ".dsk") == NULL && strstr(path, ".DSK") == NULL) {
+        return;
+    }
+    
+    Serial.printf("[SYS] Checking HFS volume: %s\n", path);
+    
+    // Open file for read/write
+    File f = SD.open(path, "r+b");
+    if (!f) {
+        Serial.printf("[SYS] Cannot open for repair check: %s\n", path);
+        return;
+    }
+    
+    // Get file size to locate Alternate MDB
+    size_t file_size = f.size();
+    if (file_size < 1024 + 512) {
+        Serial.println("[SYS] File too small to be HFS volume");
+        f.close();
+        return;
+    }
+    
+    // Read main MDB (first 128 bytes is enough for what we need)
+    uint8_t mdb[128];
+    if (!f.seek(1024)) {
+        Serial.println("[SYS] Failed to seek to MDB");
+        f.close();
+        return;
+    }
+    
+    if (f.read(mdb, 128) != 128) {
+        Serial.println("[SYS] Failed to read MDB");
+        f.close();
+        return;
+    }
+    
+    // Check HFS signature (0x4244 = 'BD')
+    uint16_t signature = (mdb[0] << 8) | mdb[1];
+    if (signature != 0x4244) {
+        Serial.printf("[SYS] Not an HFS volume (sig=0x%04X)\n", signature);
+        f.close();
+        return;
+    }
+    
+    // Read key MDB fields
+    uint16_t drAtrb = (mdb[10] << 8) | mdb[11];
+    uint32_t drFndrInfo0 = (mdb[92] << 24) | (mdb[93] << 16) | (mdb[94] << 8) | mdb[95];   // System Folder CNID
+    uint32_t drFndrInfo2 = (mdb[100] << 24) | (mdb[101] << 16) | (mdb[102] << 8) | mdb[103]; // Open folder CNID
+    uint32_t drFndrInfo3 = (mdb[104] << 24) | (mdb[105] << 16) | (mdb[106] << 8) | mdb[107]; // Reserved
+    
+    Serial.printf("[SYS] HFS MDB: drAtrb=0x%04X, SystemFolder=%lu, OpenFolder=%lu, FndrInfo3=%lu\n", 
+                  drAtrb, (unsigned long)drFndrInfo0, (unsigned long)drFndrInfo2, (unsigned long)drFndrInfo3);
+    
+    // Calculate Alternate MDB offset (second-to-last 512-byte block)
+    size_t amdb_offset = ((file_size / 512) - 2) * 512;
+    Serial.printf("[SYS] AMDB at offset %u\n", (unsigned)amdb_offset);
+    
+    // Read drAtrb from Alternate MDB (original value from disk creation)
+    uint8_t amdb_atrb[2];
+    uint16_t original_drAtrb = drAtrb;  // Default to current if AMDB read fails
+    
+    if (f.seek(amdb_offset + 10) && f.read(amdb_atrb, 2) == 2) {
+        // Verify AMDB has valid HFS signature first
+        uint8_t amdb_sig[2];
+        if (f.seek(amdb_offset) && f.read(amdb_sig, 2) == 2) {
+            uint16_t amdb_signature = (amdb_sig[0] << 8) | amdb_sig[1];
+            if (amdb_signature == 0x4244) {
+                original_drAtrb = (amdb_atrb[0] << 8) | amdb_atrb[1];
+                Serial.printf("[SYS] AMDB drAtrb=0x%04X (original value)\n", original_drAtrb);
+            } else {
+                Serial.printf("[SYS] AMDB signature invalid (0x%04X), skipping AMDB restore\n", amdb_signature);
+            }
+        }
+    } else {
+        Serial.println("[SYS] Could not read AMDB, skipping drAtrb restore");
+    }
+    
+    bool needs_repair = false;
+    
+    // Check 1: Restore drAtrb from AMDB if different
+    // The AMDB preserves the original drAtrb from when the disk was created/formatted
+    if (drAtrb != original_drAtrb) {
+        Serial.printf("[SYS] Restoring drAtrb from AMDB: 0x%04X -> 0x%04X\n", drAtrb, original_drAtrb);
+        mdb[10] = (original_drAtrb >> 8) & 0xFF;
+        mdb[11] = original_drAtrb & 0xFF;
+        needs_repair = true;
+    }
+    
+    // Check 2: Clear drFndrInfo[2] (open folder CNID) if set
+    // This field indicates which folder was open - should be 0 for clean boot
+    if (drFndrInfo2 != 0) {
+        Serial.printf("[SYS] Clearing open folder CNID: %lu -> 0\n", (unsigned long)drFndrInfo2);
+        mdb[100] = 0;
+        mdb[101] = 0;
+        mdb[102] = 0;
+        mdb[103] = 0;
+        needs_repair = true;
+    }
+    
+    // Check 3: Clear drFndrInfo[3] if corrupted (should be 0 for classic Mac OS)
+    if (drFndrInfo3 != 0) {
+        Serial.printf("[SYS] Clearing drFndrInfo[3]: %lu -> 0\n", (unsigned long)drFndrInfo3);
+        mdb[104] = 0;
+        mdb[105] = 0;
+        mdb[106] = 0;
+        mdb[107] = 0;
+        needs_repair = true;
+    }
+    
+    // Check 4: Warn if System Folder CNID is 0 (volume not bootable)
+    if (drFndrInfo0 == 0) {
+        Serial.println("[SYS] WARNING: System Folder CNID is 0 - volume is not bootable");
+    }
+    
+    if (needs_repair) {
+        Serial.println("[SYS] Repairing HFS volume...");
+        
+        bool success = true;
+        
+        // Write drAtrb at offset 10
+        if (!f.seek(1024 + 10) || f.write(&mdb[10], 2) != 2) {
+            Serial.println("[SYS] Failed to write drAtrb!");
+            success = false;
+        }
+        
+        // Write drFndrInfo[2] at offset 100 (clear open folder)
+        if (success && (!f.seek(1024 + 100) || f.write(&mdb[100], 4) != 4)) {
+            Serial.println("[SYS] Failed to write FndrInfo[2]!");
+            success = false;
+        }
+        
+        // Write drFndrInfo[3] at offset 104 (clear corruption)
+        if (success && (!f.seek(1024 + 104) || f.write(&mdb[104], 4) != 4)) {
+            Serial.println("[SYS] Failed to write FndrInfo[3]!");
+            success = false;
+        }
+        
+        if (success) {
+            f.flush();
+            Serial.println("[SYS] Volume repaired successfully!");
+        }
+    } else {
+        Serial.println("[SYS] Volume appears healthy");
+    }
+    
+    f.close();
+}
+
+/*
  *  Open a file/device
  *  
  *  For read-write access, we use "r+b" mode which opens an existing file
@@ -108,6 +280,11 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
     }
     
     Serial.printf("[SYS] Sys_open: %s (requested read_only=%d, is_cdrom=%d)\n", name, read_only, is_cdrom);
+    
+    // Repair HFS volume before opening (only for read-write disks, not CD-ROMs)
+    if (!read_only && !is_cdrom) {
+        Sys_repair_hfs_volume(name);
+    }
     
     // Allocate file handle
     file_handle *fh = new file_handle;

@@ -367,26 +367,80 @@ public:
         }
     }
     
-    // Called when USB mouse moves
-    void onMouseMove(hid_mouse_report_t report) override {
+    // Override onReceive to properly parse mouse HID reports
+    // The EspUsbHost library has wrong byte offsets for mouse parsing
+    void onReceive(const usb_transfer_t *transfer) override {
+        // Get endpoint data to check if this is a mouse
+        endpoint_data_t *ep_data = &endpoint_data_list[(transfer->bEndpointAddress & 0x0F)];
+        
+        // Handle HID mice - check for HID class and mouse protocol
+        // Don't require boot subclass since many mice use report protocol
+        if (ep_data->bInterfaceClass != 0x03) {  // HID class
+            return;
+        }
+        
+        // Skip if this looks like a keyboard (protocol 1)
+        if (ep_data->bInterfaceProtocol == 0x01) {
+            return;
+        }
+        
+        if (transfer->actual_num_bytes < 3) {
+            return;
+        }
+        
         mouse_connected = true;
         
-        // Set relative mouse mode for USB mouse
-        ADBSetRelMouseMode(true);
-        
-        // Forward relative movement to ADB
-        if (report.x != 0 || report.y != 0) {
-            ADBMouseMoved(report.x, report.y);
+        // Debug: print ALL raw bytes to understand the report format
+        Serial.printf("[INPUT] USB Mouse raw (%d bytes): [", transfer->actual_num_bytes);
+        for (int i = 0; i < transfer->actual_num_bytes && i < 16; i++) {
+            Serial.printf("%02x ", transfer->data_buffer[i]);
         }
-    }
-    
-    // Called when USB mouse buttons change
-    void onMouseButtons(hid_mouse_report_t report, uint8_t last_buttons) override {
-        uint8_t changed = report.buttons ^ last_buttons;
+        Serial.printf("] proto=%d\n", ep_data->bInterfaceProtocol);
         
-        // Left button (bit 0)
+        // Try to detect report format based on data
+        uint8_t buttons = 0;
+        int16_t dx = 0;
+        int16_t dy = 0;
+        
+        // Logitech MX Master and similar mice use this format:
+        // Byte 0: Report ID (0x02 for mouse movement)
+        // Byte 1: Buttons
+        // Byte 2: Padding/unknown (usually 0x00)
+        // Bytes 3-4: X movement (16-bit signed, little endian)
+        // Bytes 5-6: Y movement (16-bit signed, little endian)
+        // Bytes 7-8: Wheel or other data
+        
+        if (transfer->actual_num_bytes >= 7 && transfer->data_buffer[0] == 0x02) {
+            // Logitech extended format with report ID
+            buttons = transfer->data_buffer[1];
+            dx = (int16_t)(transfer->data_buffer[3] | (transfer->data_buffer[4] << 8));
+            dy = (int16_t)(transfer->data_buffer[5] | (transfer->data_buffer[6] << 8));
+            Serial.printf("[INPUT] Logitech format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
+        } else if (transfer->actual_num_bytes >= 4 && transfer->data_buffer[0] <= 0x07) {
+            // Standard boot protocol: buttons, X, Y, wheel
+            buttons = transfer->data_buffer[0];
+            dx = (int8_t)transfer->data_buffer[1];
+            dy = (int8_t)transfer->data_buffer[2];
+            Serial.printf("[INPUT] Boot format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
+        } else if (transfer->actual_num_bytes >= 5) {
+            // Try format with report ID: ReportID, buttons, X, Y
+            buttons = transfer->data_buffer[1];
+            dx = (int8_t)transfer->data_buffer[2];
+            dy = (int8_t)transfer->data_buffer[3];
+            Serial.printf("[INPUT] Report ID format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
+        } else {
+            // Fallback: assume boot protocol
+            buttons = transfer->data_buffer[0];
+            dx = (int8_t)transfer->data_buffer[1];
+            dy = (int8_t)transfer->data_buffer[2];
+            Serial.printf("[INPUT] Fallback format: buttons=%02x dx=%d dy=%d\n", buttons, dx, dy);
+        }
+        
+        // Handle button changes
+        uint8_t changed = buttons ^ usb_mouse_buttons;
+        
         if (changed & 0x01) {
-            if (report.buttons & 0x01) {
+            if (buttons & 0x01) {
                 ADBMouseDown(0);
                 Serial.println("[INPUT] USB Mouse: Left button DOWN");
             } else {
@@ -395,9 +449,8 @@ public:
             }
         }
         
-        // Right button (bit 1)
         if (changed & 0x02) {
-            if (report.buttons & 0x02) {
+            if (buttons & 0x02) {
                 ADBMouseDown(1);
                 Serial.println("[INPUT] USB Mouse: Right button DOWN");
             } else {
@@ -406,9 +459,8 @@ public:
             }
         }
         
-        // Middle button (bit 2)
         if (changed & 0x04) {
-            if (report.buttons & 0x04) {
+            if (buttons & 0x04) {
                 ADBMouseDown(2);
                 Serial.println("[INPUT] USB Mouse: Middle button DOWN");
             } else {
@@ -417,7 +469,22 @@ public:
             }
         }
         
-        usb_mouse_buttons = report.buttons;
+        usb_mouse_buttons = buttons;
+        
+        // Handle movement
+        if (dx != 0 || dy != 0) {
+            ADBSetRelMouseMode(true);
+            ADBMouseMoved(dx, dy);
+        }
+    }
+    
+    // Keep these as empty overrides to prevent the buggy EspUsbHost parsing
+    void onMouseMove(hid_mouse_report_t report) override {
+        // Handled in onReceive instead
+    }
+    
+    void onMouseButtons(hid_mouse_report_t report, uint8_t last_buttons) override {
+        // Handled in onReceive instead
     }
     
     // Called when USB device is disconnected

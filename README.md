@@ -202,24 +202,30 @@ Download the latest release from GitHub:
 
 **[📥 Download Latest Release](https://github.com/amcchord/M5Tab-Macintosh/releases/latest)**
 
-Flash using `esptool.py`:
+Flash the single merged binary using `esptool.py`:
 
 ```bash
 # Install esptool if you don't have it
 pip install esptool
 
-# Flash all three binary files (connect Tab5 via USB-C)
-esptool.py --chip esp32p4 --port /dev/ttyACM0 --baud 921600 \
+# Flash the merged binary (connect Tab5 via USB-C)
+esptool.py --chip esp32p4 \
+    --port /dev/ttyACM0 \
+    --baud 921600 \
     write_flash \
-    0x0 bootloader.bin \
-    0x10000 firmware.bin \
-    0x8000 partitions.bin
+    0x0 M5Tab-Macintosh-v2.0.1.bin
 ```
 
 **Note**: Replace `/dev/ttyACM0` with your actual port:
-- **macOS**: `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*`
-- **Windows**: `COM3` (or similar)
+- **macOS**: `/dev/cu.usbmodem*` or `/dev/tty.usbmodem*`  
+  (Run `ls /dev/cu.*` to find available ports)
+- **Windows**: `COM3` (or similar, check Device Manager)
 - **Linux**: `/dev/ttyACM0` or `/dev/ttyUSB0`
+
+**Troubleshooting Flash Issues**:
+- If flashing fails, try a lower baud rate: `--baud 460800` or `--baud 115200`
+- If the device isn't detected, hold the **BOOT** button while pressing **RESET** to enter bootloader mode
+- On some systems you may need to run with `sudo` or add your user to the `dialout` group
 
 #### Option 2: Build from Source
 

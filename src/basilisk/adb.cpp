@@ -38,7 +38,7 @@
 #include "thunks.h"
 #endif
 
-#define DEBUG 0
+#define DEBUG 1
 #include "debug.h"
 
 
@@ -396,6 +396,11 @@ void ADBInterrupt(void)
 	uint32 mouse_base = adb_base + 16;
 
 	if (relative_mouse) {
+        // Debug: log initial accumulated movement
+        if (mx != 0 || my != 0) {
+            D(bug("[ADB] Relative mouse: accumulated mx=%d, my=%d\n", mx, my));
+        }
+        
         while (mx != 0 || my != 0 || button_read_ptr != button_write_ptr) {
             if (button_read_ptr != button_write_ptr) {
                 // Read button event
@@ -403,18 +408,37 @@ void ADBInterrupt(void)
                 button_read_ptr = (button_read_ptr + 1) % BUTTON_BUFFER_SIZE;
                 mouse_button[button & 0x3] = (button & 0x80) ? false : true;
             }
-            // Call mouse ADB handler
+            
+            // Clamp movement to signed 7-bit range (-64 to +63)
+            // This ensures we don't lose movement when accumulation exceeds one packet
+            int dx = mx;
+            int dy = my;
+            if (dx > 63) {
+                dx = 63;
+            } else if (dx < -64) {
+                dx = -64;
+            }
+            if (dy > 63) {
+                dy = 63;
+            } else if (dy < -64) {
+                dy = -64;
+            }
+            
+            // Debug: log clamped values being sent
+            D(bug("[ADB] Sending dx=%d, dy=%d (raw mx=%d, my=%d)\n", dx, dy, mx, my));
+            
+            // Call mouse ADB handler with clamped values
             if (mouse_reg_3[1] == 4) {
                 // Extended mouse protocol
                 WriteMacInt8(tmp_data, 3);
-                WriteMacInt8(tmp_data + 1, (my & 0x7f) | (mouse_button[0] ? 0 : 0x80));
-                WriteMacInt8(tmp_data + 2, (mx & 0x7f) | (mouse_button[1] ? 0 : 0x80));
-                WriteMacInt8(tmp_data + 3, ((my >> 3) & 0x70) | ((mx >> 7) & 0x07) | (mouse_button[2] ? 0x08 : 0x88));
+                WriteMacInt8(tmp_data + 1, (dy & 0x7f) | (mouse_button[0] ? 0 : 0x80));
+                WriteMacInt8(tmp_data + 2, (dx & 0x7f) | (mouse_button[1] ? 0 : 0x80));
+                WriteMacInt8(tmp_data + 3, ((dy >> 3) & 0x70) | ((dx >> 7) & 0x07) | (mouse_button[2] ? 0x08 : 0x88));
             } else {
                 // 100/200 dpi mode
                 WriteMacInt8(tmp_data, 2);
-                WriteMacInt8(tmp_data + 1, (my & 0x7f) | (mouse_button[0] ? 0 : 0x80));
-                WriteMacInt8(tmp_data + 2, (mx & 0x7f) | (mouse_button[1] ? 0 : 0x80));
+                WriteMacInt8(tmp_data + 1, (dy & 0x7f) | (mouse_button[0] ? 0 : 0x80));
+                WriteMacInt8(tmp_data + 2, (dx & 0x7f) | (mouse_button[1] ? 0 : 0x80));
             }
             r.a[0] = tmp_data;
             r.a[1] = ReadMacInt32(mouse_base);
@@ -426,8 +450,10 @@ void ADBInterrupt(void)
             old_mouse_button[0] = mouse_button[0];
             old_mouse_button[1] = mouse_button[1];
             old_mouse_button[2] = mouse_button[2];
-            mx = 0;
-            my = 0;
+            
+            // Subtract only what was sent, preserving remainder for next iteration
+            mx -= dx;
+            my -= dy;
         }
 
 	} else {
