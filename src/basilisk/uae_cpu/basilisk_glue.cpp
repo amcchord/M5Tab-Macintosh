@@ -82,18 +82,19 @@ bool Init680x0(void)
 		write_log("cpufunctbl allocation: need 256KB, internal SRAM has %d bytes free (largest: %d)\n",
 		          free_before, largest_block);
 		
-		// Allocate in PSRAM - mem_banks gets priority for internal SRAM
-		cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_SPIRAM);
-		if (cpufunctbl == NULL) {
-			// Last resort: try internal SRAM
-			cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+		// Try internal SRAM first - cpufunctbl is accessed once per instruction for dispatch
+		// This is the hot path for CPU emulation
+		cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+		if (cpufunctbl != NULL) {
+			write_log("Allocated cpufunctbl (256KB) in internal SRAM - FAST DISPATCH\n");
+		} else {
+			// Fall back to PSRAM if internal SRAM not available
+			cpufunctbl = (cpuop_func **)heap_caps_malloc(65536 * sizeof(cpuop_func *), MALLOC_CAP_SPIRAM);
 			if (cpufunctbl == NULL) {
 				write_log("ERROR: Failed to allocate cpufunctbl!\n");
 				return false;
 			}
-			write_log("Allocated cpufunctbl (256KB) in internal SRAM\n");
-		} else {
-			write_log("Allocated cpufunctbl (256KB) in PSRAM (mem_banks has SRAM priority)\n");
+			write_log("Allocated cpufunctbl (256KB) in PSRAM (fallback)\n");
 		}
 	}
 #endif
