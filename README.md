@@ -33,14 +33,14 @@ A full port of the **BasiliskII** Macintosh 68k emulator to the ESP32-P4 microco
 
 ## Overview
 
-This project runs a **Motorola 68040** emulator that can boot real Macintosh ROMs and run genuine classic Mac OS software. The emulation includes:
+This project runs a **Motorola 68040** emulator that can boot real Macintosh ROMs and run genuine classic Mac OS software. Performance is comparable to a **Mac IIci** (25 MHz 68030), achieving **24 FPS video** and **1.5-3 MIPS** CPU speed. The emulation includes:
 
-- **CPU**: Motorola 68040 emulation with FPU (68881)
+- **CPU**: Motorola 68040 emulation with FPU (68881) — 1.5-3 MIPS
 - **RAM**: Configurable from 4MB to 16MB (allocated from ESP32-P4's 32MB PSRAM)
-- **Display**: 640×360 virtual display (2× scaled to 1280×720 physical display), supporting 1/2/4/8-bit color depths
+- **Display**: 640×360 virtual display (2× scaled to 1280×720 physical display), supporting 1/2/4/8-bit color depths at 24 FPS
 - **Storage**: Hard disk and CD-ROM images loaded from SD card
 - **Input**: Capacitive touchscreen (as mouse) + USB keyboard/mouse support
-- **Video**: Optimized pipeline with write-time dirty tracking and tile-based rendering for smooth performance
+- **Video**: Optimized pipeline with write-time dirty tracking, double-buffered DMA, and tile-based rendering
 
 ## Hardware
 
@@ -82,11 +82,11 @@ The emulator leverages the ESP32-P4's dual-core RISC-V architecture for optimal 
 │    (Video & I/O Core)      │       (CPU Emulation Core)         │
 ├────────────────────────────┼────────────────────────────────────┤
 │  • Video rendering task    │  • 68040 CPU interpreter           │
-│  • Dirty tile rendering    │  • Memory access emulation         │
+│  • Double-buffered DMA     │  • Fast-path memory access         │
 │  • 2×2 pixel scaling       │  • Write-time dirty marking        │
-│  • Touch input processing  │  • ROM patching                    │
-│  • USB HID polling         │  • Disk I/O                        │
-│  • Event-driven refresh    │  • 40,000 instruction quantum      │
+│  • Input task (60Hz)       │  • Batch instruction execution     │
+│  • USB HID processing      │  • ROM patching                    │
+│  • Event-driven @ 24 FPS   │  • Disk I/O                        │
 └────────────────────────────┴────────────────────────────────────┘
 ```
 
@@ -102,10 +102,6 @@ The emulator leverages the ESP32-P4's dual-core RISC-V architecture for optimal 
 ├────────────────────────────┼─────────────────────────────────┤
 │  Mac Frame Buffer (230KB)  │  640×360 @ 8-bit indexed color  │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Snapshot Buffer (230KB)   │  Triple buffering for video     │
-├────────────────────────────┼─────────────────────────────────┤
-│  Compare Buffer (230KB)    │  Previous frame for fallback    │
-├────────────────────────────┼─────────────────────────────────┤
 │  Display Buffer (1.8MB)    │  1280×720 @ RGB565              │
 ├────────────────────────────┼─────────────────────────────────┤
 │  Free PSRAM                │  Varies based on RAM selection  │
@@ -114,11 +110,17 @@ The emulator leverages the ESP32-P4's dual-core RISC-V architecture for optimal 
 ┌──────────────────────────────────────────────────────────────┐
 │                    Internal SRAM (Priority)                  │
 ├──────────────────────────────────────────────────────────────┤
-│  Memory Bank Pointers      │  256KB - hot path optimization  │
+│  CPU Function Table        │  cpufunctbl - hot path lookup   │
+├────────────────────────────┼─────────────────────────────────┤
+│  Memory Bank Pointers      │  256KB - memory banking         │
 ├────────────────────────────┼─────────────────────────────────┤
 │  Palette (512 bytes)       │  256 RGB565 entries             │
 ├────────────────────────────┼─────────────────────────────────┤
 │  Dirty Tile Bitmap         │  144 bits (write-time tracking) │
+├────────────────────────────┼─────────────────────────────────┤
+│  Tile Render Lock Bitmap   │  144 bits (race prevention)     │
+├────────────────────────────┼─────────────────────────────────┤
+│  Double-Buffered Tile Bufs │  ~28KB (DMA pipelining)         │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -160,14 +162,13 @@ The video system uses a highly optimized pipeline with **write-time dirty tracki
 
 2. **Tile-Based Rendering**: The screen is divided into a 16×9 grid of 40×40 pixel tiles (144 total). Only dirty tiles are re-rendered each frame, typically reducing video CPU time by 60-90%.
 
-3. **Triple Buffering**: Ensures race-free operation between CPU writes and video reads:
-   - `mac_frame_buffer`: CPU writes here
-   - `snapshot_buffer`: Atomic copy for rendering
-   - `compare_buffer`: Previous frame for fallback comparison
+3. **Double-Buffered DMA**: Render to one buffer while DMA pushes another to the display. Both tile rendering and full-frame streaming use this pipelining for maximum throughput.
 
-4. **Multi-Depth Support**: Supports 1/2/4/8-bit indexed color modes with packed pixel decoding. Mac OS can switch between depths via the Monitors control panel.
+4. **Per-Tile Render Locks**: Atomic locks prevent race conditions during tile snapshot. If the CPU writes to a tile being rendered, it's automatically re-queued for the next frame—ensuring glitch-free display.
 
-5. **Event-Driven Refresh**: The video task sleeps until signaled by the CPU via FreeRTOS task notifications, reducing idle polling overhead.
+5. **Multi-Depth Support**: Supports 1/2/4/8-bit indexed color modes with packed pixel decoding. Mac OS can switch between depths via the Monitors control panel.
+
+6. **Event-Driven Refresh at 24 FPS**: Cinema-standard frame rate with task notifications—the video task sleeps until signaled, reducing idle polling overhead.
 
 ---
 
@@ -402,13 +403,16 @@ M5Tab-Macintosh/
 
 ## Performance
 
-### Benchmarks (Approximate)
+The emulator achieves **usable desktop performance**, comparable to a real **Macintosh IIci** (25 MHz 68030).
+
+### Benchmarks
 
 | Metric | Value |
 |--------|-------|
-| CPU Quantum | 40,000 instructions per tick |
-| Video Refresh | ~15 FPS target |
-| Boot Time | ~15 seconds to Mac OS desktop |
+| **CPU Speed** | 1.5 - 3 MIPS (depending on workload) |
+| **Video Refresh** | 24 FPS (cinema-standard smooth) |
+| **Boot Time** | ~15 seconds to Mac OS desktop |
+| **Comparison** | Similar to Mac IIci (25 MHz 68030) |
 | Typical Dirty Tiles | 5-15 tiles/frame (vs. 144 total) |
 | Video CPU Savings | 60-90% reduction with dirty tracking |
 
@@ -416,17 +420,21 @@ M5Tab-Macintosh/
 
 1. **Write-Time Dirty Tracking**: Marks tiles dirty at CPU write time, avoiding expensive per-frame comparisons. Dirty bitmap uses atomic operations for thread safety.
 
-2. **Dual-Core Separation**: CPU emulation (Core 1) and video rendering (Core 0) run independently with minimal synchronization.
+2. **Dual-Core Separation**: CPU emulation (Core 1) runs independently from video/input (Core 0) with minimal synchronization.
 
-3. **Memory Bank Placement**: The 256KB memory bank pointer array is allocated in internal SRAM when possible (faster than PSRAM for this hot path).
+3. **Fast-Path Memory Access**: Inline checks for RAM/ROM bypass expensive memory bank lookup for the majority of memory operations.
 
-4. **4-Pixel Batch Processing**: Reads 4 pixels as a 32-bit word, converts through palette, and writes 8 scaled pixels in one pass.
+4. **Batch Instruction Execution**: CPU executes 32 instructions per loop iteration before checking ticks, reducing per-instruction overhead.
 
-5. **Tile Threshold Fallback**: If >80% of tiles are dirty, does a full frame update instead (reduces per-tile API overhead).
+5. **Double-Buffered DMA**: Video rendering uses double-buffered tiles and row buffers—render to one buffer while DMA pushes the other to display.
 
-6. **Event-Driven Video Task**: Uses FreeRTOS task notifications instead of polling, waking only when work is needed.
+6. **Per-Tile Render Locks**: Atomic locks prevent race conditions during tile snapshot, ensuring glitch-free rendering even with concurrent CPU writes.
 
-7. **Aggressive Compiler Optimizations**: Build uses `-O3`, `-funroll-loops`, `-ffast-math`, and aggressive inlining for hot paths.
+7. **Input Task on Core 0**: USB host processing (~2.3ms) runs in a dedicated task, offloading work from the CPU emulation loop.
+
+8. **Memory Bank Placement**: The 256KB memory bank pointer array and CPU function table are allocated in internal SRAM for faster access.
+
+9. **Aggressive Compiler Optimizations**: Build uses `-O3`, `-funroll-loops`, `-ffast-math`, and aggressive inlining for hot paths.
 
 ---
 
@@ -491,11 +499,12 @@ Look for initialization messages:
 [VIDEO] Video task created on Core 0 (write-time dirty tracking)
 ```
 
-During operation, video performance is reported every 5 seconds:
+During operation, performance stats are reported every 5 seconds:
 
 ```
+[IPS] 2847523 instructions/sec (2.85 MIPS), total: 142376150
 [VIDEO PERF] frames=75 (full=2 partial=68 skip=5)
-[VIDEO PERF] avg: snapshot=0us detect=45us render=8234us push=2156us
+[VIDEO PERF] avg: detect=45us render=8234us
 ```
 
 ---

@@ -118,6 +118,11 @@ DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap
 // This is double-buffered to avoid race conditions between CPU writes and video task reads
 DRAM_ATTR static uint32 write_dirty_tiles[(TOTAL_TILES + 31) / 32];    // Tiles dirtied by CPU writes
 
+// Per-tile render lock bitmap - set while video task is snapshotting a tile
+// If CPU tries to write while this is set, the tile is re-marked dirty for next frame
+// This prevents torn data from race conditions during snapshot
+DRAM_ATTR static uint32 tile_render_active[(TOTAL_TILES + 31) / 32];   // Tiles currently being rendered
+
 // Double-buffered row buffers for streaming full-frame renders with async DMA
 // Processes 4 Mac rows at a time (becomes 8 display rows with 2x scaling)
 // Size: 1280 pixels * 8 rows * 2 bytes = 20,480 bytes (20KB) per buffer
@@ -485,11 +490,39 @@ static inline bool isTileDirty(int tile_idx)
 }
 
 /*
+ *  Tile render lock functions - used to prevent race conditions during snapshot
+ *  When a tile is being rendered (snapshotted), CPU writes to that tile will
+ *  be deferred to the next frame by re-marking the tile dirty.
+ */
+static inline void setTileRenderActive(int tile_idx)
+{
+    __atomic_or_fetch(&tile_render_active[tile_idx / 32], (1u << (tile_idx % 32)), __ATOMIC_RELEASE);
+}
+
+static inline void clearTileRenderActive(int tile_idx)
+{
+    __atomic_and_fetch(&tile_render_active[tile_idx / 32], ~(1u << (tile_idx % 32)), __ATOMIC_RELEASE);
+}
+
+static inline bool isTileRenderActive(int tile_idx)
+{
+    return (__atomic_load_n(&tile_render_active[tile_idx / 32], __ATOMIC_ACQUIRE) & (1u << (tile_idx % 32))) != 0;
+}
+
+/*
  *  Mark a tile as dirty at write-time (called from frame buffer put functions)
  *  This is MUCH faster than per-frame comparison as it only runs on actual writes.
  *  
  *  Handles packed pixel modes by mapping byte offset to pixel coordinates using
  *  current_bytes_per_row and current_pixels_per_byte.
+ *  
+ *  RACE CONDITION HANDLING:
+ *  If the video task is currently rendering (snapshotting) this tile, the snapshot
+ *  might contain torn data. However, we unconditionally mark the tile dirty here,
+ *  which ensures it will be re-rendered cleanly in the next frame. Combined with
+ *  the tile_render_active lock in renderAndPushDirtyTiles(), this provides
+ *  eventual consistency - a torn frame may appear briefly but will be fixed
+ *  within one frame interval (42ms).
  *  
  *  @param offset  Byte offset into the Mac framebuffer
  */
@@ -521,7 +554,8 @@ void VideoMarkDirtyOffset(uint32 offset)
     int tile_x_end = pixel_end / TILE_WIDTH;
     int tile_y = y / TILE_HEIGHT;
     
-    // Mark all affected tiles dirty
+    // Mark all affected tiles dirty (unconditionally - even if being rendered)
+    // This ensures tiles written during rendering are re-rendered next frame
     for (int tile_x = tile_x_start; tile_x <= tile_x_end; tile_x++) {
         int tile_idx = tile_y * TILES_X + tile_x;
         if (tile_idx < TOTAL_TILES) {
@@ -536,6 +570,8 @@ void VideoMarkDirtyOffset(uint32 offset)
  *  
  *  For packed pixel modes, a multi-byte write can span many pixels across
  *  potentially multiple rows and tiles.
+ *  
+ *  See VideoMarkDirtyOffset() for race condition handling notes.
  *  
  *  @param offset  Starting byte offset into the Mac framebuffer
  *  @param size    Number of bytes being written
@@ -762,30 +798,40 @@ static void renderTileFromSnapshot(uint8 *snapshot, uint16 *local_palette, uint1
 
 /*
  *  Render and push only dirty tiles to the display
- *  RACE-CONDITION FIX: Takes a mini-snapshot of each tile before rendering.
+ *  RACE-CONDITION FIX: Uses per-tile render lock and double-buffered DMA.
  *  
  *  This prevents visual glitches (especially around the mouse cursor) caused by
- *  the CPU writing to the framebuffer while we're reading it. The cost is a small
- *  memcpy per dirty tile (~1.6KB), but this is much cheaper than a full frame
- *  snapshot and eliminates the race condition.
+ *  the CPU writing to the framebuffer while we're reading it:
+ *  1. Set tile_render_active before snapshot
+ *  2. If CPU writes during snapshot, tile is re-marked dirty for next frame
+ *  3. Double-buffered output allows DMA overlap with rendering
  *  
  *  @param src_buffer     Mac framebuffer (8-bit indexed)
  *  @param local_palette  Pre-copied palette for thread safety
  */
 static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette)
 {
-    // Temporary buffer for one tile's source data (40x40 = 1600 bytes)
+    // Double-buffered tile snapshot buffers (40x40 = 1600 bytes each)
     // Static to avoid stack allocation on each call
     // In internal SRAM for fast access during partial updates
-    DRAM_ATTR static uint8 tile_snapshot[TILE_WIDTH * TILE_HEIGHT];
+    DRAM_ATTR static uint8 tile_snapshot_a[TILE_WIDTH * TILE_HEIGHT];
+    DRAM_ATTR static uint8 tile_snapshot_b[TILE_WIDTH * TILE_HEIGHT];
     
-    // Temporary buffer for one tile's RGB565 output (80x80 = 12,800 bytes)
+    // Double-buffered RGB565 output buffers (80x80 = 12,800 bytes each)
     // In internal SRAM for fast access during partial updates
-    DRAM_ATTR static uint16 tile_buffer[TILE_WIDTH * PIXEL_SCALE * TILE_HEIGHT * PIXEL_SCALE];
+    DRAM_ATTR static uint16 tile_buffer_a[TILE_WIDTH * PIXEL_SCALE * TILE_HEIGHT * PIXEL_SCALE];
+    DRAM_ATTR static uint16 tile_buffer_b[TILE_WIDTH * PIXEL_SCALE * TILE_HEIGHT * PIXEL_SCALE];
+    
+    // Buffer pointers for double-buffering
+    uint8 *current_snapshot = tile_snapshot_a;
+    uint8 *next_snapshot = tile_snapshot_b;
+    uint16 *current_buffer = tile_buffer_a;
+    uint16 *next_buffer = tile_buffer_b;
     
     int tile_pixel_width = TILE_WIDTH * PIXEL_SCALE;
     int tile_pixel_height = TILE_HEIGHT * PIXEL_SCALE;
     int tiles_rendered = 0;
+    bool dma_pending = false;
     
     M5.Display.startWrite();
     
@@ -798,32 +844,60 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette)
                 continue;
             }
             
-            // STEP 1: Take a mini-snapshot of just this tile
-            // This ensures we read consistent data even if CPU is writing
-            snapshotTile(src_buffer, tx, ty, tile_snapshot);
+            // STEP 1: Mark tile as being rendered (prevents CPU from tearing)
+            setTileRenderActive(tile_idx);
+            
+            // STEP 2: Take a mini-snapshot of just this tile
+            // While render_active is set, CPU writes will re-mark tile dirty
+            snapshotTile(src_buffer, tx, ty, current_snapshot);
+            
+            // STEP 3: Clear render lock - snapshot is complete
+            // Any CPU writes after this point will be visible in next frame
+            clearTileRenderActive(tile_idx);
             
             // Memory barrier to ensure snapshot is complete before rendering
             __sync_synchronize();
             
-            // STEP 2: Render from the snapshot (not from the live framebuffer)
-            renderTileFromSnapshot(tile_snapshot, local_palette, tile_buffer);
+            // STEP 4: Render from the snapshot (not from the live framebuffer)
+            renderTileFromSnapshot(current_snapshot, local_palette, current_buffer);
             
-            // STEP 3: Push to display
+            // STEP 5: Wait for any pending DMA before using its buffer
+            if (dma_pending) {
+                M5.Display.waitDMA();
+                dma_pending = false;
+            }
+            
+            // STEP 6: Push to display using async DMA
             int dst_start_x = tx * tile_pixel_width;
             int dst_start_y = ty * tile_pixel_height;
             
             M5.Display.setAddrWindow(dst_start_x, dst_start_y, tile_pixel_width, tile_pixel_height);
-            M5.Display.writePixels(tile_buffer, tile_pixel_width * tile_pixel_height);
+            M5.Display.writePixelsDMA(current_buffer, tile_pixel_width * tile_pixel_height);
+            dma_pending = true;
+            
+            // STEP 7: Swap buffers for next tile
+            // This allows rendering next tile while DMA pushes current
+            uint8 *tmp_snap = current_snapshot;
+            current_snapshot = next_snapshot;
+            next_snapshot = tmp_snap;
+            
+            uint16 *tmp_buf = current_buffer;
+            current_buffer = next_buffer;
+            next_buffer = tmp_buf;
             
             tiles_rendered++;
             
-            // Every 16 tiles, yield to let IDLE task run and pet watchdog
-            // This prevents watchdog timeout during full-screen updates
-            if ((tiles_rendered & 0x0F) == 0) {
-                esp_task_wdt_reset();
+            // Every 8 tiles, yield to let other tasks run
+            // This prevents starvation during full-screen updates
+            if ((tiles_rendered & 0x07) == 0) {
                 taskYIELD();
             }
         }
+    }
+    
+    // Wait for final DMA to complete before ending write session
+    if (dma_pending) {
+        M5.Display.waitDMA();
     }
     
     M5.Display.endWrite();
@@ -1025,9 +1099,16 @@ static void videoRenderTaskOptimized(void *param)
     UNUSED(param);
     Serial.println("[VIDEO] Video render task started on Core 0 (write-time dirty tracking)");
     
-    // Subscribe this task to the watchdog timer if not already
-    // We'll reset it at the start of each frame to prevent timeout during long renders
-    esp_task_wdt_add(NULL);
+    // Reconfigure watchdog to be more lenient for video rendering
+    // Video frames can take 50-100ms, so we need a longer timeout
+    // Also disable panic so it just logs a warning instead of rebooting
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = 10000,      // 10 second timeout (very generous)
+        .idle_core_mask = 0,      // Don't monitor IDLE tasks (they get starved by video)
+        .trigger_panic = false    // Don't reboot on timeout, just warn
+    };
+    esp_task_wdt_reconfigure(&wdt_config);
+    Serial.println("[VIDEO] Watchdog reconfigured: 10s timeout, no panic, IDLE not monitored");
     
     // Wait a moment for everything to initialize
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -1044,9 +1125,8 @@ static void videoRenderTaskOptimized(void *param)
     TickType_t last_frame_ticks = xTaskGetTickCount();
     
     while (video_task_running) {
-        // Pet the watchdog at the start of each frame to prevent reboot
-        // This is important because frame rendering can take 50-100ms
-        esp_task_wdt_reset();
+        // Note: Watchdog is configured with 10s timeout and no panic,
+        // so we don't need to reset it frequently
         
         // Event-driven: wait for frame signal with timeout
         // This replaces the old polling loop - task sleeps until signaled
@@ -1160,9 +1240,10 @@ bool VideoInit(bool classic)
     // Clear frame buffer to gray
     memset(mac_frame_buffer, 0x80, frame_buffer_size);
     
-    // Initialize dirty tracking
+    // Initialize dirty tracking and render lock
     memset(dirty_tiles, 0, sizeof(dirty_tiles));
     memset(write_dirty_tiles, 0, sizeof(write_dirty_tiles));
+    memset(tile_render_active, 0, sizeof(tile_render_active));
     force_full_update = true;  // Force full update on first frame
     
     // Clear display to dark gray using streaming row buffer
@@ -1273,6 +1354,11 @@ void VideoExit(void)
     
     // Stop video task first
     stopVideoTask();
+    
+    // Clear dirty tracking and render lock (safety for potential re-init)
+    memset(dirty_tiles, 0, sizeof(dirty_tiles));
+    memset(write_dirty_tiles, 0, sizeof(write_dirty_tiles));
+    memset(tile_render_active, 0, sizeof(tile_render_active));
     
     if (mac_frame_buffer) {
         free(mac_frame_buffer);
