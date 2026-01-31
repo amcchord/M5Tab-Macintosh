@@ -9,6 +9,7 @@ docs/
 # Build directories
 .build/
 build/
+release/
 
 # IDE settings
 .vscode/.browse.c_cpp.db*

@@ -304,6 +304,26 @@ pio run --target upload
 pio device monitor
 ```
 
+#### Creating Release Binaries
+
+When you build with `pio run`, a merged binary is automatically created in the `release/` directory. This binary includes the bootloader, partition table, and application - ready for single-command flashing.
+
+For versioned releases, use the release script:
+
+```bash
+# Create a versioned release binary
+./scripts/build_release.sh v2.9
+
+# Output: release/M5Tab-Macintosh-v2.9.bin
+```
+
+The release binary can be flashed with a single esptool command:
+
+```bash
+esptool --chip esp32p4 --port /dev/cu.usbmodem* \
+    --baud 921600 write-flash 0x0 release/M5Tab-Macintosh-v2.9.bin
+```
+
 ---
 
 ## Boot GUI
