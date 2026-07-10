@@ -21,6 +21,7 @@
 #include "video.h"
 
 #include "board.h"
+#include "board_keyboard.h"
 #include "board_touch.h"
 #include "board_display.h"
 #include "touch_overlay.h"
@@ -32,6 +33,7 @@
 #include <class/hid/hid.h>
 #include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "hid_descriptor.h"
@@ -68,6 +70,7 @@
 #define USB_POLL_DIV_IDLE     4   // Poll USB every 64ms when idle (16ms * 4)
 
 static TaskHandle_t input_task_handle = NULL;
+static SemaphoreHandle_t input_task_stopped = NULL;
 static volatile bool input_task_running = false;
 
 // ============================================================================
@@ -286,7 +289,7 @@ static bool keyboard_enabled = true;
 static bool touch_enabled = true;
 
 // USB device connection state
-static bool keyboard_connected = false;
+static bool usb_keyboard_connected = false;
 static bool mouse_connected = false;
 
 // USB mouse button state
@@ -295,10 +298,50 @@ static uint8_t usb_mouse_buttons = 0;
 // Right-click to Control+Click translation state (Mac OS 8 contextual menus)
 static bool right_click_ctrl_injected = false;
 
-// Keyboard modifier state bitmask for proper left/right handling
-// Bit 0: Left Control, Bit 1: Left Shift, Bit 2: Left Alt, Bit 3: Left GUI
-// Bit 4: Right Control, Bit 5: Right Shift, Bit 6: Right Alt, Bit 7: Right GUI
-static uint8_t kb_modifier_state = 0;
+/* Physical-key claims from every input source, indexed by final Mac ADB
+ * keycode. USB slots, the Tab5 Keyboard matrix, and synthetic right-click
+ * Control each own an independent claim. ADB sees a down event only on the
+ * first claim and an up event only when the last claim is released, so two
+ * keyboards can hold the same key/modifier without releasing each other. */
+DRAM_ATTR static uint8_t adb_key_claims[128] = {};
+
+static void claimAdbKey(uint8_t mac_keycode)
+{
+    if (mac_keycode >= 0x80) return;
+    uint8_t &count = adb_key_claims[mac_keycode];
+    if (count == 0) {
+        ADBKeyDown(mac_keycode);
+    }
+    if (count != 0xFF) {
+        ++count;
+    } else {
+        Serial.printf("[INPUT] WARN: ADB key 0x%02X claim count saturated\n",
+                      mac_keycode);
+    }
+}
+
+static void releaseAdbKey(uint8_t mac_keycode)
+{
+    if (mac_keycode >= 0x80) return;
+    uint8_t &count = adb_key_claims[mac_keycode];
+    if (count == 0) {
+        return;  // Ignore orphan releases from a reset/disconnected source.
+    }
+    --count;
+    if (count == 0) {
+        ADBKeyUp(mac_keycode);
+    }
+}
+
+extern "C" void InputKeyDown(uint8_t mac_keycode)
+{
+    claimAdbKey(mac_keycode);
+}
+
+extern "C" void InputKeyUp(uint8_t mac_keycode)
+{
+    releaseAdbKey(mac_keycode);
+}
 
 // LED state tracking
 static uint8_t last_led_state = 0;
@@ -351,52 +394,32 @@ static MultiDeviceUsbHost *usbHost = NULL;
 // Keyboard Input Processing
 // ============================================================================
 
-static uint8_t getCombinedModifierMask(uint8_t bit) {
-    uint8_t base_bit = bit & 0x03;
-    return (1 << base_bit) | (1 << (base_bit + 4));
-}
-
-// Only sends key down when FIRST of left/right is pressed,
-// only sends key up when BOTH left and right are released.
-static void handleModifierBit(uint8_t bit, bool pressed, uint8_t mac_keycode) {
-    uint8_t mask = (1 << bit);
-    uint8_t combined_mask = getCombinedModifierMask(bit);
-    bool was_pressed = (kb_modifier_state & mask) != 0;
-    bool either_was_pressed = (kb_modifier_state & combined_mask) != 0;
-
-    if (pressed && !was_pressed) {
-        kb_modifier_state |= mask;
-        if (!either_was_pressed) {
-            ADBKeyDown(mac_keycode);
-        }
-    } else if (!pressed && was_pressed) {
-        kb_modifier_state &= ~mask;
-        bool either_still_pressed = (kb_modifier_state & combined_mask) != 0;
-        if (!either_still_pressed) {
-            ADBKeyUp(mac_keycode);
-        }
-    }
-}
-
 static bool isControlPhysicallyHeld() {
-    return (kb_modifier_state & 0x11) != 0;
+    return adb_key_claims[0x36] != 0;
 }
 
 static void processKeyboardReport(hid_keyboard_report_t *report,
-                                   hid_keyboard_report_t *last_report) {
-    if (!keyboard_enabled) return;
+                                   hid_keyboard_report_t *last_report,
+                                   bool force_release = false) {
+    if (!keyboard_enabled && !force_release) return;
 
-    keyboard_connected = true;
+    static const uint8_t modifier_to_mac[8] = {
+        0x36, 0x38, 0x3A, 0x37,  // left Ctrl, Shift, Alt/Option, GUI/Command
+        0x36, 0x38, 0x3A, 0x37   // right variants
+    };
 
-    // Process modifier keys FIRST (important for key chords)
-    handleModifierBit(0, (report->modifier & 0x01) != 0, 0x36);  // Left Control
-    handleModifierBit(1, (report->modifier & 0x02) != 0, 0x38);  // Left Shift
-    handleModifierBit(2, (report->modifier & 0x04) != 0, 0x3A);  // Left Alt/Option
-    handleModifierBit(3, (report->modifier & 0x08) != 0, 0x37);  // Left GUI/Command
-    handleModifierBit(4, (report->modifier & 0x10) != 0, 0x36);  // Right Control
-    handleModifierBit(5, (report->modifier & 0x20) != 0, 0x38);  // Right Shift
-    handleModifierBit(6, (report->modifier & 0x40) != 0, 0x3A);  // Right Alt/Option
-    handleModifierBit(7, (report->modifier & 0x80) != 0, 0x37);  // Right GUI/Command
+    // Every USB slot owns its own last report, so modifiers held by two
+    // keyboards remain independent claims even when they map to one ADB key.
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+        const uint8_t mask = (uint8_t)(1U << bit);
+        const bool was_pressed = (last_report->modifier & mask) != 0;
+        const bool is_pressed  = (report->modifier & mask) != 0;
+        if (is_pressed && !was_pressed) {
+            claimAdbKey(modifier_to_mac[bit]);
+        } else if (!is_pressed && was_pressed) {
+            releaseAdbKey(modifier_to_mac[bit]);
+        }
+    }
 
     // Process key releases BEFORE key presses (important for key transitions)
     for (int i = 0; i < 6; i++) {
@@ -414,7 +437,7 @@ static void processKeyboardReport(hid_keyboard_report_t *report,
         if (!still_pressed) {
             uint8_t mac_code = usb_to_mac_keycode[old_key];
             if (mac_code != 0xFF) {
-                ADBKeyUp(mac_code);
+                releaseAdbKey(mac_code);
             }
         }
     }
@@ -435,10 +458,178 @@ static void processKeyboardReport(hid_keyboard_report_t *report,
         if (!was_pressed) {
             uint8_t mac_code = usb_to_mac_keycode[new_key];
             if (mac_code != 0xFF) {
-                ADBKeyDown(mac_code);
+                claimAdbKey(mac_code);
             }
         }
     }
+}
+
+// ============================================================================
+// Official M5Stack Tab5 Keyboard (Ext.Port1 I2C matrix)
+// ============================================================================
+
+struct Tab5HidMapping {
+    uint8_t usage;
+    uint8_t modifiers;
+};
+
+/* Official US-layout matrix mapping published in M5Unit-KEYBOARD. Normal
+ * mode is used instead of the module's lossy one-key HID event mode so every
+ * matrix key and modifier has an independent press/release claim. */
+static const Tab5HidMapping tab5_base_map[70] = {
+    // Row 0: Esc 1 2 3 4 5 6 7 8 9 0 - + Del
+    {0x29,0}, {0x1E,0}, {0x1F,0}, {0x20,0}, {0x21,0}, {0x22,0}, {0x23,0},
+    {0x24,0}, {0x25,0}, {0x26,0}, {0x27,0}, {0x2D,0}, {0x2E,0x02}, {0x4C,0},
+    // Row 1: ` ! @ # $ % ^ & * ( ) [ ] backslash
+    {0x35,0}, {0x1E,0x02}, {0x1F,0x02}, {0x20,0x02}, {0x21,0x02},
+    {0x22,0x02}, {0x23,0x02}, {0x24,0x02}, {0x25,0x02}, {0x26,0x02},
+    {0x27,0x02}, {0x2F,0}, {0x30,0}, {0x31,0},
+    // Row 2: Tab q w e r t y u i o p ; ' Backspace
+    {0x2B,0}, {0x14,0}, {0x1A,0}, {0x08,0}, {0x15,0}, {0x17,0}, {0x1C,0},
+    {0x18,0}, {0x0C,0}, {0x12,0}, {0x13,0}, {0x33,0}, {0x34,0}, {0x2A,0},
+    // Row 3: Sym Aa a s d f g h j k l Up _ Enter
+    {0,0}, {0,0}, {0x04,0}, {0x16,0}, {0x07,0}, {0x09,0}, {0x0A,0},
+    {0x0B,0}, {0x0D,0}, {0x0E,0}, {0x0F,0}, {0x52,0}, {0x2D,0x02}, {0x28,0},
+    // Row 4: Ctrl Alt z x c v b n m . Left Down Right Space
+    {0,0}, {0,0}, {0x1D,0}, {0x1B,0}, {0x06,0}, {0x19,0}, {0x05,0},
+    {0x11,0}, {0x10,0}, {0x37,0}, {0x50,0}, {0x51,0}, {0x4F,0}, {0x2C,0}
+};
+
+static_assert(sizeof(tab5_base_map) / sizeof(tab5_base_map[0]) == 70,
+              "Tab5 keyboard matrix must contain 70 keys");
+
+static Tab5HidMapping tab5Mapping(uint8_t row, uint8_t col, bool sym)
+{
+    const uint8_t index = (uint8_t)(row * 14U + col);
+    Tab5HidMapping mapping = tab5_base_map[index];
+    if (!sym) return mapping;
+
+    // Sym-layer differences from the base printing on the physical keys.
+    switch (index) {
+        case 14: mapping = {0x35,0x02}; break; // ` -> ~
+        case 15: mapping = {0x38,0x02}; break; // ! -> ?
+        case 22: mapping = {0x38,0x00}; break; // * -> /
+        case 23: mapping = {0x36,0x02}; break; // ( -> <
+        case 24: mapping = {0x37,0x02}; break; // ) -> >
+        case 25: mapping = {0x2F,0x02}; break; // [ -> {
+        case 26: mapping = {0x30,0x02}; break; // ] -> }
+        case 27: mapping = {0x31,0x02}; break; // backslash -> |
+        case 39: mapping = {0x33,0x02}; break; // ; -> :
+        case 40: mapping = {0x34,0x02}; break; // ' -> "
+        case 54: mapping = {0x2E,0x00}; break; // _ -> =
+        case 65: mapping = {0x36,0x00}; break; // . -> ,
+        default: break;
+    }
+    return mapping;
+}
+
+struct Tab5KeyBinding {
+    bool active;
+    uint8_t mac_keycode;
+    uint8_t forced_modifiers;
+};
+
+static Tab5KeyBinding tab5_bindings[70] = {};
+static bool tab5_sym_active = false;
+static bool tab5_keyboard_connected = false;
+
+static const uint8_t hid_modifier_to_mac[8] = {
+    0x36, 0x38, 0x3A, 0x37, 0x36, 0x38, 0x3A, 0x37
+};
+
+static void applyForcedModifiers(uint8_t modifiers, bool pressed)
+{
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+        if ((modifiers & (1U << bit)) == 0) continue;
+        if (pressed) claimAdbKey(hid_modifier_to_mac[bit]);
+        else releaseAdbKey(hid_modifier_to_mac[bit]);
+    }
+}
+
+static bool isTab5ModifierIndex(uint8_t index)
+{
+    return index == 42 || index == 43 || index == 56 || index == 57;
+}
+
+static void releaseTab5Binding(uint8_t index)
+{
+    Tab5KeyBinding &binding = tab5_bindings[index];
+    if (!binding.active) return;
+    if (binding.mac_keycode != 0xFF) {
+        releaseAdbKey(binding.mac_keycode);
+    }
+    applyForcedModifiers(binding.forced_modifiers, false);
+    binding = {};
+}
+
+static void releaseAllTab5Bindings(void)
+{
+    // Release ordinary keys before their physical/synthetic modifiers.
+    for (uint8_t i = 0; i < 70; ++i) {
+        if (!isTab5ModifierIndex(i)) releaseTab5Binding(i);
+    }
+    for (uint8_t i = 0; i < 70; ++i) {
+        if (isTab5ModifierIndex(i)) releaseTab5Binding(i);
+    }
+    tab5_sym_active = false;
+}
+
+static void processTab5KeyboardEvent(const BoardKeyboardEvent &event)
+{
+    if (event.row >= 5 || event.col >= 14) return;
+    const uint8_t index = (uint8_t)(event.row * 14U + event.col);
+    Tab5KeyBinding &binding = tab5_bindings[index];
+
+    if (event.pressed == binding.active) {
+        return; // Duplicate down or orphan up from a stale/replayed FIFO event.
+    }
+    if (!event.pressed) {
+        releaseTab5Binding(index);
+        if (index == 42) tab5_sym_active = false;
+        return;
+    }
+
+    binding.active = true;
+    binding.mac_keycode = 0xFF;
+    binding.forced_modifiers = 0;
+
+    switch (index) {
+        case 42: // Sym selects the alternate printed layer; it is not a Mac key.
+            tab5_sym_active = true;
+            return;
+        case 43: binding.mac_keycode = 0x38; break; // Aa -> Shift
+        case 56: binding.mac_keycode = 0x36; break; // Ctrl
+        case 57: binding.mac_keycode = 0x3A; break; // Alt -> Option
+        default: {
+            const Tab5HidMapping mapping = tab5Mapping(event.row, event.col,
+                                                       tab5_sym_active);
+            const uint8_t mac = usb_to_mac_keycode[mapping.usage];
+            if (mapping.usage == 0 || mac == 0xFF) {
+                binding = {};
+                return;
+            }
+            binding.mac_keycode = mac;
+            binding.forced_modifiers = mapping.modifiers;
+            applyForcedModifiers(binding.forced_modifiers, true);
+            break;
+        }
+    }
+    claimAdbKey(binding.mac_keycode);
+}
+
+static void pollTab5Keyboard(void)
+{
+    BoardKeyboardEvent event = {};
+    int event_budget = 32;
+    while (event_budget-- > 0 && BoardKeyboard_Poll(&event)) {
+        processTab5KeyboardEvent(event);
+    }
+
+    const bool connected_now = BoardKeyboard_IsConnected();
+    if (tab5_keyboard_connected && !connected_now) {
+        releaseAllTab5Bindings();
+    }
+    tab5_keyboard_connected = connected_now;
 }
 
 // ============================================================================
@@ -508,12 +699,12 @@ static void processMouseReport(const usb_transfer_t *transfer, EndpointInfo *ep_
 
     if (right_now && !right_was) {
         if (!isControlPhysicallyHeld()) {
-            ADBKeyDown(0x36);  // Control
+            claimAdbKey(0x36);  // synthetic Control claim
             right_click_ctrl_injected = true;
         }
     } else if (!right_now && right_was) {
         if (right_click_ctrl_injected) {
-            ADBKeyUp(0x36);
+            releaseAdbKey(0x36);
             right_click_ctrl_injected = false;
         }
     }
@@ -561,13 +752,13 @@ static void processMouseReport(const usb_transfer_t *transfer, EndpointInfo *ep_
         if (notches > 4)  notches = 4;
         if (notches < -4) notches = -4;
         while (notches > 0) {
-            ADBKeyDown(mac_arrow_up);
-            ADBKeyUp(mac_arrow_up);
+            claimAdbKey(mac_arrow_up);
+            releaseAdbKey(mac_arrow_up);
             notches--;
         }
         while (notches < 0) {
-            ADBKeyDown(mac_arrow_down);
-            ADBKeyUp(mac_arrow_down);
+            claimAdbKey(mac_arrow_down);
+            releaseAdbKey(mac_arrow_down);
             notches++;
         }
     }
@@ -694,6 +885,16 @@ public:
         usb_host_transfer_free(transfer);
     }
 
+    void releaseAllKeyboardClaims() {
+        hid_keyboard_report_t empty = {};
+        for (int i = 0; i < MAX_USB_DEVICES; ++i) {
+            UsbDeviceSlot *dev = &devices[i];
+            if (!dev->active || !dev->has_keyboard) continue;
+            processKeyboardReport(&empty, &dev->last_kb_report, true);
+            dev->last_kb_report = {};
+        }
+    }
+
 private:
     static void clientEventCallback(const usb_host_client_event_msg_t *eventMsg, void *arg) {
         MultiDeviceUsbHost *host = (MultiDeviceUsbHost *)arg;
@@ -745,7 +946,7 @@ private:
 
         if (dev->has_keyboard) {
             Serial.printf("[USB] Device %d: keyboard detected\n", slot);
-            keyboard_connected = true;
+            usb_keyboard_connected = true;
         }
         if (dev->has_mouse) {
             Serial.printf("[USB] Device %d: mouse detected\n", slot);
@@ -766,6 +967,11 @@ private:
 
         Serial.printf("[USB] Device %d disconnected\n", slot);
 
+        if (was_keyboard) {
+            hid_keyboard_report_t empty = {};
+            processKeyboardReport(&empty, &dev->last_kb_report, true);
+        }
+
         for (int i = 0; i < dev->transfer_count; i++) {
             if (dev->transfers[i] != NULL) {
                 usb_host_endpoint_clear(dev->handle, dev->transfers[i]->bEndpointAddress);
@@ -784,15 +990,12 @@ private:
 
         // Only reset connection flags if no other device provides the capability
         if (was_keyboard) {
-            keyboard_connected = false;
+            usb_keyboard_connected = false;
             for (int i = 0; i < MAX_USB_DEVICES; i++) {
                 if (devices[i].active && devices[i].has_keyboard) {
-                    keyboard_connected = true;
+                    usb_keyboard_connected = true;
                     break;
                 }
-            }
-            if (!keyboard_connected) {
-                kb_modifier_state = 0;
             }
         }
         if (was_mouse) {
@@ -806,7 +1009,7 @@ private:
             if (!mouse_connected) {
                 usb_mouse_buttons = 0;
                 if (right_click_ctrl_injected) {
-                    ADBKeyUp(0x36);
+                    releaseAdbKey(0x36);
                     right_click_ctrl_injected = false;
                 }
             }
@@ -1050,7 +1253,8 @@ private:
             report.keycode[4] = transfer->data_buffer[6];
             report.keycode[5] = transfer->data_buffer[7];
 
-            if (memcmp(&report, &dev->last_kb_report, sizeof(report)) != 0) {
+            if (keyboard_enabled &&
+                memcmp(&report, &dev->last_kb_report, sizeof(report)) != 0) {
                 processKeyboardReport(&report, &dev->last_kb_report);
                 memcpy(&dev->last_kb_report, &report, sizeof(report));
             }
@@ -1124,9 +1328,10 @@ static void inputTask(void *param)
         Board_Update();
         
         processTouchInput();
+        pollTab5Keyboard();
         
         if (usbHost != NULL) {
-            bool usb_active = keyboard_connected || mouse_connected;
+            bool usb_active = usb_keyboard_connected || mouse_connected;
             uint8_t target_divider = usb_active ? USB_POLL_DIV_ACTIVE : USB_POLL_DIV_IDLE;
             if (target_divider != usb_poll_divider) {
                 usb_poll_divider = target_divider;
@@ -1145,6 +1350,10 @@ static void inputTask(void *param)
         vTaskDelay(poll_interval);
     }
     
+    if (input_task_stopped != NULL) {
+        xSemaphoreGive(input_task_stopped);
+    }
+    input_task_handle = NULL;
     Serial.println("[INPUT] Input task exiting");
     vTaskDelete(NULL);
 }
@@ -1165,6 +1374,11 @@ bool InputInit(void)
 
     last_led_state = 0;
     last_led_check_time = 0;
+    memset(adb_key_claims, 0, sizeof(adb_key_claims));
+    memset(tab5_bindings, 0, sizeof(tab5_bindings));
+    tab5_sym_active = false;
+    tab5_keyboard_connected = false;
+    usb_keyboard_connected = false;
 
     ADBSetRelMouseMode(false);
 
@@ -1176,6 +1390,11 @@ bool InputInit(void)
                       mac_screen_width, mac_screen_height);
 
     Serial.println("[INPUT] Touch input enabled (multi-touch overlay ready)");
+
+    if (!BoardKeyboard_Init()) {
+        Serial.println("[INPUT] WARN: Tab5 Keyboard bus unavailable; continuing without it");
+    }
+    tab5_keyboard_connected = BoardKeyboard_IsConnected();
     
     Serial.println("[INPUT] Initializing USB Host (hub support enabled)...");
     usbHost = new MultiDeviceUsbHost();
@@ -1186,6 +1405,14 @@ bool InputInit(void)
         Serial.println("[INPUT] ERROR: Failed to create USB Host instance");
     }
     
+    if (input_task_stopped == NULL) {
+        input_task_stopped = xSemaphoreCreateBinary();
+    }
+    if (input_task_stopped == NULL) {
+        Serial.println("[INPUT] ERROR: Failed to create task-stop semaphore");
+        return false;
+    }
+
     input_task_running = true;
     BaseType_t result = xTaskCreatePinnedToCore(
         inputTask,
@@ -1211,24 +1438,39 @@ void InputExit(void)
 {
     Serial.println("[INPUT] Shutting down input subsystem");
     
-    if (input_task_running) {
+    if (input_task_handle != NULL) {
         input_task_running = false;
-        vTaskDelay(pdMS_TO_TICKS(50));
-        input_task_handle = NULL;
+        if (input_task_stopped == NULL ||
+            xSemaphoreTake(input_task_stopped, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            /* Do not force-delete a task that may own Wire/USB state. Leaving
+             * its resources allocated is safer than tearing them out from
+             * underneath it; this path indicates a deeper driver deadlock. */
+            Serial.println("[INPUT] ERROR: input task did not stop; resources left intact");
+            return;
+        }
     }
 
     /* Release any held overlay keys / mouse state. */
     TouchOverlay_Shutdown();
 
+    releaseAllTab5Bindings();
+    tab5_keyboard_connected = false;
+    BoardKeyboard_Exit();
+
     // Release any injected right-click Control key
     if (right_click_ctrl_injected) {
-        ADBKeyUp(0x36);
+        releaseAdbKey(0x36);
         right_click_ctrl_injected = false;
     }
     
     if (usbHost != NULL) {
+        usbHost->releaseAllKeyboardClaims();
         delete usbHost;
         usbHost = NULL;
+    }
+    if (input_task_stopped != NULL) {
+        vSemaphoreDelete(input_task_stopped);
+        input_task_stopped = NULL;
     }
 }
 
@@ -1258,12 +1500,18 @@ void InputSetTouchEnabled(bool enabled)
 
 void InputSetKeyboardEnabled(bool enabled)
 {
+    if (!enabled && keyboard_enabled && usbHost != NULL) {
+        /* last_kb_report is the ownership snapshot for each USB slot. Clear
+         * every claim before reports are ignored so a later disconnect cannot
+         * decrement a key owned by the Tab5 keyboard or touch overlay. */
+        usbHost->releaseAllKeyboardClaims();
+    }
     keyboard_enabled = enabled;
 }
 
 bool InputIsKeyboardConnected(void)
 {
-    return keyboard_connected;
+    return usb_keyboard_connected || tab5_keyboard_connected;
 }
 
 bool InputIsMouseConnected(void)

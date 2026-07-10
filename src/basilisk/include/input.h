@@ -56,7 +56,7 @@ void InputSetTouchEnabled(bool enabled);
 void InputSetKeyboardEnabled(bool enabled);
 
 /*
- *  Check if USB keyboard is connected
+ *  Check if a USB keyboard or the official Tab5 Keyboard is connected
  */
 bool InputIsKeyboardConnected(void);
 
@@ -64,6 +64,14 @@ bool InputIsKeyboardConnected(void);
  *  Check if USB mouse is connected
  */
 bool InputIsMouseConnected(void);
+
+/*
+ * Shared ADB key broker for input producers such as the touchscreen overlay.
+ * Multiple physical sources may claim the same key; the broker emits ADB
+ * down/up only for the first claim and final release.
+ */
+void InputKeyDown(uint8_t mac_keycode);
+void InputKeyUp(uint8_t mac_keycode);
 
 #ifdef __cplusplus
 }

@@ -33,6 +33,7 @@
  * (uint8/uint16/uint32) those Basilisk headers depend on. */
 #include "sysdeps.h"
 #include "adb.h"
+#include "input.h"
 
 #include "board_config.h"
 #include "chicago_font_data.h"
@@ -480,14 +481,14 @@ static void press_key_index(int idx)
         /* Tap a modifier to toggle latch. Key "held" for visual feedback
          * only while the finger is on it; the latch state persists. */
         if (k->latched) {
-            ADBKeyUp(k->mac_keycode);
+            InputKeyUp(k->mac_keycode);
             k->latched = false;
         } else {
-            ADBKeyDown(k->mac_keycode);
+            InputKeyDown(k->mac_keycode);
             k->latched = true;
         }
     } else {
-        ADBKeyDown(k->mac_keycode);
+        InputKeyDown(k->mac_keycode);
     }
     k->held = true;
     mark_key_dirty(k);
@@ -505,7 +506,7 @@ static void release_key_index(int idx)
         /* Latched modifier: ADB state was flipped on press. Nothing to do
          * on finger-up except clear the visual "held" hint. */
     } else {
-        ADBKeyUp(k->mac_keycode);
+        InputKeyUp(k->mac_keycode);
     }
     k->held = false;
     mark_key_dirty(k);
@@ -519,10 +520,10 @@ static void release_all_keys(void)
         for (int i = 0; i < count; ++i) {
             OverlayKey *k = &layout[i];
             if (k->held && !(k->flags & KFLAG_MODIFIER)) {
-                ADBKeyUp(k->mac_keycode);
+                InputKeyUp(k->mac_keycode);
             }
             if ((k->flags & KFLAG_MODIFIER) && k->latched) {
-                ADBKeyUp(k->mac_keycode);
+                InputKeyUp(k->mac_keycode);
                 k->latched = false;
             }
             k->held = false;
@@ -538,7 +539,7 @@ static void release_held_modifiers(void)
         for (int i = 0; i < count; ++i) {
             OverlayKey *k = &layout[i];
             if ((k->flags & KFLAG_MODIFIER) && k->latched) {
-                ADBKeyUp(k->mac_keycode);
+                InputKeyUp(k->mac_keycode);
                 k->latched = false;
                 k->held = false;
                 mark_key_dirty(k);

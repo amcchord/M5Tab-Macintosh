@@ -31,7 +31,8 @@ The ESP32-P4 handles all application logic, display rendering, and peripheral co
 - **Resolution**: 1280 x 720 (720p)
 - **Type**: IPS TFT
 - **Interface**: MIPI-DSI
-- **Touch**: Capacitive touch (ST7123 controller)
+- **Display / touch revisions**: Legacy ILI9881C + GT911, or integrated
+  ST7123 / ST7121; M5GFX auto-detects the installed controller
 - **Library**: M5GFX / M5Unified
 
 ## Audio System
@@ -85,7 +86,7 @@ The ESP32-P4 handles all application logic, display rendering, and peripheral co
 - INA226: 0x40
 - ES8388: 0x10
 - ES7210: 0x41
-- Touch (ST7123): 0x55
+- Integrated ST712x touch: 0x55 (newer display revisions)
 - PI4IOE5V6408 (GPIO Expander): 0x43
 
 ### ESP32-C6 Communication
@@ -109,6 +110,19 @@ The ESP32-P4 handles all application logic, display rendering, and peripheral co
 | SCL | GPIO8 |
 | VCC | 5V (controlled by EXT5V_EN) |
 | GND | GND |
+
+### Tab5 Keyboard (Ext.Port1)
+
+| Signal | GPIO / address |
+|--------|----------------|
+| SDA | GPIO0 |
+| SCL | GPIO1 |
+| INT (active low) | GPIO50 |
+| I2C address | 0x6D (factory default) |
+
+M5Tab-Macintosh probes this port automatically. When the official keyboard
+is present it is configured for matrix events and routed to the emulated Mac
+ADB keyboard; no compile-time option or boot setting is required.
 
 ### microSD Card
 | Signal | GPIO |
@@ -160,8 +174,8 @@ build_flags =
     -DARDUINO_USB_CDC_ON_BOOT=1
     -DARDUINO_USB_MODE=1
 lib_deps =
-    https://github.com/M5Stack/M5Unified.git
-    https://github.com/M5Stack/M5GFX.git
+    https://github.com/M5Stack/M5GFX.git#0.2.23
+    https://github.com/M5Stack/M5Unified.git#0.2.14
 ```
 
 ## Development Notes

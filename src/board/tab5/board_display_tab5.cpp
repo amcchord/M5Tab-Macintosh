@@ -11,8 +11,9 @@
  *
  * M5Unified (M5.begin() in Board_Init) still owns touch, audio, and
  * backlight. We grab the `esp_lcd_panel_handle_t` it created for the
- * ILI9881C MIPI-DSI panel via a friend-access subclass of Panel_DSI
- * and drive it ourselves for all pixel writes.
+ * detected Tab5 MIPI-DSI panel via a friend-access subclass of Panel_DSI
+ * and drive it ourselves for all pixel writes. M5GFX selects ILI9881C,
+ * ST7123, or ST7121 automatically during M5.begin().
  */
 
 #include "board_display.h"
@@ -35,16 +36,16 @@
 
 static const char *TAG = "board_display";
 
-/* Tab5 ILI9881C is natively 720x1280 portrait (see M5GFX.cpp where it
- * sets cfg.panel_width=720 / cfg.panel_height=1280 on autodetect). */
+/* All supported Tab5 panel revisions are natively 720x1280 portrait
+ * (see M5GFX.cpp, which applies this geometry after autodetection). */
 static constexpr int PANEL_W = 720;
 static constexpr int PANEL_H = 1280;
 
 /* Friend-access subclass: Panel_DSI has an `_disp_panel_handle` member
  * that is protected. A subclass added purely for access exposes it
- * without forking M5GFX. We reinterpret-cast the concrete Panel_ILI9881C
- * pointer into this accessor; Panel_ILI9881C adds no data members of
- * its own so the memory layout is identical. */
+ * without forking M5GFX. The concrete Tab5 panel classes (Panel_ILI9881C,
+ * Panel_ST7123, and Panel_ST7121) directly derive from Panel_DSI and add
+ * no data members, so this accessor has the same memory layout. */
 struct Tab5DsiAccess : public lgfx::Panel_DSI {
     esp_lcd_panel_handle_t handle(void) { return _disp_panel_handle; }
 };
@@ -79,7 +80,7 @@ extern "C" bool BoardDisplay_Init(void)
 
     ESP_LOGI(TAG, "Initializing Tab5 display (direct DSI pipeline)...");
 
-    /* M5.begin() in Board_Init already brought up the ILI9881C panel.
+    /* M5.begin() in Board_Init already detected and brought up the panel.
      * Reach into M5.Display to grab the esp_lcd_panel_handle_t it
      * created so we can drive the DSI bus directly. */
     auto *panel_dev = M5.Display.getPanel();

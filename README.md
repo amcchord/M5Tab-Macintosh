@@ -46,7 +46,21 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## What's New in v4.1
+## What's New in v4.1 beta 2
+
+- **Plug-and-play Tab5 Keyboard (beta)** — the official 70-key Tab5
+  Keyboard on Ext.Port1 is detected automatically at startup and after
+  hot-plugging; there is no setting to enable. Its native I2C event
+  stream feeds the same Mac ADB path as USB and on-screen keyboards,
+  including letters, numbers, symbols, Tab, Esc, Delete, Return, arrow
+  keys, Shift/Aa, Control, and Alt/Option. If the module is absent, its
+  GPIO0/GPIO1 bus stays out of the input hot path apart from a lightweight
+  periodic probe.
+- **All Tab5 display revisions (beta)** — Tab5 units built with the newer
+  ST7121 display now boot alongside ST7123 and legacy ILI9881C revisions.
+  M5GFX identifies the controller during `M5.begin()` and applies the
+  matching DSI clock, timing, initialization table, and touch driver
+  automatically; there is no board-revision build or user toggle.
 
 - **Faster SD flush + shutdown sync** — the on-card disk image is
   now flushed every 2 seconds (down from 120 s) and again ~500 ms
@@ -211,7 +225,7 @@ This project runs a **Motorola 68040** emulator that can boot real Macintosh ROM
 - **RAM**: Configurable from 4MB to 16MB (allocated from ESP32-P4's 32MB PSRAM)
 - **Display**: 640×360 virtual display (2× scaled to 1280×720 physical display), supporting 1/2/4/8-bit color depths at 24 FPS
 - **Storage**: Hard disk and CD-ROM images loaded from SD card
-- **Input**: Capacitive touchscreen (as mouse) + USB keyboard/mouse support
+- **Input**: Capacitive touchscreen, USB keyboard/mouse, and auto-detected official Tab5 Keyboard
 - **Audio**: Classic Mac sound output via ES8388 codec (toggleable in boot GUI)
 - **Networking**: WiFi internet access via NAT router (TCP, UDP, ICMP, DHCP)
 - **Video**: Optimized pipeline with write-time dirty tracking, double-buffered DMA, and tile-based rendering
@@ -231,8 +245,8 @@ The Tab5 features a unique **dual-chip architecture** that makes it ideal for th
 
 | Component | Details |
 |-----------|---------|
-| **Display** | 5" IPS TFT, 1280×720 (720p), MIPI-DSI interface |
-| **Touch** | Capacitive multi-touch (ST7123 controller) |
+| **Display** | 5" IPS TFT, 1280×720 (720p), MIPI-DSI; ILI9881C, ST7123, and ST7121 revisions auto-detected |
+| **Touch** | Capacitive multi-touch (GT911 or integrated ST712x, auto-detected) |
 | **Memory** | 32MB PSRAM for emulated Mac RAM + frame buffers |
 | **Storage** | microSD card slot for ROM, disk images, and settings |
 | **USB** | Type-A host port for keyboard/mouse, Type-C for programming |
@@ -683,6 +697,18 @@ Connect a USB keyboard to the **USB Type-A port**. Supported features:
 - Numeric keypad
 - **Caps Lock LED** sync with Mac OS
 
+### Official Tab5 Keyboard (beta)
+
+Attach the M5Stack 70-key Tab5 Keyboard to **Ext.Port1**. The firmware
+probes its default I2C address (`0x6D`) on GPIO0/GPIO1, switches it to its
+lossless matrix-event mode, and starts forwarding keys automatically. No
+boot-GUI option or settings-file entry is required, and attaching or
+removing the keyboard while the emulator is running is supported.
+
+The physical keyboard works at the same time as USB HID and the
+touchscreen overlays. Its **Aa** key maps to Mac Shift, **Ctrl** to Control,
+**Alt** to Option, and **Sym** selects the printed symbol layer.
+
 ### USB Mouse
 
 Connect a USB mouse for relative movement input:
@@ -796,6 +822,7 @@ build_flags =
 | Black screen after boot | Check serial output for errors; verify ROM compatibility |
 | Touch not responding | Wait for boot GUI to complete initialization |
 | USB keyboard not working | Connect to Type-A port (not Type-C) |
+| Tab5 Keyboard not detected | Seat it fully on Ext.Port1 and leave it at its factory I2C address (`0x6D`) |
 | Slow/choppy display | Check serial for `[VIDEO PERF]` stats; typical is 60-90% partial updates |
 | No audio output | Ensure audio is enabled in the boot GUI settings screen |
 | Screen flickering/tearing | May occur during heavy graphics; dirty tracking minimizes this |
