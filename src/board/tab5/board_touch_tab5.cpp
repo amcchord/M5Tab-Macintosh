@@ -1,16 +1,18 @@
 /*
  * board_touch_tab5.cpp - touch HAL for M5Stack Tab5.
  *
- * We pull raw portrait (720x1280) coordinates straight from the
- * ST7123/GT911 driver and rotate them ourselves to match MiniGfx's
- * logical landscape (1280x720). Going through M5.Touch.getDetail()
- * would apply M5GFX's display rotation, but we no longer draw through
- * M5.Display - our framebuffer rotation is done inside MiniGfx - so
- * the two rotations were off by 90 degrees (X and Y appeared swapped).
+ * We pull raw portrait (720x1280) coordinates straight from the touch
+ * driver (GT911 on pre-2025-10-14 boards, the integrated ST7121/ST7123
+ * on later ones - M5Unified/M5GFX autodetect which) and rotate them
+ * ourselves to match MiniGfx's logical landscape (1280x720). Going
+ * through M5.Touch.getDetail() would apply M5GFX's display rotation, but
+ * we no longer draw through M5.Display - our framebuffer rotation is
+ * done inside MiniGfx - so the two rotations were off by 90 degrees (X
+ * and Y appeared swapped).
  *
- * Multi-touch: GT911 reports up to 5 simultaneous points. M5.Touch caches
- * them in TOUCH_MAX_POINTS slots; we iterate them all for overlays that
- * need 3/4-finger gesture detection.
+ * Multi-touch: every supported controller reports up to 5 simultaneous
+ * points. M5.Touch caches them in TOUCH_MAX_POINTS slots; we iterate them
+ * all for overlays that need 3/4-finger gesture detection.
  */
 
 #include "board_touch.h"

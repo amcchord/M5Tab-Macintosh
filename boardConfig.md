@@ -31,8 +31,15 @@ The ESP32-P4 handles all application logic, display rendering, and peripheral co
 - **Resolution**: 1280 x 720 (720p)
 - **Type**: IPS TFT
 - **Interface**: MIPI-DSI
-- **Touch**: Capacitive touch (ST7123 controller)
-- **Library**: M5GFX / M5Unified
+- **Driver IC**: revision-dependent, all 720x1280 portrait and
+  auto-detected by M5GFX/M5Unified:
+  - Boards built **before 2025-10-14**: ILI9881C display + GT911 touch
+  - Boards built **on/after 2025-10-14**: integrated ST7121 or ST7123
+    display-touch controller (M5GFX reads the ST touch firmware version
+    at I2C `0x53` to tell them apart)
+- **Touch**: Capacitive, controller matches the display IC above
+- **Library**: M5GFX / M5Unified (pinned to versions with ST7123
+  autodetect in [`platformio.ini`](platformio.ini))
 
 ## Audio System
 

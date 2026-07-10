@@ -48,6 +48,18 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ## What's New in v4.1
 
+- **New Tab5 display hardware (ST7121 / ST7123) supported** — Tab5
+  units manufactured on/after 2025-10-14 dropped the discrete ILI9881C
+  panel + GT911 touch for an integrated **ST7121** or **ST7123**
+  display-touch controller, which older firmware could not drive (blank
+  screen / no boot). The Tab5 HAL never inits the panel itself — it lets
+  `M5.begin()` autodetect it and borrows the DSI handle — so the fix was
+  simply pinning M5GFX/M5Unified to releases with tri-panel autodetect
+  ([`platformio.ini`](platformio.ini)). All three panels report 720x1280,
+  so **older ILI9881C boards keep working unchanged**. If you built the
+  `esp32p4_pioarduino` env before this change, force a library refresh
+  (`pio pkg update -e esp32p4_pioarduino`, or delete `.pio/libdeps`) so
+  the stale cached M5GFX is replaced.
 - **Faster SD flush + shutdown sync** — the on-card disk image is
   now flushed every 2 seconds (down from 120 s) and again ~500 ms
   after the guest goes idle, so a power pull during normal use

@@ -11,8 +11,17 @@
  *
  * M5Unified (M5.begin() in Board_Init) still owns touch, audio, and
  * backlight. We grab the `esp_lcd_panel_handle_t` it created for the
- * ILI9881C MIPI-DSI panel via a friend-access subclass of Panel_DSI
- * and drive it ourselves for all pixel writes.
+ * MIPI-DSI panel via a friend-access subclass of Panel_DSI and drive it
+ * ourselves for all pixel writes.
+ *
+ * This works across every Tab5 revision. Boards built before 2025-10-14
+ * carry a discrete ILI9881C panel; later boards integrate an ST7121 or
+ * ST7123 display-touch controller. M5GFX autodetects which one is
+ * present and instantiates Panel_ILI9881C or Panel_ST7123 - both derive
+ * from Panel_DSI with no extra data members and both report 720x1280
+ * portrait, so the reinterpret_cast to Tab5DsiAccess below and every
+ * dimension constant here are panel-agnostic. (Requires an M5GFX new
+ * enough to know the ST panels - see the lib_deps pins in platformio.ini.)
  */
 
 #include "board_display.h"
@@ -42,9 +51,10 @@ static constexpr int PANEL_H = 1280;
 
 /* Friend-access subclass: Panel_DSI has an `_disp_panel_handle` member
  * that is protected. A subclass added purely for access exposes it
- * without forking M5GFX. We reinterpret-cast the concrete Panel_ILI9881C
- * pointer into this accessor; Panel_ILI9881C adds no data members of
- * its own so the memory layout is identical. */
+ * without forking M5GFX. We reinterpret-cast the concrete panel pointer
+ * (Panel_ILI9881C or Panel_ST7123, depending on the detected hardware)
+ * into this accessor; both add no data members of their own so the
+ * memory layout is identical to Panel_DSI. */
 struct Tab5DsiAccess : public lgfx::Panel_DSI {
     esp_lcd_panel_handle_t handle(void) { return _disp_panel_handle; }
 };
@@ -79,9 +89,10 @@ extern "C" bool BoardDisplay_Init(void)
 
     ESP_LOGI(TAG, "Initializing Tab5 display (direct DSI pipeline)...");
 
-    /* M5.begin() in Board_Init already brought up the ILI9881C panel.
-     * Reach into M5.Display to grab the esp_lcd_panel_handle_t it
-     * created so we can drive the DSI bus directly. */
+    /* M5.begin() in Board_Init already autodetected and brought up the
+     * panel (ILI9881C, ST7121, or ST7123). Reach into M5.Display to grab
+     * the esp_lcd_panel_handle_t it created so we can drive the DSI bus
+     * directly. */
     auto *panel_dev = M5.Display.getPanel();
     if (!panel_dev) {
         ESP_LOGE(TAG, "M5.Display has no panel device");
