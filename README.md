@@ -46,9 +46,9 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## What's New in v4.1 beta 2
+## What's New in v4.5
 
-- **Plug-and-play Tab5 Keyboard (beta)** — the official 70-key Tab5
+- **Plug-and-play Tab5 Keyboard** — the official 70-key Tab5
   Keyboard on Ext.Port1 is detected automatically at startup and after
   hot-plugging; there is no setting to enable. Its native I2C event
   stream feeds the same Mac ADB path as USB and on-screen keyboards,
@@ -56,7 +56,7 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
   keys, Shift/Aa, Control, and Alt/Option. If the module is absent, its
   GPIO0/GPIO1 bus stays out of the input hot path apart from a lightweight
   periodic probe.
-- **All Tab5 display revisions (beta)** — Tab5 units built with the newer
+- **All Tab5 display revisions** — Tab5 units built with the newer
   ST7121 display now boot alongside ST7123 and legacy ILI9881C revisions.
   M5GFX identifies the controller during `M5.begin()` and applies the
   matching DSI clock, timing, initialization table, and touch driver
@@ -110,7 +110,7 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
   and ES8311 (Waveshare) audio codecs keep their state through any
   ESP32 reset because they have their own power rail. A crash or
   panic mid-playback could leave the chip stuck enough that audio
-  was silent until the user pulled power. v4.1 unconditionally
+  was silent until the user pulled power. v4.5 unconditionally
   performs a full mute + power-down + chip-reset sequence over I2C
   before the normal codec init runs on both boards, so a soft
   reboot now recovers audio the same as a power cycle. Logs the
@@ -118,7 +118,7 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 - **exFAT card detection** — the precompiled FatFs in pioarduino
   is built without exFAT support (FF_FS_EXFAT=0), so a card
   formatted as exFAT used to fail with a generic "init failed"
-  message. v4.1's `BoardSD_ProbeFilesystem()` reads sector 0
+  message. v4.5's `BoardSD_ProbeFilesystem()` reads sector 0
   directly via the underlying SDSPI / SDMMC host driver after a
   failed mount and prints a specific "Card detected, formatted as
   exFAT — reformat as FAT32" message on the serial console so the
@@ -146,7 +146,7 @@ Q950) or `0x0276` (Classic) will boot. The default file path is
   partition size are fine.
 - **exFAT** is *not* mountable: the precompiled FatFs that ships
   with pioarduino is built with `FF_FS_EXFAT=0`, so f_mount returns
-  `FR_NO_FILESYSTEM` on exFAT cards. v4.1 detects this case and
+  `FR_NO_FILESYSTEM` on exFAT cards. v4.5 detects this case and
   prints a clear message on the serial console — "Card detected,
   formatted as exFAT. Please reformat as FAT32." — instead of the
   generic "init failed". sdkconfig already declares
@@ -480,7 +480,7 @@ esptool.py --chip esp32p4 \
     --port /dev/ttyACM0 \
     --baud 921600 \
     write_flash \
-    0x0 M5Tab-Macintosh-v4.0.bin
+    0x0 M5Tab-Macintosh-v4.5.bin
 ```
 
 **Note**: Replace `/dev/ttyACM0` with your actual port:
@@ -519,18 +519,18 @@ For versioned releases, use the release script:
 
 ```bash
 # Create versioned release binaries for both boards
-./scripts/build_release.sh v4.0
+./scripts/build_release.sh v4.5
 
 # Output:
-#   release/M5Tab-Macintosh-v4.0.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.0.bin
+#   release/M5Tab-Macintosh-v4.5.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.5.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 921600 write-flash 0x0 release/M5Tab-Macintosh-v4.0.bin
+    --baud 921600 write-flash 0x0 release/M5Tab-Macintosh-v4.5.bin
 ```
 
 ---
@@ -697,7 +697,7 @@ Connect a USB keyboard to the **USB Type-A port**. Supported features:
 - Numeric keypad
 - **Caps Lock LED** sync with Mac OS
 
-### Official Tab5 Keyboard (beta)
+### Official Tab5 Keyboard
 
 Attach the M5Stack 70-key Tab5 Keyboard to **Ext.Port1**. The firmware
 probes its default I2C address (`0x6D`) on GPIO0/GPIO1, switches it to its

@@ -88,7 +88,7 @@ const char* BootGUI_GetCDROMPath(void);
  *
  *  The returned string is SD-root-relative (e.g. "/Shared"). Callers that
  *  need a VFS path must prepend BOARD_SD_MOUNT_POINT ("/sd" on both Tab5
- *  and Waveshare with the v4.1 mount fix) themselves.
+ *  and Waveshare with the v4.5 mount fix) themselves.
  *
  *  Returns an empty string if the user picked "None" / disabled ExtFS.
  */

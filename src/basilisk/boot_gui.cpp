@@ -501,7 +501,7 @@ static void saveSettings(void)
     // Save audio settings
     file.printf("audio=%s\n", audio_enabled ? "yes" : "no");
 
-    // v4.1 additions: boot-from-CD and screen rotation.
+    // v4.5 additions: boot-from-CD and screen rotation.
     file.printf("boot_from_cd=%s\n", boot_from_cd ? "yes" : "no");
     file.printf("rotation=%d\n", rotation_degrees);
 
