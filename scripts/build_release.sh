@@ -51,25 +51,23 @@ name_for_env() {
     esac
 }
 
-# Locate esptool
+# Ensure PlatformIO's virtual environment is on PATH in fresh shells. It
+# normally provides both pio and esptool, so do this before locating either.
+if [ -x "$HOME/.platformio/penv/bin/pio" ]; then
+    export PATH="$HOME/.platformio/penv/bin:$PATH"
+fi
+if ! command -v pio &>/dev/null; then
+    echo "ERROR: pio not found. Is PlatformIO installed?"
+    exit 1
+fi
+
+# Locate esptool after adding PlatformIO's virtual environment to PATH.
 if command -v esptool &>/dev/null; then
     ESPTOOL_CMD="esptool"
 elif command -v esptool.py &>/dev/null; then
     ESPTOOL_CMD="esptool.py"
 else
     echo "ERROR: esptool not found. Install with: pip install esptool"
-    exit 1
-fi
-
-# Ensure pio is on PATH (works on fresh shells where PlatformIO's venv
-# has not been exported).
-if ! command -v pio &>/dev/null; then
-    if [ -x "$HOME/.platformio/penv/bin/pio" ]; then
-        export PATH="$HOME/.platformio/penv/bin:$PATH"
-    fi
-fi
-if ! command -v pio &>/dev/null; then
-    echo "ERROR: pio not found. Is PlatformIO installed?"
     exit 1
 fi
 
