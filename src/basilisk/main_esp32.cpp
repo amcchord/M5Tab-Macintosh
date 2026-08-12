@@ -33,6 +33,11 @@
 #include "macos_util.h"
 #include "user_strings.h"
 #include "input.h"
+#include "automation.h"
+
+#if USE_RV32_JIT
+#include "jit_compiler.h"
+#endif
 
 #define DEBUG 1
 #include "debug.h"
@@ -122,16 +127,23 @@ static void reportIPSStats(uint32 current_time)
             // Report in MIPS (millions of instructions per second) for readability
             float mips = ips_current / 1000000.0f;
             
-            Serial.printf("[IPS] %u instructions/sec (%.2f MIPS), total: %llu\n", 
-                          ips_current, mips, ips_total_instructions);
+            if (!AutomationSerialCaptureActive()) {
+                Serial.printf("[IPS] %u instructions/sec (%.2f MIPS), total: %llu\n",
+                              ips_current, mips, ips_total_instructions);
+            }
         }
         
         ips_last_instructions = ips_total_instructions;
         ips_last_report_time = current_time;
 
         // CPU-core hot-loop profiling (reported at same cadence as IPS).
-        reportCPUCorePerf(current_time);
-        reportIRQProfile(current_time);
+        if (!AutomationSerialCaptureActive()) {
+            reportCPUCorePerf(current_time);
+            reportIRQProfile(current_time);
+#if USE_RV32_JIT
+            jit_report_stats(current_time);
+#endif
+        }
     }
 }
 
@@ -335,13 +347,12 @@ void B2_delete_mutex(B2_mutex *mutex)
     delete mutex;
 }
 
-/*
- *  Flush code cache (no-op for interpreted emulation)
- */
+/* Flush data-only threaded traces when Mac OS patches executable memory. */
 void FlushCodeCache(void *start, uint32 size)
 {
     UNUSED(start);
     UNUSED(size);
+    FlushCPUTraceCache();
 }
 
 /*
@@ -555,6 +566,14 @@ static bool InitEmulator(void)
         ErrorAlert("InitAll() failed");
         return false;
     }
+
+#if USE_RV32_JIT
+    // Initialize after the emulator's long-lived allocations so the JIT can
+    // use PSRAM XIP without displacing hot interpreter tables from SRAM.
+    if (jit_init() < 0) {
+        Serial.println("[MAIN] WARNING: JIT init failed - continuing with interpreter");
+    }
+#endif
     
     // Start 60Hz FreeRTOS timer
     if (!start60HzTimer()) {
@@ -566,6 +585,13 @@ static bool InitEmulator(void)
     if (!InputInit()) {
         // Non-fatal - emulator can run without input
         Serial.println("[MAIN] WARNING: Input initialization failed");
+    }
+
+    // Expose logical screenshots and ADB input over the attached serial link.
+    // This is non-fatal: normal touch/USB operation remains available if the
+    // automation task cannot be allocated.
+    if (!AutomationInit()) {
+        Serial.println("[MAIN] WARNING: Host automation initialization failed");
     }
     
     Serial.println("[MAIN] Emulator initialized successfully!");
@@ -629,6 +655,7 @@ void basilisk_setup(void)
     
     // Cleanup
     stop60HzTimer();
+    AutomationExit();
     InputExit();
     ExitAll();
     SysExit();
@@ -647,10 +674,12 @@ static void reportMainPerfStats(uint32 current_time)
         
         if (perf_loop_count > 0) {
             uint32 loops_per_sec = (perf_loop_count * 1000) / PERF_MAIN_REPORT_INTERVAL_MS;
-            Serial.printf("[MAIN PERF] loops/sec=%u flushes=%u flush_avg=%uus\n",
-                          loops_per_sec,
-                          perf_flush_count,
-                          perf_flush_count > 0 ? perf_flush_us / perf_flush_count : 0);
+            if (!AutomationSerialCaptureActive()) {
+                Serial.printf("[MAIN PERF] loops/sec=%u flushes=%u flush_avg=%uus\n",
+                              loops_per_sec,
+                              perf_flush_count,
+                              perf_flush_count > 0 ? perf_flush_us / perf_flush_count : 0);
+            }
         }
         
         // Reset counters

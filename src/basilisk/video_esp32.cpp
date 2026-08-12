@@ -31,6 +31,7 @@
 #include "prefs.h"
 #include "video.h"
 #include "video_defs.h"
+#include "automation.h"
 
 #include "board_config.h"
 #include "board_display.h"
@@ -65,11 +66,26 @@
 #define VIDEO_DIRTY_MARK_NOOP 0
 #endif
 
+#ifndef VIDEO_MAX_DEPTH_BITS
+#define VIDEO_MAX_DEPTH_BITS 8
+#endif
+
+#if VIDEO_MAX_DEPTH_BITS == 1
+#define MAC_SCREEN_DEPTH VDEPTH_1BIT
+#elif VIDEO_MAX_DEPTH_BITS == 2
+#define MAC_SCREEN_DEPTH VDEPTH_2BIT
+#elif VIDEO_MAX_DEPTH_BITS == 4
+#define MAC_SCREEN_DEPTH VDEPTH_4BIT
+#elif VIDEO_MAX_DEPTH_BITS == 8
+#define MAC_SCREEN_DEPTH VDEPTH_8BIT
+#else
+#error "VIDEO_MAX_DEPTH_BITS must be 1, 2, 4, or 8"
+#endif
+
 // Display configuration is board-specific (see src/board/board_config.h).
 // Tab5: 640x360 Mac @ 2x = 1280x720. Waveshare: 640x400 Mac @ 2x = 1280x800.
 #define MAC_SCREEN_WIDTH  BOARD_MAC_SCREEN_WIDTH
 #define MAC_SCREEN_HEIGHT BOARD_MAC_SCREEN_HEIGHT
-#define MAC_SCREEN_DEPTH  VDEPTH_8BIT  // 8-bit indexed color
 #define PIXEL_SCALE       BOARD_PIXEL_SCALE
 
 // Physical display dimensions (post pixel-doubling)
@@ -96,7 +112,17 @@
 #define VIDEO_TASK_PRIORITY    2
 #define VIDEO_TASK_CORE        0  // Run on Core 0, leaving Core 1 for CPU emulation
 // Keep cadence aligned with main-thread frame signaling for responsive video.
+#if VIDEO_DIRTY_MARK_NOOP
+// Full-frame refreshes move far more pixels than sparse tile updates. Keep the
+// diagnostic cadence configurable so benchmarks can establish the upper bound
+// obtained by removing all guest-write bookkeeping without overwhelming DSI.
+#ifndef VIDEO_NOOP_REFRESH_MS
+#define VIDEO_NOOP_REFRESH_MS 100
+#endif
+#define VIDEO_MIN_FRAME_INTERVAL_MS VIDEO_NOOP_REFRESH_MS
+#else
 #define VIDEO_MIN_FRAME_INTERVAL_MS 45
+#endif
 
 // Frame buffer for Mac emulation (CPU writes here)
 static uint8 *mac_frame_buffer = NULL;
@@ -123,6 +149,9 @@ DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap
 // Write-time dirty tracking bitmap - marked when CPU writes to framebuffer
 // This is double-buffered to avoid race conditions between CPU writes and video task reads
 DRAM_ATTR static uint32 write_dirty_tiles[(TOTAL_TILES + 31) / 32];    // Tiles dirtied by CPU writes
+// Advanced once per collection. Core 1 uses this to collapse repeated writes
+// to the same tile into one atomic bitmap update per display epoch.
+DRAM_ATTR static volatile uint32 dirty_collection_epoch = 1;
 
 // Per-tile render lock bitmap - set while video task is snapshotting a tile
 // If CPU tries to write while this is set, the tile is re-marked dirty for next frame
@@ -176,7 +205,7 @@ static video_mode current_mode;
 
 // Current video state cache - updated on mode switch for fast access during rendering
 // These are used by the render loops and dirty tracking to handle different bit depths
-static volatile video_depth current_depth = VDEPTH_8BIT;  // Current color depth
+static volatile video_depth current_depth = MAC_SCREEN_DEPTH;
 static volatile uint32 current_bytes_per_row = MAC_SCREEN_WIDTH;  // Bytes per row in frame buffer
 static volatile int current_pixels_per_byte = 1;  // Pixels packed per byte (8=1bit, 4=2bit, 2=4bit, 1=8bit)
 static volatile int current_bit_shift = 0;  // Bits to shift per pixel (7=1bit, 6=2bit, 4=4bit, 0=8bit)
@@ -565,7 +594,15 @@ static inline bool isTileRenderActive(int tile_idx)
 
 static inline void markTileDirtyBit(int tile_idx)
 {
+    static uint32 cached_epoch = 0;
+    static int cached_tile = -1;
+    const uint32 epoch = dirty_collection_epoch;
+    if (likely(cached_epoch == epoch && cached_tile == tile_idx)) {
+        return;
+    }
     __atomic_or_fetch(&write_dirty_tiles[tile_idx / 32], (1u << (tile_idx % 32)), __ATOMIC_RELAXED);
+    cached_epoch = epoch;
+    cached_tile = tile_idx;
 }
 
 // Fast 8-bit path helper: convert framebuffer byte offset to tile index.
@@ -778,6 +815,7 @@ static int collectWriteDirtyTiles(void)
         dirty_tiles[i] = bits;
         count += __builtin_popcount(bits);
     }
+    __atomic_add_fetch(&dirty_collection_epoch, 1u, __ATOMIC_RELAXED);
     
     return count;
 }
@@ -1141,7 +1179,7 @@ static void reportVideoPerfStats(void)
         perf_last_report_ms = now;
         
         uint32_t total_frames = perf_full_count + perf_partial_count + perf_skip_count;
-        if (total_frames > 0) {
+        if (total_frames > 0 && !AutomationSerialCaptureActive()) {
             Serial.printf("[VIDEO PERF] frames=%u (full=%u partial=%u skip=%u)\n",
                           total_frames, perf_full_count, perf_partial_count, perf_skip_count);
             Serial.printf("[VIDEO PERF] avg: detect=%uus render=%uus\n",
@@ -1225,6 +1263,14 @@ static void videoRenderTaskOptimized(void *param)
         if (!should_render && !force_full_update) {
             continue;
         }
+
+        // The logical framebuffer snapshot is the source of truth for host
+        // automation. Avoid competing with its USB compression/transfer task
+        // for Core 0 and PSRAM bandwidth; the panel catches up immediately
+        // after the short capture lease closes.
+        if (AutomationSerialCaptureActive()) {
+            continue;
+        }
         
         uint32_t t0, t1;
         
@@ -1237,9 +1283,18 @@ static void videoRenderTaskOptimized(void *param)
             portEXIT_CRITICAL(&frame_spinlock);
         }
         
-        // Collect dirty tiles from write-time tracking
+        // Collect dirty tiles from write-time tracking. In full-frame mode,
+        // guest writes carry zero tracking overhead; the existing periodic
+        // signal makes every tile visible on the next asynchronous refresh.
         t0 = micros();
+#if VIDEO_DIRTY_MARK_NOOP
+        for (int i = 0; i < (TOTAL_TILES + 31) / 32; i++) {
+            dirty_tiles[i] = 0xFFFFFFFFu;
+        }
+        dirty_tile_count = should_render ? TOTAL_TILES : 0;
+#else
         dirty_tile_count = collectWriteDirtyTiles();
+#endif
         t1 = micros();
         perf_detect_us += (t1 - t0);
 
@@ -1378,10 +1433,8 @@ bool VideoInit(bool classic)
     MacFrameSize = frame_buffer_size;
     MacFrameLayout = FLAYOUT_DIRECT;
     
-    // Initialize default palette for 8-bit mode (256 colors)
-    // This sets up a proper color palette instead of grayscale,
-    // so MacOS will default to "256 colors" instead of "256 grays"
-    initDefaultPalette(VDEPTH_8BIT);
+    // Initialize the palette for the selected maximum/default depth.
+    initDefaultPalette(MAC_SCREEN_DEPTH);
     
     // Create video mode vector with all supported depths
     // Per Basilisk II rules: lowest depth must be available in all resolutions,
@@ -1400,32 +1453,40 @@ bool VideoInit(bool classic)
     modes.push_back(mode);
     Serial.printf("[VIDEO] Added mode: 1-bit, %d bytes/row\n", mode.bytes_per_row);
     
+    // Add packed modes up to the configured maximum. Restricting the mode list
+    // is intentional: Mac OS otherwise restores a deeper saved mode at boot.
+#if VIDEO_MAX_DEPTH_BITS >= 2
     // Add 2-bit mode (4 colors)
     mode.depth = VDEPTH_2BIT;
     mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_2BIT);  // 160 bytes
     modes.push_back(mode);
     Serial.printf("[VIDEO] Added mode: 2-bit, %d bytes/row\n", mode.bytes_per_row);
-    
+#endif
+
+#if VIDEO_MAX_DEPTH_BITS >= 4
     // Add 4-bit mode (16 colors)
     mode.depth = VDEPTH_4BIT;
     mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_4BIT);  // 320 bytes
     modes.push_back(mode);
     Serial.printf("[VIDEO] Added mode: 4-bit, %d bytes/row\n", mode.bytes_per_row);
-    
-    // Add 8-bit mode (256 colors) - this is our default
+#endif
+
+#if VIDEO_MAX_DEPTH_BITS >= 8
+    // Add 8-bit mode (256 colors)
     mode.depth = VDEPTH_8BIT;
     mode.bytes_per_row = TrivialBytesPerRow(MAC_SCREEN_WIDTH, VDEPTH_8BIT);  // 640 bytes
     modes.push_back(mode);
     Serial.printf("[VIDEO] Added mode: 8-bit, %d bytes/row\n", mode.bytes_per_row);
-    
-    // Store current mode info (8-bit default)
+#endif
+
+    // The last advertised mode is the configured default/max depth.
     current_mode = mode;
-    
-    // Initialize the video state cache for 8-bit mode
-    updateVideoStateCache(VDEPTH_8BIT, mode.bytes_per_row);
-    
-    // Create monitor descriptor with 8-bit as default depth
-    the_monitor = new ESP32_monitor_desc(modes, VDEPTH_8BIT, 0x80);
+
+    // Initialize the renderer's hot state for the selected packed layout.
+    updateVideoStateCache(MAC_SCREEN_DEPTH, mode.bytes_per_row);
+
+    // Advertise the selected depth as the monitor default.
+    the_monitor = new ESP32_monitor_desc(modes, MAC_SCREEN_DEPTH, 0x80);
     VideoMonitors.push_back(the_monitor);
     
     // Set Mac frame buffer base address
@@ -1556,4 +1617,52 @@ uint8 *VideoGetFrameBuffer(void)
 uint32 VideoGetFrameBufferSize(void)
 {
     return frame_buffer_size;
+}
+
+/*
+ * Take a best-effort, logical-resolution snapshot for host automation.
+ *
+ * Palette/mode state is copied under the video spinlock. The framebuffer is
+ * deliberately not held under a global critical section: copying up to 256 KB
+ * from PSRAM with interrupts disabled would disturb USB, audio, and the 60 Hz
+ * timer. A guest write that lands during the short row copy can affect that
+ * one capture, just as it can on a physical display scanout; the next capture
+ * is clean. Packed 1/2/4-bit modes are expanded to palette indices so the host
+ * always receives the same simple format.
+ */
+bool VideoCaptureFrame(uint8 *pixels, uint32 pixel_capacity,
+                       uint16 *palette, uint16 *width, uint16 *height)
+{
+    if (pixels == NULL || palette == NULL || width == NULL || height == NULL ||
+        mac_frame_buffer == NULL) {
+        return false;
+    }
+
+    const uint16 capture_width = MAC_SCREEN_WIDTH;
+    const uint16 capture_height = MAC_SCREEN_HEIGHT;
+    const uint32 required = (uint32)capture_width * capture_height;
+    if (pixel_capacity < required) {
+        return false;
+    }
+
+    video_depth depth;
+    uint32 bytes_per_row;
+    portENTER_CRITICAL(&frame_spinlock);
+    depth = current_depth;
+    bytes_per_row = current_bytes_per_row;
+    memcpy(palette, palette_rgb565, sizeof(palette_rgb565));
+    portEXIT_CRITICAL(&frame_spinlock);
+
+    for (uint16 y = 0; y < capture_height; ++y) {
+        const uint8 *src = mac_frame_buffer + (uint32)y * bytes_per_row;
+        uint8 *dst = pixels + (uint32)y * capture_width;
+        decodePackedRow(src, dst, capture_width, depth);
+        if ((y & 0x1f) == 0x1f) {
+            taskYIELD();
+        }
+    }
+
+    *width = capture_width;
+    *height = capture_height;
+    return true;
 }

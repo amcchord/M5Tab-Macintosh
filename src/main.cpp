@@ -16,6 +16,7 @@
 #include "board_sd.h"          /* pulls in SD_FS (SD on Tab5, SD_MMC on Waveshare) */
 
 #include "boot_gui.h"
+#include "automation.h"
 #include "mac_splash.h"
 
 #include "esp_system.h"        /* esp_register_shutdown_handler */
@@ -150,6 +151,9 @@ void setup(void)
         Serial.println("[MAIN] SD flush shutdown hook registered");
     }
 
+    // Subscribe before BootGUI starts its asynchronous WiFi association so
+    // automation never has to poll the hosted C6 transport for link state.
+    AutomationPrepareNetwork();
     if (!BootGUI_Init()) {
         haltWith("Boot GUI initialization failed");
     }

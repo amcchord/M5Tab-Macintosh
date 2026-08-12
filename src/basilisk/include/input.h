@@ -73,6 +73,16 @@ bool InputIsMouseConnected(void);
 void InputKeyDown(uint8_t mac_keycode);
 void InputKeyUp(uint8_t mac_keycode);
 
+/*
+ * Host-automation input source. These calls share the ADB key broker with
+ * physical and on-screen keyboards, while retaining their own pressed-state
+ * snapshot so duplicate commands and RELEASE_ALL are safe.
+ */
+void InputAutomationKey(uint8_t mac_keycode, bool pressed);
+void InputAutomationMouseMove(int x, int y, bool relative);
+void InputAutomationMouseButton(uint8_t button, bool pressed);
+void InputAutomationReleaseAll(void);
+
 #ifdef __cplusplus
 }
 #endif

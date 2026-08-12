@@ -35,6 +35,7 @@
 #include "cpu_emulation.h"
 #include "main.h"
 #include "emul_op.h"
+#include "quickdraw_accel.h"
 
 extern int intlev(void);	// From baisilisk_glue.cpp
 
@@ -44,6 +45,10 @@ extern int intlev(void);	// From baisilisk_glue.cpp
 #include "newcpu.h"
 #include "compiler/compemu.h"
 #include "fpu/fpu.h"
+
+#if USE_RV32_JIT
+#include "jit_compiler.h"
+#endif
 
 #if defined(ENABLE_EXCLUSIVE_SPCFLAGS) && !defined(HAVE_HARDWARE_LOCKS)
 B2_mutex *spcflags_lock = NULL;
@@ -138,38 +143,101 @@ bool cpufunctbl_in_spiram = false;
 #define CPU_DEFER_DOINT_IN_BATCH 0
 #endif
 
+#ifndef CPU_TRACE_CACHE
+#define CPU_TRACE_CACHE 0
+#endif
+
+#ifndef CPU_TRAP_PROFILE
+#define CPU_TRAP_PROFILE 0
+#endif
+
+#ifndef CPU_NATIVE_IS_LAYER
+#define CPU_NATIVE_IS_LAYER 0
+#endif
+
+#ifndef CPU_NATIVE_QD_ACCEL
+#define CPU_NATIVE_QD_ACCEL 0
+#endif
+
+
+#if CPU_TRAP_PROFILE
+// One counter per low 12-bit A-line selector. Only the emulator CPU writes;
+// automation reads a slightly fuzzy snapshot, which is sufficient for ranking
+// traps without locks in this diagnostic build.
+DRAM_ATTR static volatile uint32 trap_profile_counts[4096] = {};
+DRAM_ATTR static volatile uint32 layer_selector_counts[256] = {};
+#endif
+
+void CPUTrapProfileReset(void)
+{
+#if CPU_TRAP_PROFILE
+    memset((void *)trap_profile_counts, 0, sizeof(trap_profile_counts));
+    memset((void *)layer_selector_counts, 0, sizeof(layer_selector_counts));
+#endif
+}
+
+uint32 CPUTrapProfileReadLayer(uint8 selector)
+{
+#if CPU_TRAP_PROFILE
+    return layer_selector_counts[selector];
+#else
+    (void)selector;
+    return 0;
+#endif
+}
+
+uint32 CPUTrapProfileRead(uint16 trap_index)
+{
+#if CPU_TRAP_PROFILE
+    return trap_profile_counts[trap_index & 0x0fff];
+#else
+    (void)trap_index;
+    return 0;
+#endif
+}
+
 #if CPU_COMPACT_DISPATCH
-static uae_u16 *compact_dispatch_index = NULL;       // 128KB (65536 x u16), internal SRAM
-static cpuop_func **compact_dispatch_handlers = NULL; // unique handlers, internal SRAM
+static uae_u16 *compact_dispatch_index = NULL;        // 65536 opcode -> handler ID
+static cpuop_func **compact_dispatch_handlers = NULL; // handler ID -> function pointer
 static uae_u16 compact_dispatch_handler_count = 0;
+
+bool ReserveCompactDispatchIndex(void)
+{
+	if (compact_dispatch_index != NULL) {
+		return true;
+	}
+#ifdef ARDUINO
+	compact_dispatch_index = (uae_u16 *)heap_caps_malloc(
+		65536 * sizeof(uae_u16), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+#else
+	compact_dispatch_index = (uae_u16 *)malloc(65536 * sizeof(uae_u16));
+#endif
+	if (compact_dispatch_index == NULL) {
+		write_log("Flat compact dispatch: early 128KB opcode-index reservation failed\n");
+		return false;
+	}
+	write_log("Flat compact dispatch: reserved 128KB opcode index in internal SRAM\n");
+	return true;
+}
 
 static void free_compact_dispatch(void)
 {
 #ifdef ARDUINO
-	if (compact_dispatch_index != NULL) {
-		heap_caps_free(compact_dispatch_index);
-		compact_dispatch_index = NULL;
-	}
-	if (compact_dispatch_handlers != NULL) {
-		heap_caps_free(compact_dispatch_handlers);
-		compact_dispatch_handlers = NULL;
-	}
+	if (compact_dispatch_index != NULL) heap_caps_free(compact_dispatch_index);
+	if (compact_dispatch_handlers != NULL) heap_caps_free(compact_dispatch_handlers);
 #else
 	free(compact_dispatch_index);
-	compact_dispatch_index = NULL;
 	free(compact_dispatch_handlers);
-	compact_dispatch_handlers = NULL;
 #endif
+	compact_dispatch_index = NULL;
+	compact_dispatch_handlers = NULL;
 	compact_dispatch_handler_count = 0;
 }
 
 /*
- * Build a compact opcode dispatch format:
- *   opcode -> 16-bit handler index (in internal SRAM)
- *   handler index -> function pointer (in internal SRAM)
- *
- * This avoids a 256KB PSRAM pointer fetch on every instruction when cpufunctbl
- * falls back to PSRAM, while preserving exact dispatch semantics.
+ * Build an exact flat compact dispatch format. The 128 KiB index is reserved
+ * before subsystem initialization fragments internal SRAM; only the small
+ * unique-handler array is allocated here after the full table is populated.
  */
 static bool build_compact_dispatch(void)
 {
@@ -182,7 +250,9 @@ static bool build_compact_dispatch(void)
 		return true;
 	}
 
-	free_compact_dispatch();
+	if (!ReserveCompactDispatchIndex()) {
+		return false;
+	}
 
 	const size_t opcode_count = 65536;
 	const size_t hash_size = 16384; // power-of-two
@@ -193,22 +263,12 @@ static bool build_compact_dispatch(void)
 		uae_u16 idx;
 	};
 
-	uae_u16 *index_tbl = (uae_u16 *)heap_caps_malloc(
-		opcode_count * sizeof(uae_u16),
-		MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-	);
-	if (index_tbl == NULL) {
-		write_log("Compact dispatch: failed to allocate 128KB index table in internal SRAM\n");
-		return false;
-	}
-
 	hash_entry *hash_tbl = (hash_entry *)heap_caps_malloc(
 		hash_size * sizeof(hash_entry),
 		MALLOC_CAP_SPIRAM
 	);
 	if (hash_tbl == NULL) {
-		heap_caps_free(index_tbl);
-		write_log("Compact dispatch: failed to allocate hash table in PSRAM\n");
+		write_log("Flat compact dispatch: failed to allocate temporary hash table\n");
 		return false;
 	}
 	memset(hash_tbl, 0, hash_size * sizeof(hash_entry));
@@ -219,8 +279,7 @@ static bool build_compact_dispatch(void)
 	);
 	if (tmp_handlers == NULL) {
 		heap_caps_free(hash_tbl);
-		heap_caps_free(index_tbl);
-		write_log("Compact dispatch: failed to allocate temporary handler list in PSRAM\n");
+		write_log("Flat compact dispatch: failed to allocate temporary handler list\n");
 		return false;
 	}
 
@@ -232,65 +291,134 @@ static bool build_compact_dispatch(void)
 
 		for (;;) {
 			hash_entry *entry = &hash_tbl[slot];
-			if (entry->key == 0) {
-				if (unique_count == 0xFFFF) {
-					heap_caps_free(tmp_handlers);
-					heap_caps_free(hash_tbl);
-					heap_caps_free(index_tbl);
-					write_log("Compact dispatch: too many unique handlers (%u)\n", unique_count);
-					return false;
+				if (entry->key == 0) {
+					if (unique_count == 0xFFFF) {
+						heap_caps_free(tmp_handlers);
+						heap_caps_free(hash_tbl);
+						write_log("Flat compact dispatch: too many unique handlers (%u)\n", unique_count);
+						return false;
+					}
+					entry->key = key;
+					entry->idx = unique_count;
+					tmp_handlers[unique_count] = cpufunctbl[opcode];
+					compact_dispatch_index[opcode] = unique_count;
+					unique_count++;
+					break;
 				}
-				entry->key = key;
-				entry->idx = unique_count;
-				tmp_handlers[unique_count] = cpufunctbl[opcode];
-				index_tbl[opcode] = unique_count;
-				unique_count++;
-				break;
-			}
-			if (entry->key == key) {
-				index_tbl[opcode] = entry->idx;
-				break;
+				if (entry->key == key) {
+					compact_dispatch_index[opcode] = entry->idx;
+					break;
 			}
 			slot = (slot + 1) & hash_mask;
 			probes++;
-			if (probes >= hash_size) {
-				heap_caps_free(tmp_handlers);
-				heap_caps_free(hash_tbl);
-				heap_caps_free(index_tbl);
-				write_log("Compact dispatch: hash table overflow (%u unique handlers)\n", unique_count);
-				return false;
+				if (probes >= hash_size) {
+					heap_caps_free(tmp_handlers);
+					heap_caps_free(hash_tbl);
+					write_log("Flat compact dispatch: hash table overflow (%u unique handlers)\n", unique_count);
+					return false;
+				}
 			}
 		}
-	}
 
-	cpuop_func **handlers = (cpuop_func **)heap_caps_malloc(
-		(size_t)unique_count * sizeof(cpuop_func *),
-		MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT
-	);
-	if (handlers == NULL) {
+	const size_t handlers_bytes = (size_t)unique_count * sizeof(cpuop_func *);
+	compact_dispatch_handlers = (cpuop_func **)heap_caps_malloc(
+		handlers_bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+	if (compact_dispatch_handlers == NULL) {
 		heap_caps_free(tmp_handlers);
 		heap_caps_free(hash_tbl);
-		heap_caps_free(index_tbl);
-		write_log("Compact dispatch: failed to allocate %u-byte handler table in internal SRAM\n",
-		          (unsigned)(unique_count * sizeof(cpuop_func *)));
+		write_log("Flat compact dispatch: %u-byte handler table allocation failed\n",
+		          (unsigned)handlers_bytes);
 		return false;
 	}
-	memcpy(handlers, tmp_handlers, (size_t)unique_count * sizeof(cpuop_func *));
-
+	memcpy(compact_dispatch_handlers, tmp_handlers, handlers_bytes);
 	heap_caps_free(tmp_handlers);
 	heap_caps_free(hash_tbl);
-
-	compact_dispatch_index = index_tbl;
-	compact_dispatch_handlers = handlers;
 	compact_dispatch_handler_count = unique_count;
 
-	write_log("Compact dispatch enabled: %u unique handlers, opcode index in internal SRAM\n",
-	          compact_dispatch_handler_count);
+	write_log("Flat compact dispatch enabled: %u handlers, %u internal bytes total\n",
+	          compact_dispatch_handler_count,
+	          (unsigned)(65536 * sizeof(uae_u16) + handlers_bytes));
 	return true;
 #else
 	return false;
 #endif
 }
+#endif
+
+#if CPU_TRACE_CACHE
+// A data-only threaded trace cache: unlike native JIT code this needs no
+// executable writes, so it works with the P4 bootloader's locked W^X policy.
+// One entry replaces eight guest opcode reads and eight PSRAM table lookups
+// with internal-SRAM loads. The expected-PC chain safely exits when a branch
+// takes a path different from the one recorded.
+#define CPU_TRACE_LENGTH 8
+#define CPU_TRACE_SLOTS 128
+
+struct cpu_trace_item {
+	cpuop_func *handler;
+	uaecptr expected_next_pc;
+	uae_u16 opcode;
+	uae_u16 reserved;
+};
+
+struct cpu_trace_entry {
+	uaecptr start_pc;
+	uae_u8 count;
+	uae_u8 reserved[3];
+	cpu_trace_item items[CPU_TRACE_LENGTH];
+};
+
+DRAM_ATTR static cpu_trace_entry cpu_trace_cache[CPU_TRACE_SLOTS];
+
+void FlushCPUTraceCache(void)
+{
+	memset(cpu_trace_cache, 0, sizeof(cpu_trace_cache));
+}
+
+static inline cpu_trace_entry *cpu_trace_slot(uaecptr pc)
+{
+	uae_u32 hash = (pc >> 1) ^ (pc >> 9) ^ (pc >> 17);
+	return &cpu_trace_cache[hash & (CPU_TRACE_SLOTS - 1)];
+}
+
+static inline int cpu_trace_execute(cpuop_func **tbl)
+{
+	const uaecptr start_pc = m68k_getpc();
+	cpu_trace_entry *trace = cpu_trace_slot(start_pc);
+
+	// Validate the entry opcode on every use. FlushCPUTraceCache covers normal
+	// Mac OS code-patch notifications; this check also catches unannounced SMC
+	// at a trace boundary for one guest read per eight cached instructions.
+	if (likely(trace->count != 0 && trace->start_pc == start_pc &&
+	           GET_OPCODE == trace->items[0].opcode)) {
+		const int count = trace->count;
+		for (int i = 0; i < count; ++i) {
+			const cpu_trace_item *item = &trace->items[i];
+			(*item->handler)(item->opcode);
+			if (unlikely(m68k_getpc() != item->expected_next_pc)) {
+				return i + 1;
+			}
+		}
+		return count;
+	}
+
+	// Miss/collision: execute once through the normal interpreter while
+	// recording the exact path, then publish the entry by setting count last.
+	trace->count = 0;
+	trace->start_pc = start_pc;
+	for (int i = 0; i < CPU_TRACE_LENGTH; ++i) {
+		cpu_trace_item *item = &trace->items[i];
+		const uae_u32 opcode = GET_OPCODE;
+		item->opcode = (uae_u16)opcode;
+		item->handler = tbl[opcode];
+		(*item->handler)(opcode);
+		item->expected_next_pc = m68k_getpc();
+	}
+	trace->count = CPU_TRACE_LENGTH;
+	return CPU_TRACE_LENGTH;
+}
+#else
+void FlushCPUTraceCache(void) {}
 #endif
 
 #if FLIGHT_RECORDER
@@ -1526,6 +1654,40 @@ void REGPARAM2 op_illg (uae_u32 opcode)
 	uaecptr pc = m68k_getpc ();
 
 	if ((opcode & 0xF000) == 0xA000) {
+#if CPU_TRAP_PROFILE
+		trap_profile_counts[opcode & 0x0fff]++;
+		if (opcode == 0xA829)
+			layer_selector_counts[m68k_dreg(regs, 0) & 0xff]++;
+#endif
+#if CPU_NATIVE_QD_ACCEL
+		if (QuickDrawAccelTryTrap((uint16)opcode))
+			return;
+#endif
+#if CPU_NATIVE_IS_LAYER
+		/*
+		 * LayerDispatch selector 2 (IsLayer) is the hottest A-line operation
+		 * in Speedometer's Color Tests.  System 7 implements it as a single
+		 * GrafPort marker test: port->txSize (offset 0x4a) == 0xdead.
+		 *
+		 * Pascal Toolbox ABI at trap entry:
+		 *   (A7)   = GrafPtr argument (long)
+		 *   4(A7)  = caller-owned Boolean result slot
+		 * The trap pops the argument and leaves the result for the caller.
+		 */
+		if (opcode == 0xA829 && (m68k_dreg(regs, 0) & 0xff) == 0x02) {
+			const uaecptr sp = m68k_areg(regs, 7);
+			if (sp <= RAMSize - 5) {
+				const uaecptr port = get_long(sp);
+				if (port == 0 || port <= RAMSize - 0x4c) {
+					const bool is_layer = port != 0 && get_word(port + 0x4a) == 0xdead;
+					put_byte(sp + 4, is_layer ? 1 : 0);
+					m68k_areg(regs, 7) = sp + 4;
+					m68k_incpc(2);
+					return;
+				}
+			}
+		}
+#endif
 		Exception(0xA,0);
 		return;
 	}
@@ -1689,61 +1851,66 @@ void m68k_do_execute (void)
 		// Keep local copies of dispatch structures in this hot loop.
 		cpuop_func **const tbl = cpufunctbl;
 #if CPU_COMPACT_DISPATCH
-		uae_u16 *const compact_idx = compact_dispatch_index;
+		uae_u16 *const compact_index = compact_dispatch_index;
 		cpuop_func **const compact_handlers = compact_dispatch_handlers;
 #endif
 
+#if USE_RV32_JIT
+		// Execute already-translated blocks at the current PC before falling
+		// through to one interpreter instruction on a cache miss. The miss path
+		// also attempts compilation, so hot code promotes itself naturally.
+		while (batch_count > 0) {
+			int jit_n = jit_try_execute(m68k_getpc());
+			if (jit_n <= 0) break;
+			batch_count -= jit_n;
+			if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
+				special_hit = true;
+				break;
+			}
+		}
+			if (!special_hit && batch_count > 0) {
+#endif
+
+#if CPU_TRACE_CACHE
+			while (batch_count >= CPU_TRACE_LENGTH) {
+				const int executed = cpu_trace_execute(tbl);
+				batch_count -= executed;
+				if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
+					special_hit = true;
+					break;
+				}
+			}
+			while (!special_hit && batch_count-- > 0) {
+				const uae_u32 opcode = GET_OPCODE;
+				(*tbl[opcode])(opcode);
+				if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
+					special_hit = true;
+					break;
+				}
+			}
+#else
 #if CPU_COMPACT_DISPATCH
-		if (unlikely(compact_idx != NULL && compact_handlers != NULL)) {
+		if (unlikely(compact_index != NULL && compact_handlers != NULL)) {
+#if FLIGHT_RECORDER
+#define CPU_COMPACT_RECORD() m68k_record_step(m68k_getpc())
+#else
+#define CPU_COMPACT_RECORD() do { } while (0)
+#endif
+#define CPU_COMPACT_EXEC_ONE() do { \
+	uae_u32 opcode = GET_OPCODE; \
+	CPU_COMPACT_RECORD(); \
+	(*compact_handlers[compact_index[opcode]])(opcode); \
+} while (0)
 			// Poll urgent flags once per 8 dispatched instructions.
 			while (batch_count >= 8) {
-				uae_u32 opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
 				batch_count -= 8;
 				if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
 					special_hit = true;
@@ -1752,29 +1919,10 @@ void m68k_do_execute (void)
 			}
 
 			while (!special_hit && batch_count >= 4) {
-				uae_u32 opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
-
-				opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-				m68k_record_step(m68k_getpc());
-#endif
-				(*compact_handlers[compact_idx[opcode]])(opcode);
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
+				CPU_COMPACT_EXEC_ONE();
 				batch_count -= 4;
 				if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
 					special_hit = true;
@@ -1782,17 +1930,15 @@ void m68k_do_execute (void)
 				}
 			}
 
-				while (!special_hit && batch_count-- > 0) {
-					uae_u32 opcode = GET_OPCODE;
-#if FLIGHT_RECORDER
-					m68k_record_step(m68k_getpc());
-#endif
-					(*compact_handlers[compact_idx[opcode]])(opcode);
-					if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
-						special_hit = true;
-						break;
+			while (!special_hit && batch_count-- > 0) {
+				CPU_COMPACT_EXEC_ONE();
+				if (unlikely(CPU_INNER_SPECIAL_PENDING())) {
+					special_hit = true;
+					break;
 				}
 			}
+#undef CPU_COMPACT_EXEC_ONE
+#undef CPU_COMPACT_RECORD
 		} else
 #endif
 		{
@@ -1895,6 +2041,10 @@ void m68k_do_execute (void)
 				}
 			}
 			}
+#endif // CPU_TRACE_CACHE
+#if USE_RV32_JIT
+		}
+#endif
 
 			// batch_count may be -1 when the scalar loop exits after final iteration.
 			const int instructions_executed =

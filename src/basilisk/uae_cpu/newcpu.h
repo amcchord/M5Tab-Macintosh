@@ -27,6 +27,10 @@
 #define FLIGHT_RECORDER 0
 #endif
 
+#ifndef CPU_COMPACT_DISPATCH
+#define CPU_COMPACT_DISPATCH 1
+#endif
+
 #include "m68k.h"
 #include "readcpu.h"
 #include "spcflags.h"
@@ -70,6 +74,13 @@ struct cputbl {
 // Opcode dispatch table (64K entries)
 extern cpuop_func **cpufunctbl;
 extern bool cpufunctbl_in_spiram;
+#if CPU_COMPACT_DISPATCH
+extern bool ReserveCompactDispatchIndex(void);
+#endif
+extern void FlushCPUTraceCache(void);
+extern void CPUTrapProfileReset(void);
+extern uint32 CPUTrapProfileRead(uint16 trap_index);
+extern uint32 CPUTrapProfileReadLayer(uint8 selector);
 
 #if USE_JIT
 typedef void compop_func (uae_u32) REGPARAM;

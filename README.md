@@ -230,6 +230,17 @@ This project runs a **Motorola 68040** emulator that can boot real Macintosh ROM
 - **Networking**: WiFi internet access via NAT router (TCP, UDP, ICMP, DHCP)
 - **Video**: Optimized pipeline with write-time dirty tracking, double-buffered DMA, and tile-based rendering
 
+### Closed-loop host testing
+
+The programming/serial connection can also expose the logical Mac framebuffer
+and inject ADB mouse/keyboard input. Small, ordered input commands stay on
+serial; screenshots prefer a tokenized, CRC-checked WiFi endpoint with an
+integrity-checked serial fallback. Transfer tasks run on core 0 while 68k
+emulation stays on core 1. The included Python bridge can save PNG screenshots,
+click, drag, type, send key chords, or run as a persistent MCP stdio server for
+an LLM-driven `screenshot -> act -> screenshot` loop. See
+[`AUTOMATION.md`](AUTOMATION.md) for setup and commands.
+
 ## Hardware
 
 ### [M5Stack Tab5](https://shop.m5stack.com/products/m5stack-tab5-iot-development-kit-esp32-p4)

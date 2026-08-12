@@ -37,6 +37,10 @@
 #define DEBUG 0
 #include "debug.h"
 
+#ifndef CPU_NATIVE_BLOCK_MOVE
+#define CPU_NATIVE_BLOCK_MOVE 0
+#endif
+
 
 /*
  *  Search resource for byte string, return offset (or 0)
@@ -218,6 +222,23 @@ void CheckLoad(uint32 type, int16 id, uint8 *p, uint32 size)
 
 	} else if (type == FOURCC('g','p','c','h') && id == 750) {
 		D(bug(" gpch 750 found\n"));
+
+#if CPU_NATIVE_BLOCK_MOVE
+		/* Preserve the complete Mac OS A-line dispatcher path, but replace
+		 * the System 7 register-based BlockMove implementation itself. */
+		static const uint8 native_bmove_entry[] = {
+			0x0c, 0x38, 0x00, 0x04, 0x01, 0x2f, 0x67, 0x00
+		};
+		base = find_rsrc_data(p, size, native_bmove_entry,
+		                      sizeof(native_bmove_entry));
+		if (base) {
+			p16 = (uint16 *)(p + base);
+			*p16++ = htons(M68K_EMUL_OP_NATIVE_BLOCK_MOVE);
+			*p16 = htons(M68K_RTS);
+			FlushCodeCache(p + base, 4);
+			D(bug("  native BlockMove patch applied\n"));
+		}
+#endif
 
 		// Don't use PTEST instruction in BlockMove() (7.5, 7.6, 7.6.1, 8.0)
 		static const uint8 dat[] = {0x20, 0x5f, 0x22, 0x5f, 0x0c, 0x38, 0x00, 0x04, 0x01, 0x2f};

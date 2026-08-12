@@ -665,6 +665,51 @@ void EmulOp(uint16 opcode, M68kRegisters *r)
 			FlushCodeCache(Mac2HostAddr(r->a[0]), r->a[1]);
 			break;
 
+		case M68K_EMUL_OP_NATIVE_BLOCK_MOVE: {
+			/* The System 7 gpch enters its copy implementation with the
+			 * register-based BlockMove ABI already decoded by Mac OS. */
+			const uint32 src = r->a[0];
+			const uint32 dst = r->a[1];
+			const int32 byte_count = (int32)r->d[0];
+			if (byte_count <= 0) {
+				r->d[0] = 0;
+				break;
+			}
+
+			const uint32 size = (uint32)byte_count;
+			const bool ram_src = src < RAMSize && size <= RAMSize - src;
+			const bool ram_dst = dst < RAMSize && size <= RAMSize - dst;
+			const bool rom_src = src >= ROMBaseMac && src - ROMBaseMac < ROMSize &&
+			                      size <= ROMSize - (src - ROMBaseMac);
+			const bool frame_dst = MacFrameLayout == FLAYOUT_DIRECT &&
+			                       dst >= BASILISK_FRAME_BASE_MAC &&
+			                       dst - BASILISK_FRAME_BASE_MAC < MacFrameSize &&
+			                       size <= MacFrameSize -
+			                                   (dst - BASILISK_FRAME_BASE_MAC);
+
+			if (ram_src && ram_dst) {
+				memmove(RAMBaseHost + dst, RAMBaseHost + src, size);
+			} else if (rom_src && ram_dst) {
+				memmove(RAMBaseHost + dst,
+				        ROMBaseHost + (src - ROMBaseMac), size);
+			} else if (ram_src && frame_dst) {
+				const uint32 frame_offset = dst - BASILISK_FRAME_BASE_MAC;
+				memmove(MacFrameBaseHost + frame_offset, RAMBaseHost + src, size);
+				VideoMarkDirtyRange(frame_offset, size);
+			} else if (dst > src && dst - src < size) {
+				for (uint32 offset = size; offset != 0; --offset)
+					put_byte(dst + offset - 1, get_byte(src + offset - 1));
+			} else {
+				for (uint32 offset = 0; offset < size; ++offset)
+					put_byte(dst + offset, get_byte(src + offset));
+			}
+
+			if (ram_dst)
+				FlushCodeCache(RAMBaseHost + dst, size);
+			r->d[0] = 0;
+			break;
+		}
+
 		case M68K_EMUL_OP_DEBUGUTIL:
 		//	printf("DebugUtil d0=%08lx  a5=%08lx\n", r->d[0], r->a[5]);
 			r->d[0] = DebugUtil(r->d[0]);

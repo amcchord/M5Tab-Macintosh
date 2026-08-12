@@ -283,6 +283,18 @@ extern void VideoRefresh(void);
 extern void VideoSignalFrameReady(void);  // Signal video task that a new frame is ready (non-blocking)
 extern void VideoFlushDirtyTiles(void);
 
+/*
+ * Copy the current logical Mac display into an 8-bit indexed snapshot.
+ *
+ * `pixels` must have room for width * height bytes (the maximum is
+ * BOARD_MAC_SCREEN_WIDTH * BOARD_MAC_SCREEN_HEIGHT). The accompanying
+ * RGB565 palette is copied atomically with the active video mode. This is
+ * used by the host-automation bridge so tests see Mac coordinates and pixels,
+ * independent of panel scaling or rotation.
+ */
+extern bool VideoCaptureFrame(uint8 *pixels, uint32 pixel_capacity,
+                              uint16 *palette, uint16 *width, uint16 *height);
+
 // Write-time dirty tracking for framebuffer - called from memory.cpp on writes
 // These mark tiles dirty immediately when CPU writes to framebuffer, avoiding
 // expensive per-frame comparison

@@ -47,6 +47,7 @@ constexpr uint8_t FAILURE_LIMIT = 3;
 
 bool s_bus_ready = false;
 bool s_connected = false;
+bool s_probe_disabled = false;
 uint8_t s_firmware_version = 0;
 uint8_t s_pending_events = 0;
 uint8_t s_consecutive_failures = 0;
@@ -78,7 +79,12 @@ bool read_registers(uint8_t reg, uint8_t *data, size_t length)
     if (!s_bus_ready || data == nullptr || length == 0) return false;
 
     Wire.beginTransmission(TAB5_KEYBOARD_ADDRESS);
-    if (Wire.write(reg) != 1 || Wire.endTransmission(false) != 0) {
+    /* The Arduino 3.3.8 ESP32-P4 Wire implementation can leave an absent
+     * device in ESP_ERR_INVALID_STATE when a no-stop write is followed by
+     * requestFrom(). The keyboard accepts a stop between its register select
+     * and read, and a completed write also lets an unpopulated port fail
+     * quietly before requestFrom() is attempted. */
+    if (Wire.write(reg) != 1 || Wire.endTransmission(true) != 0) {
         return false;
     }
 
@@ -162,9 +168,27 @@ bool probe_keyboard(uint32_t now)
         return false;
     }
 
+    /* Probe with an empty transaction before attempting a register write.
+     * Arduino's I2C HAL treats a failed zero-length probe as a normal verbose
+     * result, while a write to an absent device emits an error on every poll.
+     * An optional, disconnected keyboard must not flood the USB automation
+     * channel. */
+    Wire.beginTransmission(TAB5_KEYBOARD_ADDRESS);
+    if (Wire.endTransmission(true) != 0) {
+        s_next_probe_ms = now + PROBE_INTERVAL_MS;
+        return false;
+    }
+
     uint8_t firmware_version = 0;
     if (!validate_identity(firmware_version)) {
-        s_next_probe_ms = now + PROBE_INTERVAL_MS;
+        /* On Tab5 the display stack may already own this hardware I2C
+         * controller. In that state an address probe can succeed but the
+         * first register transaction returns ESP_ERR_INVALID_STATE. Retrying
+         * forever floods the same USB CDC channel used by automation. A real
+         * absent keyboard NACKs the address probe above and remains eligible
+         * for slow hot-plug retries; only this unusable false-positive path is
+         * suspended for the current boot. */
+        s_probe_disabled = true;
         return false;
     }
 
@@ -251,6 +275,7 @@ extern "C" bool BoardKeyboard_Init(void)
     pinMode(TAB5_KEYBOARD_INT, INPUT_PULLUP);
 
     s_connected = false;
+    s_probe_disabled = false;
     s_firmware_version = 0;
     s_pending_events = 0;
     s_consecutive_failures = 0;
@@ -268,6 +293,7 @@ extern "C" bool BoardKeyboard_Init(void)
 
 extern "C" bool BoardKeyboard_Poll(BoardKeyboardEvent *event)
 {
+    if (s_probe_disabled) return false;
     const uint32_t now = millis();
 
     if (!s_connected) {
@@ -345,6 +371,7 @@ extern "C" void BoardKeyboard_Exit(void)
     Wire.end();
     s_bus_ready = false;
     s_connected = false;
+    s_probe_disabled = false;
     s_firmware_version = 0;
     s_pending_events = 0;
     s_consecutive_failures = 0;

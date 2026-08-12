@@ -27,6 +27,10 @@ release/
 *.hex
 *.map
 
+# Python host tooling
+__pycache__/
+*.py[cod]
+
 # Library dependencies (managed by PlatformIO)
 lib/*/
 # ...except our vendored dependencies for the Waveshare build, which must
