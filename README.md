@@ -550,7 +550,7 @@ esptool --chip esp32p4 --port /dev/cu.usbmodem* \
 
 On every startup, a **classic Mac-style pre-boot configuration screen**
 appears before the 68k actually starts. This is where you pick the
-disk, CD, RAM size, WiFi, shared folder, and (on Tab5) USB Disk mode.
+disk, CD, RAM size, WiFi, shared folder, and USB Disk mode.
 
 <p align="center">
   <img src="screenshots/v4-Preboot.jpeg" width="70%" alt="Pre-boot configuration environment"/>
@@ -580,7 +580,7 @@ is later — WiFi connect can extend the pause up to ~10 s).
 | Audio | Enable / disable sound output | Enabled |
 | WiFi | SSID + password via on-screen keyboard | None |
 | Shared Folder | Any folder on the SD card — appears as a mounted volume in Mac OS | None |
-| USB Disk (Tab5 only) | Expose the SD card over USB Mass Storage via USB-A | Off |
+| USB Disk | Expose the SD card over USB Mass Storage — over USB-A on Tab5, over the USB-OTG port on Waveshare | Off |
 
 Settings are persisted to `/basilisk_settings.txt` on the SD card, so
 the next boot starts with the same layout. The settings UI itself
