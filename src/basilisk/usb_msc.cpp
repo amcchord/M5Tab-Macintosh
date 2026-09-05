@@ -57,6 +57,11 @@
 #include <USB.h>
 #include <USBMSC.h>
 
+// FatFs low-level disk API. Arduino's SD/SD_MMC wrappers only ever ask it
+// for one sector at a time; we need the count argument. See the comment on
+// FsPdrvAccess below.
+#include "diskio.h"
+
 static USBMSC            s_msc;
 static volatile bool     s_exit_requested = false;
 static volatile bool     s_host_mounted   = false;
@@ -67,22 +72,47 @@ static bool              s_usb_started    = false;
 /* MSC <-> SD read/write callbacks                                           */
 /* ------------------------------------------------------------------------- */
 
+/*
+ * Arduino's SD (SPI) and SD_MMC (SDMMC) expose only single-sector
+ * readRAW()/writeRAW(), which hardcode a FatFs count of 1. Driving MSC
+ * through those turned every CONFIG_TINYUSB_MSC_BUFSIZE-sized USB transfer
+ * into BUFSIZE/512 separate single-block SD commands. sdmmc_write_sectors()
+ * issues CMD24 for a count of 1 and CMD25 only for counts above 1, and each
+ * command carries its own program/busy cycle plus a CMD13 status poll, none
+ * of which pipeline. Paying that eight times per 4 KB transfer capped copies
+ * around 250 KB/s -- the USB link was never the bottleneck; the OTG port is
+ * High-Speed and sat idle.
+ *
+ * Both classes register a FatFs diskio driver whose read/write DO take a
+ * sector count, so one disk_write() call issues a proper multi-block
+ * transfer (CMD25) instead. The only thing Arduino withholds is the drive
+ * number, which lives in a protected member. FsPdrvAccess reaches it the
+ * standard way -- through a derived class -- and works unchanged for both
+ * boards' filesystem types. Nothing is ever constructed; the cast exists
+ * only to satisfy the protected-member access rule.
+ */
+template <typename FsT>
+struct FsPdrvAccess : public FsT {
+    static uint8_t get(FsT &fs) { return static_cast<FsPdrvAccess &>(fs)._pdrv; }
+};
+
+static inline uint8_t sd_pdrv(void)
+{
+    return FsPdrvAccess<decltype(SD_FS)>::get(SD_FS);
+}
+
 static int32_t msc_on_read(uint32_t lba, uint32_t offset, void *buffer,
                            uint32_t bufsize)
 {
-    // SD_FS's readRAW works in whole sectors at LBA granularity. The
-    // offset argument is always 0 in our usage because bufsize is always
-    // a multiple of sectorSize; the Arduino example pattern handles that
-    // by iterating sector-at-a-time which also matches bufsize=N*secsz.
+    // offset is always 0 and bufsize always a whole number of sectors,
+    // because we advertise the card's own sector size to the MSC class.
     (void)offset;
     uint32_t sec_size = SD_FS.sectorSize();
     if (!sec_size) return -1;
     uint32_t nsec = bufsize / sec_size;
-    uint8_t *out  = static_cast<uint8_t *>(buffer);
-    for (uint32_t i = 0; i < nsec; ++i) {
-        if (!SD_FS.readRAW(out + i * sec_size, lba + i)) {
-            return -1;
-        }
+    if (!nsec) return 0;
+    if (disk_read(sd_pdrv(), static_cast<BYTE *>(buffer), lba, nsec) != RES_OK) {
+        return -1;
     }
     return nsec * sec_size;
 }
@@ -94,11 +124,9 @@ static int32_t msc_on_write(uint32_t lba, uint32_t offset, uint8_t *buffer,
     uint32_t sec_size = SD_FS.sectorSize();
     if (!sec_size) return -1;
     uint32_t nsec = bufsize / sec_size;
-    for (uint32_t i = 0; i < nsec; ++i) {
-        // writeRAW takes a non-const buffer; the MSC callback gives us one.
-        if (!SD_FS.writeRAW(buffer + i * sec_size, lba + i)) {
-            return -1;
-        }
+    if (!nsec) return 0;
+    if (disk_write(sd_pdrv(), buffer, lba, nsec) != RES_OK) {
+        return -1;
     }
     return nsec * sec_size;
 }
