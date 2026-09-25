@@ -2,7 +2,7 @@
 #
 # Build Release Binaries for BasiliskII ESP32
 #
-# Builds firmware for one or both supported boards and produces merged
+# Builds firmware for both boards and their silicon revisions, producing merged
 # single-file binaries that include bootloader + partition table +
 # application, ready to be flashed via esptool in one command.
 #
@@ -10,17 +10,18 @@
 #   ./scripts/build_release.sh [version] [env]
 #
 # Examples:
-#   ./scripts/build_release.sh                  # both boards, release/M5Tab-Macintosh.bin and release/M5Tab-Macintosh-Waveshare-P4-10.1.bin
-#   ./scripts/build_release.sh v3.2             # both boards, versioned filenames
+#   ./scripts/build_release.sh                  # all four board/silicon images
+#   ./scripts/build_release.sh v4.7-beta.1      # all four images, versioned filenames
 #   ./scripts/build_release.sh v3.2 tab5        # only M5Stack Tab5
 #   ./scripts/build_release.sh v3.2 waveshare   # only Waveshare P4 10.1
 #
 # Board shortcuts recognized for the env argument:
 #   tab5, m5tab5, esp32p4_pioarduino -> env:esp32p4_pioarduino
 #   waveshare, waveshare_p4_101, ws  -> env:waveshare_p4_101
+#   tab5-rev3, waveshare-rev3        -> production silicon (v3.1+)
 #
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -38,25 +39,24 @@ ENV_ARG="${2:-all}"
 case "$ENV_ARG" in
     tab5|m5tab5|esp32p4_pioarduino)           ENVS=("esp32p4_pioarduino") ;;
     waveshare|waveshare_p4_101|ws|waveshare101) ENVS=("waveshare_p4_101") ;;
-    all|both|"")                                ENVS=("esp32p4_pioarduino" "waveshare_p4_101") ;;
-    *) echo "ERROR: unknown env '$ENV_ARG'. Use tab5, waveshare, or all."; exit 1 ;;
+    tab5-rev3|esp32p4_pioarduino_rev3) ENVS=("esp32p4_pioarduino_rev3") ;;
+    waveshare-rev3|waveshare_p4_101_rev3) ENVS=("waveshare_p4_101_rev3") ;;
+    all|both|"") ENVS=("esp32p4_pioarduino" "waveshare_p4_101" "esp32p4_pioarduino_rev3" "waveshare_p4_101_rev3") ;;
+    *) echo "ERROR: unknown env '$ENV_ARG'. Use tab5, waveshare, tab5-rev3, waveshare-rev3, or all."; exit 1 ;;
 esac
 
 # Per-env output filename prefixes
 name_for_env() {
-    case "$1" in
-        esp32p4_pioarduino)  echo "M5Tab-Macintosh" ;;
-        waveshare_p4_101)    echo "M5Tab-Macintosh-Waveshare-P4-10.1" ;;
-        *) echo "$1" ;;
-    esac
+    python3 "$SCRIPT_DIR/release_images.py" "$1"
 }
 
 # Ensure PlatformIO's virtual environment is on PATH in fresh shells. It
 # normally provides both pio and esptool, so do this before locating either.
-if [ -x "$HOME/.platformio/penv/bin/pio" ]; then
+if [ -z "${PIO:-}" ] && [ -x "$HOME/.platformio/penv/bin/pio" ]; then
     export PATH="$HOME/.platformio/penv/bin:$PATH"
 fi
-if ! command -v pio &>/dev/null; then
+PIO_CMD="${PIO:-pio}"
+if ! command -v "$PIO_CMD" &>/dev/null; then
     echo "ERROR: pio not found. Is PlatformIO installed?"
     exit 1
 fi
@@ -93,7 +93,7 @@ for env in "${ENVS[@]}"; do
     FIRMWARE="$BUILD_DIR/firmware.bin"
 
     echo "[1/3] pio run -e $env"
-    if ! pio run -e "$env"; then
+    if ! "$PIO_CMD" run -e "$env"; then
         echo "ERROR: Build failed for env $env"
         exit 1
     fi
@@ -123,22 +123,15 @@ for env in "${ENVS[@]}"; do
 
     echo ""
     echo "[3/3] Merging to $OUTPUT_NAME"
-    $ESPTOOL_CMD --chip esp32p4 merge-bin \
+    "$ESPTOOL_CMD" --chip esp32p4 merge-bin \
         --output "$OUTPUT_FILE" \
-        --flash-mode qio \
-        --flash-freq 80m \
-        --flash-size 16MB \
         "$BOOTLOADER_OFFSET" "$BOOTLOADER" \
         "$PARTITION_OFFSET"  "$PARTITIONS" \
-        "$APP_OFFSET"        "$FIRMWARE" 2>&1 | grep -v "^Warning:" || true
+        "$APP_OFFSET"        "$FIRMWARE"
 
-    # Validate bootloader magic byte at +0x2000 in the merged image
-    HEADER=$(xxd -s 0x2000 -l 4 "$OUTPUT_FILE" 2>/dev/null | awk '{print $2$3}')
-    if [ "$HEADER" = "e903004f" ]; then
-        echo "      Bootloader header: VALID (0xE9 magic byte)"
-    else
-        echo "      WARNING: bootloader header mismatch ($HEADER; expected e903004f)"
-    fi
+    python3 "$SCRIPT_DIR/release_images.py" "$env" \
+        --merged "$OUTPUT_FILE" --build-dir "$BUILD_DIR"
+    cp "$BUILD_DIR/release-build.json" "$OUTPUT_DIR/${name_prefix}-${VERSION:-unversioned}.json"
     SIZE=$(ls -lh "$OUTPUT_FILE" | awk '{print $5}')
     echo "      File size: $SIZE"
     echo ""

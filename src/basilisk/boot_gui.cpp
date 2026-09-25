@@ -20,6 +20,7 @@
 #include <string>
 #include <climits>
 #include <time.h>
+#include "mac_clock.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
@@ -786,29 +787,16 @@ static void drawAppleGlyph(int x, int y)
     }
 }
 
-// Format a short "H:MM AM"-style clock string into `out` for the right side
-// of the menu bar. If a real wall-clock is available (time() is non-zero),
-// we use it; otherwise we fall back to "uptime" - minutes-since-boot rendered
-// as "00:MM" - so the bar always has something to show without screaming
-// about a missing RTC.
+// Show the same local clock as the guest, including a saved manual setting.
 static void formatMenuClock(char *out, size_t n)
 {
-    time_t now = time(nullptr);
-    if (now > 100000) {  // anything vaguely sane means we have an RTC / NTP
-        struct tm tm_now;
-        localtime_r(&now, &tm_now);
-        int hour12 = tm_now.tm_hour % 12;
-        if (hour12 == 0) hour12 = 12;
-        snprintf(out, n, "%d:%02d %s",
-                 hour12, tm_now.tm_min,
-                 tm_now.tm_hour >= 12 ? "PM" : "AM");
-        return;
-    }
-
-    uint32_t up_s  = millis() / 1000;
-    uint32_t up_m  = up_s / 60;
-    uint32_t up_h  = up_m / 60;
-    snprintf(out, n, "%u:%02u", (unsigned)(up_h % 100), (unsigned)(up_m % 60));
+    time_t now = static_cast<int64_t>(TimerDateTime()) - 2082844800LL;
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);  // Mac seconds already represent local time.
+    int hour12 = tm_now.tm_hour % 12;
+    if (hour12 == 0) hour12 = 12;
+    snprintf(out, n, "%d:%02d %s", hour12, tm_now.tm_min,
+             tm_now.tm_hour >= 12 ? "PM" : "AM");
 }
 
 static void drawMenuBar(const char *title)
@@ -3403,16 +3391,8 @@ void BootGUI_RunSettingsOnly(void)
         return;
     }
 
-    // /basilisk_settings.txt "skip_gui=yes" still honored - just short-
-    // circuit the settings UI and clean up WiFi / touch task.
-    if (skip_gui) {
-        Serial.println("[BOOT_GUI] skip_gui=yes, skipping settings screen");
-        Serial.printf("[BOOT_GUI] Using saved settings: disk=%s, ram=%dMB\n",
-                      selected_disk_path, selected_ram_mb);
-        stopTouchTask();
-        bootGuiCleanupWifi();
-        return;
-    }
+    // This entry point follows an explicit splash tap or crash recovery.
+    // A saved skip_gui flag must never lock the user out of settings.
 
     Serial.println("[BOOT_GUI] Running settings screen...");
     runSettingsScreen();

@@ -46,6 +46,65 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
+## v4.7 beta: silicon compatibility, clock settings, and crash recovery
+
+[Download v4.7-beta.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7-beta.1).
+This beta is build-tested on all four targets; device feedback is still needed.
+
+- **Production ESP32-P4 support (#17):** separate `Rev3` images use the
+  production bootloader and libraries. Both display backends let ESP-IDF choose
+  the correct DSI PHY clock. The original images remain available for older chips.
+- **Set the Mac clock (#13):** open the Mac's **Apple menu → Control Panels →
+  Date & Time** (named **General Controls** on some System versions). Guest RTC
+  writes now take effect and are saved in the device's flash. The boot menu uses
+  the same clock. The software clock resumes from its last save after restart;
+  it does not count time while powered off or synchronize with the internet.
+  Clock edits save on the next emulator loop; checkpoints occur every five
+  minutes and at clean Mac shutdown. Erasing or reflashing merged firmware can clear this setting.
+- **Crash recovery (#15):** panic, watchdog, and brownout resets open Boot
+  Settings instead of immediately restarting the guest. A splash tap opens
+  settings even with `skip_gui=yes`. Audio backends now validate the complete
+  guest sample-buffer range before reading it. These changes mitigate crashes
+  and provide recovery; Maelstrom compatibility is still awaiting reproduction.
+
+### Choose the image for your chip revision
+
+The chip revision is separate from the display-controller or PCB revision.
+Check the serial boot log or run `esptool --port PORT chip-id`.
+
+| Board / ESP32-P4 silicon | Download filename | PlatformIO environment |
+|---|---|---|
+| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7-beta.1.bin` | `esp32p4_pioarduino` |
+| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7-beta.1.bin` | `esp32p4_pioarduino_rev3` |
+| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7-beta.1.bin` | `waveshare_p4_101` |
+| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7-beta.1.bin` | `waveshare_p4_101_rev3` |
+
+The production SDK requires **v3.1 minimum**; v3.0 is not covered. Flash merged
+images at **`0x0`**. Using a Rev3 image on an older chip (or vice versa) can fail
+before the app starts, so application-level auto-detection cannot solve this.
+
+### Recover after a game crash
+
+Tap the Happy Mac splash to enter Boot Settings. If necessary, create an empty
+file named `basilisk_recovery.txt` in the SD card root; it forces settings to stay
+open until you tap Boot. Delete that file to restore normal automatic boot.
+Try disabling **Audio** or selecting a known-good disk/CD in settings.
+
+If the same disk still fails, back up the SD card and rename `BasiliskII_XPRAM`
+to `BasiliskII_XPRAM.backup` to reset guest PRAM without deleting your disk image.
+An interrupted write can damage a guest filesystem; use a bootable Disk Tools
+image to check it. Panics/watchdogs and power loss bypass shutdown hooks, so
+periodic flushing cannot guarantee recovery of the most recent writes.
+
+For M5Launcher reports, compare with a direct flash of the merged release at
+`0x0`; this replaces the launcher in device flash. Please report the firmware
+filename, board/chip revision, Mac OS and game version, whether direct flashing
+changes the result, and the serial log from startup through the first crash.
+
+Elecrow CrowPanel Advanced 9-inch support (#10) is still under investigation.
+Its panel, audio, SD wiring and 1024×600 scaling need a separate board port;
+these downloads do not target it. See [the issue review](ISSUE_FIXES.md).
+
 ## What's New in v4.5
 
 - **Plug-and-play Tab5 Keyboard** — the official 70-key Tab5
@@ -66,8 +125,7 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
   now flushed every 2 seconds (down from 120 s) and again ~500 ms
   after the guest goes idle, so a power pull during normal use
   loses at most a couple of seconds of writes instead of two
-  minutes. Programmatic resets (`esp_restart`, panics, watchdogs)
-  also drain the buffer through an
+  minutes. Programmatic resets (`esp_restart`) also drain the buffer through an
   `esp_register_shutdown_handler` hook in [`src/main.cpp`](src/main.cpp).
   XPRAM saves opportunistically flush the disk too, since they
   are a strong "the user just changed something" signal.
@@ -526,22 +584,37 @@ pio device monitor
 
 When you build with `pio run`, a merged binary is automatically created in the `release/` directory. This binary includes the bootloader, partition table, and application - ready for single-command flashing.
 
-For versioned releases, use the release script:
+Use Python 3.10–3.13 and PlatformIO Core 6.1.19 or newer (the newer pinned
+platform requires it). For an isolated build environment:
 
 ```bash
-# Create versioned release binaries for both boards
-./scripts/build_release.sh v4.5
+python3.13 -m venv .build/release-tools
+.build/release-tools/bin/python -m pip install platformio==6.2.0 esptool==5.4.0
+PATH="$PWD/.build/release-tools/bin:$PATH" PIO="$PWD/.build/release-tools/bin/pio" \
+  ./scripts/build_release.sh v4.7-beta.1
+```
+
+For an existing supported toolchain, use the release script:
+
+```bash
+# Create all four versioned firmware images
+./scripts/build_release.sh v4.7-beta.1
+
+# Or build only production-silicon Waveshare firmware
+./scripts/build_release.sh v4.7-beta.1 waveshare-rev3
 
 # Output:
-#   release/M5Tab-Macintosh-v4.5.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.5.bin
+#   release/M5Tab-Macintosh-v4.7-beta.1.bin
+#   release/M5Tab-Macintosh-Rev3-v4.7-beta.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7-beta.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7-beta.1.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 921600 write-flash 0x0 release/M5Tab-Macintosh-v4.5.bin
+    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7-beta.1.bin
 ```
 
 ---
