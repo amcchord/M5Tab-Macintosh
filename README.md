@@ -46,10 +46,12 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## v4.7 beta: silicon compatibility, clock settings, and crash recovery
+## v4.7: silicon compatibility, clock settings, and crash recovery
 
-[Download v4.7-beta.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7-beta.1).
-This beta is build-tested on all four targets; device feedback is still needed.
+[Download v4.7](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7).
+Promoted to stable following maintainer testing on September 25, 2026. All four
+firmware downloads are byte-for-byte identical to v4.7-beta.1; if you already
+installed that beta, no reflash is needed. Elecrow support (#10) remains separate.
 
 - **Production ESP32-P4 support (#17):** separate `Rev3` images use the
   production bootloader and libraries. Both display backends let ESP-IDF choose
@@ -64,8 +66,8 @@ This beta is build-tested on all four targets; device feedback is still needed.
 - **Crash recovery (#15):** panic, watchdog, and brownout resets open Boot
   Settings instead of immediately restarting the guest. A splash tap opens
   settings even with `skip_gui=yes`. Audio backends now validate the complete
-  guest sample-buffer range before reading it. These changes mitigate crashes
-  and provide recovery; Maelstrom compatibility is still awaiting reproduction.
+  guest sample-buffer range before reading it. These changes add audio safety
+  and recovery; maintainer testing confirmed the beta changes work.
 
 ### Choose the image for your chip revision
 
@@ -74,10 +76,10 @@ Check the serial boot log or run `esptool --port PORT chip-id`.
 
 | Board / ESP32-P4 silicon | Download filename | PlatformIO environment |
 |---|---|---|
-| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7-beta.1.bin` | `esp32p4_pioarduino` |
-| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7-beta.1.bin` | `esp32p4_pioarduino_rev3` |
-| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7-beta.1.bin` | `waveshare_p4_101` |
-| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7-beta.1.bin` | `waveshare_p4_101_rev3` |
+| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7.bin` | `esp32p4_pioarduino` |
+| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7.bin` | `esp32p4_pioarduino_rev3` |
+| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.bin` | `waveshare_p4_101` |
+| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.bin` | `waveshare_p4_101_rev3` |
 
 The production SDK requires **v3.1 minimum**; v3.0 is not covered. Flash merged
 images at **`0x0`**. Using a Rev3 image on an older chip (or vice versa) can fail
@@ -591,30 +593,30 @@ platform requires it). For an isolated build environment:
 python3.13 -m venv .build/release-tools
 .build/release-tools/bin/python -m pip install platformio==6.2.0 esptool==5.4.0
 PATH="$PWD/.build/release-tools/bin:$PATH" PIO="$PWD/.build/release-tools/bin/pio" \
-  ./scripts/build_release.sh v4.7-beta.1
+  ./scripts/build_release.sh v4.7
 ```
 
 For an existing supported toolchain, use the release script:
 
 ```bash
 # Create all four versioned firmware images
-./scripts/build_release.sh v4.7-beta.1
+./scripts/build_release.sh v4.7
 
 # Or build only production-silicon Waveshare firmware
-./scripts/build_release.sh v4.7-beta.1 waveshare-rev3
+./scripts/build_release.sh v4.7 waveshare-rev3
 
 # Output:
-#   release/M5Tab-Macintosh-v4.7-beta.1.bin
-#   release/M5Tab-Macintosh-Rev3-v4.7-beta.1.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7-beta.1.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7-beta.1.bin
+#   release/M5Tab-Macintosh-v4.7.bin
+#   release/M5Tab-Macintosh-Rev3-v4.7.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7-beta.1.bin
+    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7.bin
 ```
 
 ---
