@@ -10,6 +10,8 @@ docs/
 .build/
 build/
 release/
+artifacts/
+worktrees/
 
 # IDE settings
 .vscode/.browse.c_cpp.db*

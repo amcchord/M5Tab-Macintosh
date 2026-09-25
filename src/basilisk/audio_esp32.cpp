@@ -12,6 +12,7 @@
 
 #include "sysdeps.h"
 #include "cpu_emulation.h"
+#include "audio_guest_memory.h"
 #include "main.h"
 #include "prefs.h"
 #include "audio.h"
@@ -323,12 +324,14 @@ static void audioTask(void *param)
             
             // Wait for AudioInterrupt to complete (with timeout)
             if (xSemaphoreTake(audio_irq_done_sem, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (!AudioGuestRAMRange(audio_data, adatStreamInfo + 4)) continue;
                 // Get stream info from Apple Mixer
                 uint32_t apple_stream_info = ReadMacInt32(audio_data + adatStreamInfo);
                 // Consume this stream-info slot exactly once.
                 WriteMacInt32(audio_data + adatStreamInfo, 0);
 
-                if (apple_stream_info && audio_mix_buf != NULL) {
+                if (apple_stream_info && audio_mix_buf != NULL &&
+                    AudioGuestRAMRange(apple_stream_info, scd_buffer + 4)) {
                     const uint32_t sample_count = ReadMacInt32(apple_stream_info + scd_sampleCount);
                     const uint32_t src_channels = ReadMacInt16(apple_stream_info + scd_numChannels);
                     const uint32_t src_sample_size = ReadMacInt16(apple_stream_info + scd_sampleSize);
@@ -356,20 +359,21 @@ static void audioTask(void *param)
 
                     if (format_ok) {
                         // Get source buffer pointer
-                        const uint8_t *src = Mac2HostAddr(src_buffer_mac);
+                        const uint32_t source_bytes = sample_count * src_channels * (src_sample_size / 8);
+                        const uint8_t *src = AudioGuestSamples(src_buffer_mac, source_bytes);
                         if (src != NULL) {
                             const int out_samples = static_cast<int>(sample_count) * AUDIO_CHANNELS;
                             if ((out_samples * static_cast<int>(sizeof(int16_t))) <= AUDIO_BUFFER_SIZE) {
                                 if (src_sample_size == 8) {
                                     if (src_channels == 1) {
                                         for (uint32_t i = 0; i < sample_count; ++i) {
-                                            const int16_t sample = (static_cast<int16_t>(src[i]) - 128) << 8;
+                                            const int16_t sample = (static_cast<int16_t>(src[i]) - 128) * 256;
                                             audio_mix_buf[i * 2] = sample;
                                             audio_mix_buf[i * 2 + 1] = sample;
                                         }
                                     } else {
                                         for (int i = 0; i < out_samples; ++i) {
-                                            audio_mix_buf[i] = (static_cast<int16_t>(src[i]) - 128) << 8;
+                                            audio_mix_buf[i] = (static_cast<int16_t>(src[i]) - 128) * 256;
                                         }
                                     }
                                 } else {

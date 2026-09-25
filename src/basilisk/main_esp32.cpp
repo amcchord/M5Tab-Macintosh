@@ -26,6 +26,7 @@
 #include "rom_patches.h"
 #include "xpram.h"
 #include "timer.h"
+#include "mac_clock.h"
 #include "video.h"
 #include "prefs.h"
 #include "prefs_items.h"
@@ -701,6 +702,7 @@ static void reportMainPerfStats(uint32 current_time)
 void basilisk_loop(void)
 {
     uint32 current_time = millis();
+    MacClockSave();
     
     perf_loop_count++;
     

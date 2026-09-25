@@ -18,6 +18,7 @@
 #include "boot_gui.h"
 #include "automation.h"
 #include "mac_splash.h"
+#include "mac_clock.h"
 
 #include "esp_system.h"        /* esp_register_shutdown_handler */
 
@@ -33,9 +34,8 @@ extern bool basilisk_is_running(void);
 extern void Sys_flush_now(void);
 
 /* ESP-IDF shutdown hook: drain any dirty disk-image writes to the SD
- * card on programmatic reset (esp_restart), panic, or watchdog. Does
- * not catch a hard power pull, but does catch every other path that
- * goes through the IDF shutdown chain. */
+ * card on programmatic reset (esp_restart). Panic/watchdog resets and hard power loss
+ * bypass these callbacks; periodic flushes bound that data-loss window. */
 static void on_system_shutdown(void)
 {
     Sys_flush_now();
@@ -143,7 +143,7 @@ void setup(void)
     /* Register the SD-flush shutdown hook as soon as the card is up.
      * Doing it after initSDCard() keeps the hook from firing on a
      * pre-mount halt (where there is nothing to flush yet) and means
-     * any later esp_restart() / panic still drains pending writes. */
+     * a later esp_restart() drains pending writes. Panics bypass the hook. */
     esp_err_t hook_err = esp_register_shutdown_handler(&on_system_shutdown);
     if (hook_err != ESP_OK) {
         Serial.printf("[MAIN] WARN: shutdown hook register failed (0x%x)\n", hook_err);
@@ -158,7 +158,15 @@ void setup(void)
         haltWith("Boot GUI initialization failed");
     }
 
-    if (openSettings) {
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    const bool recovery = reset_reason == ESP_RST_PANIC ||
+        reset_reason == ESP_RST_INT_WDT || reset_reason == ESP_RST_TASK_WDT ||
+        reset_reason == ESP_RST_WDT || reset_reason == ESP_RST_BROWNOUT ||
+        SD_FS.exists("/basilisk_recovery.txt");
+    if (recovery) {
+        Serial.printf("[RECOVERY] Opening settings (reset reason %d). Disk images are unchanged.\n", reset_reason);
+    }
+    if (openSettings || recovery) {
         BootGUI_RunSettingsOnly();
     } else {
         BootGUI_FinishWithoutUI();
@@ -185,6 +193,7 @@ void setup(void)
      * "safe to power off" splash so the next boot is clean even on a
      * hard power-cycle from this state. */
     Sys_flush_now();
+    MacClockSave(true);
 
     /* Paint a classic "it is now safe to switch off your computer"
      * screen so the user isn't left with the stale last Mac framebuffer

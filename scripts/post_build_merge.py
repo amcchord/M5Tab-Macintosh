@@ -17,6 +17,13 @@ Import("env")
 import os
 import subprocess
 import sys
+import json
+import re
+import hashlib
+from pathlib import Path
+
+sys.path.insert(0, os.path.join(env.subst("$PROJECT_DIR"), "scripts"))
+from release_images import TARGETS, validate_merged
 
 def create_merged_binary(source, target, env):
     """Create a merged binary after successful build."""
@@ -24,6 +31,19 @@ def create_merged_binary(source, target, env):
     project_dir = env.subst("$PROJECT_DIR")
     build_dir = env.subst("$BUILD_DIR")
     
+    # Prebuilt P4 image headers do not reliably encode their minimum revision.
+    # Verify the actual linked SDK before labeling an image for download.
+    variant = env.BoardConfig().get("build.chip_variant", "esp32p4")
+    package = Path(env.PioPlatform().get_package_dir("framework-arduinoespressif32-libs"))
+    sdkconfig = (package / variant / "sdkconfig").read_text()
+    revision = re.search(r"^CONFIG_ESP32P4_REV_MIN_FULL=(\d+)$", sdkconfig, re.M)
+    if not revision:
+        raise RuntimeError("Cannot verify SDK silicon revision")
+    minimum_revision = int(revision.group(1))
+    production = env["PIOENV"].endswith("_rev3")
+    if (production and minimum_revision != 301) or (not production and minimum_revision >= 300):
+        raise RuntimeError(f"Wrong SDK for {env['PIOENV']}: minimum revision {minimum_revision}")
+
     # File paths
     bootloader = os.path.join(build_dir, "bootloader.bin")
     partitions = os.path.join(build_dir, "partitions.bin")
@@ -31,7 +51,7 @@ def create_merged_binary(source, target, env):
     
     # Output directory and file
     release_dir = os.path.join(project_dir, "release")
-    output_file = os.path.join(release_dir, "M5Tab-Macintosh.bin")
+    output_file = os.path.join(release_dir, TARGETS[env["PIOENV"]] + ".bin")
     
     # Verify all required files exist
     missing = []
@@ -93,9 +113,6 @@ def create_merged_binary(source, target, env):
     cmd = [
         sys.executable, esptool_cmd, "--chip", "esp32p4", "merge_bin",
         "-o", output_file,
-        "--flash_mode", "qio",
-        "--flash_freq", "80m",
-        "--flash_size", "16MB",
         bootloader_offset, bootloader,
         partition_offset, partitions,
         app_offset, firmware
@@ -112,6 +129,14 @@ def create_merged_binary(source, target, env):
         result = subprocess.run(cmd, capture_output=True, text=True)
         
         if result.returncode == 0:
+            validate_merged(Path(output_file), Path(build_dir))
+            metadata = {
+                "environment": env["PIOENV"], "chip_variant": variant,
+                "minimum_chip_revision": minimum_revision,
+                "components": {Path(path).name: hashlib.sha256(Path(path).read_bytes()).hexdigest()
+                               for path in (bootloader, partitions, firmware)},
+            }
+            Path(build_dir, "release-build.json").write_text(json.dumps(metadata, indent=2) + "\n")
             # Verify the output
             size = os.path.getsize(output_file)
             print(f"[MERGE] Created: {output_file}")
@@ -126,10 +151,10 @@ def create_merged_binary(source, target, env):
                 else:
                     print(f"[MERGE] WARNING: Unexpected bootloader header: {header.hex()}")
         else:
-            print(f"[MERGE] ERROR: {result.stderr}")
+            raise RuntimeError(result.stderr)
             
     except Exception as e:
-        print(f"[MERGE] ERROR: {e}")
+        raise RuntimeError(f"Failed to create merged firmware: {e}") from e
 
 # Register post-build action
 env.AddPostAction("$BUILD_DIR/firmware.bin", create_merged_binary)

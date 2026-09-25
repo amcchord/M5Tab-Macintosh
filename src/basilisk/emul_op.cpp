@@ -30,6 +30,7 @@
 #include "xpram.h"
 #include "adb.h"
 #include "timer.h"
+#include "mac_clock.h"
 #include "clip.h"
 #include "serial.h"
 #include "sony.h"
@@ -237,6 +238,8 @@ void EmulOp(uint16 opcode, M68kRegisters *r)
 						case 3: b = t >> 24; break;
 					}
 					r->d[2] = b;
+				} else if (reg < 0x08) {
+					TimerWriteRTCByte(reg, static_cast<uint8_t>(r->d[2]));
 				} else
 					D(bug("RTC %s op %d, d1 %08lx d2 %08lx\n", is_read ? "read" : "write", reg, r->d[1], r->d[2]));
 			}

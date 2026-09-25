@@ -23,9 +23,9 @@ ENV_NAME = env.get("PIOENV")  # noqa: F821
 
 TARGET = os.path.join(PROJECT_DIR, "idf_component.yml")
 
-if ENV_NAME == "waveshare_p4_101":
+if ENV_NAME.startswith("waveshare_p4_101"):
     SOURCE_NAME = "idf_component_waveshare.yml"
-elif ENV_NAME == "esp32p4_pioarduino":
+elif ENV_NAME.startswith("esp32p4_pioarduino"):
     SOURCE_NAME = "idf_component_tab5.yml"
 else:
     SOURCE_NAME = None

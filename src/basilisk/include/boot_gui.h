@@ -30,8 +30,8 @@
 bool BootGUI_Init(void);
 
 /*
- *  Run the full-screen settings UI. Returns when the user taps Boot
- *  (or the GUI-skip flag in /basilisk_settings.txt is set). Also stops
+ *  Run the full-screen settings UI. Returns when the user taps the Boot
+ *  button. Explicit entry overrides the legacy skip_gui flag. Also stops
  *  the shared touch task and settles WiFi before returning.
  */
 void BootGUI_RunSettingsOnly(void);
