@@ -1,17 +1,30 @@
-# September 2026 issue review and v4.7 beta
+# September 2026 issue review and v4.7 stable release
 
 Work is isolated on `codex/issue-fixes-release`, based on the v4.6/master
 commit `44b9bc081a286387126006abf2775d69cfed892e`. The original checkout's
 uncommitted development work was not included. Release and issue feedback were
 requested by the repository owner.
 
+## Stable promotion — September 25, 2026
+
+The repository maintainer reported that all tested changes work, excluding
+Elecrow support (#10), and requested a full release. v4.7 promotes the four
+v4.7-beta.1 firmware binaries without rebuilding them. SHA-256 hashes must match
+the published beta assets exactly; only filenames and release metadata change.
+The stable tag also includes documentation updates; firmware source remains
+`4f067e6f72f2c38fb6d047e159e691568bcf2746` (the beta release commit).
+
+Issues #17, #13 and #15 are resolved following maintainer confirmation. #10
+remains open and unsupported. The confirmation does not specify individual
+board/chip combinations, so no more detailed hardware test matrix is claimed.
+
 ## Issue outcomes
 
-| Issue | Implemented behavior | Remaining verification |
+| Issue | Implemented behavior | Status / remaining work |
 |---|---|---|
-| [#17: production P4 boot failure](https://github.com/amcchord/M5Tab-Macintosh/issues/17) | Add two Rev3 environments with the production SDK (minimum chip revision 3.1), preserve older-silicon environments, remove the Waveshare PHY override, and backport M5GFX's zero-initialized DSI config. Remove the hard-coded SDK include path that could mix chip variants. | Cold/warm boot, display, touch and WiFi on each physical target, especially the reporter's Waveshare v3.2. |
-| [#13: cannot change time](https://github.com/amcchord/M5Tab-Macintosh/issues/13) | Implement complete four-byte guest RTC writes, monotonic clock advancement, NVS persistence, and the same clock in the boot menu. Historical dates remain valid. | Set time in the guest control panel; shut down and restart on hardware. This software clock does not advance while powered off. |
-| [#15: Maelstrom boot loop](https://github.com/amcchord/M5Tab-Macintosh/issues/15) | Validate guest audio descriptors and complete sample ranges on both boards; avoid undefined signed shifts in 8-bit audio conversion. Enter settings after crash resets or with an SD recovery file, and allow a splash tap to override `skip_gui`. Document PRAM-only recovery and direct-flash comparison. | These are hardening and recovery changes, not a confirmed fix for Maelstrom. Need the first panic log, OS/game versions and launcher/direct-flash comparison. No disk image is automatically reset or repaired. |
+| [#17: production P4 boot failure](https://github.com/amcchord/M5Tab-Macintosh/issues/17) | Add two Rev3 environments with the production SDK (minimum chip revision 3.1), preserve older-silicon environments, remove the Waveshare PHY override, and backport M5GFX's zero-initialized DSI config. Remove the hard-coded SDK include path that could mix chip variants. | Maintainer confirmed working; included in v4.7 stable. |
+| [#13: cannot change time](https://github.com/amcchord/M5Tab-Macintosh/issues/13) | Implement complete four-byte guest RTC writes, monotonic clock advancement, NVS persistence, and the same clock in the boot menu. Historical dates remain valid. | Maintainer confirmed working; included in v4.7 stable. The software clock still does not advance while powered off. |
+| [#15: Maelstrom boot loop](https://github.com/amcchord/M5Tab-Macintosh/issues/15) | Validate guest audio descriptors and complete sample ranges on both boards; avoid undefined signed shifts in 8-bit audio conversion. Enter settings after crash resets or with an SD recovery file, and allow a splash tap to override `skip_gui`. Document PRAM-only recovery and direct-flash comparison. | Maintainer confirmed the beta changes work and approved stable promotion. No disk image is automatically reset or repaired. |
 | [#10: Elecrow CrowPanel 9-inch](https://github.com/amcchord/M5Tab-Macintosh/issues/10) | Reviewed the vendor repository and current board abstraction; identified required port work. | Confirm PCB revision and a working vendor example, then implement and test a dedicated backend. No Elecrow firmware is shipped. |
 
 ## Elecrow port findings
@@ -30,7 +43,7 @@ side margins, corresponding touch transforms, and a boot-settings layout that
 fits a 600-pixel display. The SD, hosted C6, backlight, panel, touch, and audio
 pin assignments must come from the confirmed PCB revision.
 
-Next step: ask the reporter for the PCB version, ESP32-P4 revision, and a link
+The reporter has been asked for the PCB version, ESP32-P4 revision, and a link
 to the vendor firmware/example they have successfully run. Their offered
 hardware testing is necessary to validate the port.
 
@@ -51,17 +64,21 @@ hardware testing is necessary to validate the port.
   release checksums identify the final downloadable images.
 - Local build/test evidence is retained in `artifacts/issue-fixes/` (ignored).
   The public release records its exact source commit and validation outcome.
-- No physical tablet was connected to this development host. Publish as a
-  prerelease and request device feedback; do not automatically close issues.
+- No physical tablet was connected during the original agent build. The
+  maintainer subsequently tested the beta and authorized stable promotion.
+  Preserve those tested binaries; a firmware rebuild is not part of promotion.
 
 Backup/rollback: keep the v4.6 release and existing SD images. Users should back
 up their SD card before game/disk recovery testing. Older-silicon users can
-reflash v4.6 at `0x0` if the beta regresses. v4.6 is not a working fallback on
+reflash v4.6 at `0x0` if v4.7 regresses. v4.6 is not a working fallback on
 Rev3 silicon; those users should keep their previously working firmware. A
 direct merged-image flash replaces M5Launcher and may clear device NVS. Never
 erase the SD or reset guest PRAM automatically.
 
-Publication procedure: merge the reviewed release branch, tag its exact commit
-as `v4.7-beta.1`, upload the four merged binaries plus checksums/build metadata,
-verify the uploaded sizes and SHA-256 values, and post targeted feedback
-requests on #17, #13, #15, and the remaining hardware questions on #10.
+Stable publication procedure: merge the documentation-only promotion branch,
+tag it as `v4.7`, upload the four unchanged binaries with stable filenames and
+updated checksums/metadata, verify uploaded SHA-256 values, and publish as the
+latest stable release. Retain v4.7-beta.1 and v4.6 as historical releases.
+Update #17, #13 and #15 with the stable link and close them following maintainer
+confirmation; leave #10 open. Promotion evidence is retained in
+`artifacts/v4.7-stable/`.
