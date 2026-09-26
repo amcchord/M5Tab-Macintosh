@@ -20,12 +20,15 @@
 #include <string>
 #include <climits>
 #include <time.h>
+#include "esp_system.h"
 #include "mac_clock.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/queue.h>
+#include <freertos/semphr.h>
 
 #include "boot_gui.h"
+#include "boot_control_values.h"
 #include "board.h"
 #include "board_config.h"
 #include "board_display.h"
@@ -61,6 +64,7 @@ typedef struct {
 // Touch task handles
 static QueueHandle_t touch_queue = nullptr;
 static TaskHandle_t touch_task_handle = nullptr;
+static SemaphoreHandle_t touch_task_stopped = nullptr;
 static volatile bool touch_task_running = false;
 
 #define TOUCH_TASK_STACK_SIZE 4096
@@ -140,6 +144,8 @@ static void touchTask(void* param)
     }
     
     Serial.println("[BOOT_GUI] Touch task stopped");
+    touch_task_handle = nullptr;
+    xSemaphoreGive(touch_task_stopped);
     vTaskDelete(NULL);
 }
 
@@ -150,11 +156,21 @@ static bool startTouchTask(void)
     if (touch_task_running) {
         return true;  // Already running
     }
+    if (touch_queue != nullptr) {
+        // A previous stop timed out. Do not replace resources a task may use.
+        return false;
+    }
     
     // Create queue for single touch event (overwrite mode)
     touch_queue = xQueueCreate(1, sizeof(TouchEvent));
     if (!touch_queue) {
         Serial.println("[BOOT_GUI] ERROR: Failed to create touch queue");
+        return false;
+    }
+    touch_task_stopped = xSemaphoreCreateBinary();
+    if (!touch_task_stopped) {
+        vQueueDelete(touch_queue);
+        touch_queue = nullptr;
         return false;
     }
     
@@ -185,6 +201,8 @@ static bool startTouchTask(void)
         touch_task_running = false;
         vQueueDelete(touch_queue);
         touch_queue = nullptr;
+        vSemaphoreDelete(touch_task_stopped);
+        touch_task_stopped = nullptr;
         return false;
     }
     
@@ -195,7 +213,7 @@ static bool startTouchTask(void)
 // Stop the touch task
 static void stopTouchTask(void)
 {
-    if (!touch_task_running) {
+    if (touch_queue == nullptr) {
         return;
     }
     
@@ -204,20 +222,15 @@ static void stopTouchTask(void)
     // Signal task to stop
     touch_task_running = false;
     
-    // Wait for task to notice the flag and exit its loop
-    // The task has a 16ms delay, so wait a bit longer
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
-    // Explicitly delete the task if it's still running
-    if (touch_task_handle != nullptr) {
-        // Check if task still exists before deleting
-        eTaskState state = eTaskGetState(touch_task_handle);
-        if (state != eDeleted && state != eInvalid) {
-            vTaskDelete(touch_task_handle);
-            Serial.println("[BOOT_GUI] Touch task explicitly deleted");
-        }
-        touch_task_handle = nullptr;
+    // The worker deletes itself. Its TCB may already be freed/reused after a
+    // fixed delay, so neither eTaskGetState nor vTaskDelete(handle) is safe.
+    // Wait for a positive signal before freeing the queue it last touched.
+    if (xSemaphoreTake(touch_task_stopped, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        Serial.println("[BOOT_GUI] ERROR: Touch stop timed out; resources retained");
+        return;
     }
+    vSemaphoreDelete(touch_task_stopped);
+    touch_task_stopped = nullptr;
     
     // Now safe to delete the queue since task is definitely gone
     if (touch_queue) {
@@ -363,6 +376,26 @@ static int extfs_scroll_offset = 0;
 // ============================================================================
 
 static bool gui_initialized = false;
+static const char *control_phase = "initializing";
+static const char *control_screen = "none";
+static bool control_boot_requested = false;
+static bool control_hold = false;
+static bool control_leave_wifi = false;
+static bool control_wifi_changed = false;
+static uint32_t control_restart_at = 0;
+static RTC_NOINIT_ATTR uint32_t control_boot_cookie;
+static const uint32_t CONTROL_BOOT_COOKIE = 0xB205E771;
+struct BootControlRequest {
+    uint32_t id, expires;
+    char command[600];
+};
+struct BootControlReply {
+    uint32_t id;
+    char text[600];
+};
+bool boot_control_pending = false;
+static QueueHandle_t control_requests = nullptr;
+static QueueHandle_t control_replies = nullptr;
 
 // Alias to the board's drawing surface. Both boards now use the
 // MiniGfx software framebuffer; it flushes to the panel on the next
@@ -374,7 +407,7 @@ static bool gui_initialized = false;
 // ============================================================================
 
 static void loadSettings(void);
-static void saveSettings(void);
+static bool saveSettings(void);
 static void scanDiskFiles(void);
 static void scanCDROMFiles(void);
 static void drawDesktopPattern(void);
@@ -404,6 +437,10 @@ static void loadSettings(void)
 {
     Serial.println("[BOOT_GUI] Loading settings...");
     
+    // Recover the previous complete file if power was lost between renames.
+    if (!SD_FS.exists(SETTINGS_FILE) && SD_FS.exists("/basilisk_settings.bak")) {
+        SD_FS.rename("/basilisk_settings.bak", SETTINGS_FILE);
+    }
     File file = SD_FS.open(SETTINGS_FILE, FILE_READ);
     if (!file) {
         Serial.println("[BOOT_GUI] No settings file found, using defaults");
@@ -412,7 +449,7 @@ static void loadSettings(void)
     
     while (file.available()) {
         String line = file.readStringUntil('\n');
-        line.trim();
+        if (line.endsWith("\r")) line.remove(line.length() - 1);
         
         int eq_pos = line.indexOf('=');
         if (eq_pos <= 0) {
@@ -422,7 +459,7 @@ static void loadSettings(void)
         String key = line.substring(0, eq_pos);
         String value = line.substring(eq_pos + 1);
         key.trim();
-        value.trim();
+
         
         if (key == "disk") {
             strncpy(selected_disk_path, value.c_str(), BOOT_GUI_MAX_PATH - 1);
@@ -473,41 +510,48 @@ static void loadSettings(void)
     file.close();
 }
 
-static void saveSettings(void)
+static bool saveSettings(void)
 {
-    Serial.println("[BOOT_GUI] Saving settings...");
-
-    // Rewrite file from scratch to avoid stale duplicate keys across boots.
-    if (SD_FS.exists(SETTINGS_FILE)) {
-        SD_FS.remove(SETTINGS_FILE);
-    }
-
-    File file = SD_FS.open(SETTINGS_FILE, FILE_WRITE);
-    if (!file) {
-        Serial.println("[BOOT_GUI] ERROR: Cannot open settings file for writing");
-        return;
-    }
-    
-    file.printf("disk=%s\n", selected_disk_path);
-    file.printf("cdrom=%s\n", selected_cdrom_path);
-    file.printf("extfs=%s\n", selected_extfs_path);
-    file.printf("ramsize=%d\n", selected_ram_mb);
-    file.printf("skip_gui=%s\n", skip_gui ? "yes" : "no");
-    
-    // Save WiFi settings
-    file.printf("wifi_ssid=%s\n", wifi_ssid);
-    file.printf("wifi_pass=%s\n", wifi_password);
-    file.printf("wifi_auto=%s\n", wifi_auto_connect ? "yes" : "no");
-    
-    // Save audio settings
-    file.printf("audio=%s\n", audio_enabled ? "yes" : "no");
-
-    // v4.5 additions: boot-from-CD and screen rotation.
-    file.printf("boot_from_cd=%s\n", boot_from_cd ? "yes" : "no");
-    file.printf("rotation=%d\n", rotation_degrees);
-
+    // Write and verify a complete replacement before moving the old file.
+    // FAT rename is not an atomic overwrite, so retain a recoverable backup.
+    String text;
+    text.reserve(1200);
+    text += "disk="; text += selected_disk_path; text += '\n';
+    text += "cdrom="; text += selected_cdrom_path; text += '\n';
+    text += "extfs="; text += selected_extfs_path; text += '\n';
+    text += "ramsize="; text += selected_ram_mb; text += '\n';
+    text += "skip_gui="; text += skip_gui ? "yes\n" : "no\n";
+    text += "wifi_ssid="; text += wifi_ssid; text += '\n';
+    text += "wifi_pass="; text += wifi_password; text += '\n';
+    text += "wifi_auto="; text += wifi_auto_connect ? "yes\n" : "no\n";
+    text += "audio="; text += audio_enabled ? "yes\n" : "no\n";
+    text += "boot_from_cd="; text += boot_from_cd ? "yes\n" : "no\n";
+    text += "rotation="; text += rotation_degrees; text += '\n';
+    const char *temp = "/basilisk_settings.tmp";
+    const char *backup = "/basilisk_settings.bak";
+    if (SD_FS.exists(temp) && !SD_FS.remove(temp)) return false;
+    File file = SD_FS.open(temp, FILE_WRITE);
+    if (!file) return false;
+    size_t written = file.print(text);
+    file.flush();
     file.close();
+    file = SD_FS.open(temp, FILE_READ);
+    bool verified = file && written == text.length() && file.size() == text.length();
+    for (size_t i = 0; verified && i < text.length(); ++i) {
+        verified = file.read() == (uint8_t)text[i];
+    }
+    file.close();
+    if (!verified) return false;
+    if (SD_FS.exists(backup) && !SD_FS.remove(backup)) return false;
+    bool had_previous = SD_FS.exists(SETTINGS_FILE);
+    if (had_previous && !SD_FS.rename(SETTINGS_FILE, backup)) return false;
+    if (!SD_FS.rename(temp, SETTINGS_FILE)) {
+        if (had_previous) SD_FS.rename(backup, SETTINGS_FILE);
+        return false;
+    }
+    if (had_previous) SD_FS.remove(backup);
     Serial.println("[BOOT_GUI] Settings saved");
+    return true;
 }
 
 // ============================================================================
@@ -1734,11 +1778,235 @@ static bool isPointInRect(int px, int py, int rx, int ry, int rw, int rh)
 }
 
 // ============================================================================
+// Preboot serial control (executed only on the main / emulation task)
+// ============================================================================
+
+enum SettingType { PathSetting, StringSetting, BoolSetting, RAMSetting, RotationSetting };
+struct BootSetting { const char *key; SettingType type; void *value; size_t capacity; };
+static BootSetting control_settings[] = {
+    {"disk", PathSetting, selected_disk_path, sizeof(selected_disk_path)},
+    {"cdrom", PathSetting, selected_cdrom_path, sizeof(selected_cdrom_path)},
+    {"extfs", PathSetting, selected_extfs_path, sizeof(selected_extfs_path)},
+    {"ramsize", RAMSetting, &selected_ram_mb, 0},
+    {"skip_gui", BoolSetting, &skip_gui, 0},
+    {"wifi_ssid", StringSetting, wifi_ssid, 33},
+    {"wifi_pass", StringSetting, wifi_password, sizeof(wifi_password)},
+    {"wifi_auto", BoolSetting, &wifi_auto_connect, 0},
+    {"audio", BoolSetting, &audio_enabled, 0},
+    {"boot_from_cd", BoolSetting, &boot_from_cd, 0},
+    {"rotation", RotationSetting, &rotation_degrees, 0},
+};
+
+static String controlHex(const char *value)
+{
+    if (!value[0]) return "-";
+    static const char digits[] = "0123456789abcdef";
+    String hex;
+    hex.reserve(strlen(value) * 2);
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+        hex += digits[*p >> 4]; hex += digits[*p & 15];
+    }
+    return hex;
+}
+
+static void controlSyncSelections(void)
+{
+    disk_selection_index = cdrom_selection_index = extfs_selection_index = 0;
+    for (size_t i = 0; i < disk_files.size(); ++i)
+        if (disk_files[i] == selected_disk_path) disk_selection_index = i;
+    for (size_t i = 0; i < cdrom_files.size(); ++i)
+        if (cdrom_files[i] == selected_cdrom_path) cdrom_selection_index = i + 1;
+    for (size_t i = 0; i < extfs_folders.size(); ++i)
+        if (extfs_folders[i] == selected_extfs_path) extfs_selection_index = i + 1;
+}
+
+static bool controlPathValid(const char *key, const char *path)
+{
+    if (!path[0]) return strcmp(key, "disk") != 0;
+    if (path[0] != '/' || strstr(path, "/../") || strstr(path, "/./") ||
+        strstr(path, "//") || String(path).endsWith("/..") || String(path).endsWith("/.")) return false;
+    if (!strcmp(key, "disk") && !(hasExtension(path, ".dsk") || hasExtension(path, ".img") || hasExtension(path, ".hfv"))) return false;
+    if (!strcmp(key, "cdrom") && !(hasExtension(path, ".iso") || hasExtension(path, ".cdr") || hasExtension(path, ".toast"))) return false;
+    File file = SD_FS.open(path, FILE_READ);
+    if (!file) return false;
+    bool valid = !strcmp(key, "extfs") ? file.isDirectory() : !file.isDirectory();
+    file.close();
+    return valid;
+}
+
+static String controlExecute(char *command)
+{
+    if (!strcmp(command, "STATUS")) {
+        return String("OK BOOT STATUS ") + control_phase + " " + control_screen +
+            " " + (control_restart_at ? "1" : "0");
+    }
+    if (!strcmp(command, "ENTER")) {
+        if (!strcmp(control_screen, "usb")) return "ERR BOOT usb_disk_active";
+        if (!strcmp(control_phase, "preboot")) {
+            control_hold = true;
+            control_leave_wifi = true;
+        } else if (!strcmp(control_phase, "emulator") || !strcmp(control_phase, "stopped")) {
+            if (!control_restart_at) control_restart_at = millis() + 1200;
+        } else return "ERR BOOT not_ready";
+        return "OK BOOT ENTER";
+    }
+    if (!gui_initialized) return "ERR BOOT not_ready";
+    if (!strcmp(control_screen, "usb")) return "ERR BOOT usb_disk_active";
+    if (!strncmp(command, "GET ", 4)) {
+        const char *key = command + 4;
+        if (!strcmp(key, "wifi_password_set")) {
+            return String("OK BOOT VALUE wifi_password_set ") + controlHex(wifi_password[0] ? "true" : "false");
+        }
+        for (const auto &setting : control_settings) {
+            if (strcmp(key, setting.key)) continue;
+            if (!strcmp(key, "wifi_pass")) return "ERR BOOT password_write_only";
+            String value;
+            if (setting.type == BoolSetting) value = *(bool *)setting.value ? "true" : "false";
+            else if (setting.type == RAMSetting || setting.type == RotationSetting) value = *(int *)setting.value;
+            else value = (char *)setting.value;
+            return String("OK BOOT VALUE ") + key + " " + controlHex(value.c_str());
+        }
+        return "ERR BOOT unknown_setting";
+    }
+    if (strcmp(control_phase, "preboot")) return "ERR BOOT enter_preboot_first";
+    if (control_restart_at || control_boot_requested) return "ERR BOOT transition_pending";
+    if (strcmp(control_screen, "settings")) return "ERR BOOT settings_screen_required";
+    if (!strncmp(command, "SET ", 4)) {
+        char *key = command + 4;
+        char *hex = strchr(key, ' ');
+        if (!hex) return "ERR BOOT invalid_set";
+        *hex++ = 0;
+        char value[BOOT_GUI_MAX_PATH];
+        if (!BootControlDecode(hex, value, sizeof(value))) return "ERR BOOT invalid_value";
+        for (const auto &setting : control_settings) {
+            if (strcmp(key, setting.key)) continue;
+            if (setting.type == BoolSetting) {
+                bool next;
+                if (!BootControlBool(value, &next)) return "ERR BOOT invalid_boolean";
+                *(bool *)setting.value = next;
+            } else if (setting.type == RAMSetting || setting.type == RotationSetting) {
+                int next;
+                if (!BootControlChoice(value, setting.type == RAMSetting, &next)) return "ERR BOOT invalid_choice";
+                *(int *)setting.value = next;
+            } else {
+                if (strlen(value) >= setting.capacity) return "ERR BOOT value_too_long";
+                if (setting.type == PathSetting && !controlPathValid(key, value)) return "ERR BOOT invalid_path";
+                strcpy((char *)setting.value, value);
+                controlSyncSelections();
+            }
+            if (!strncmp(key, "wifi_", 5)) control_wifi_changed = true;
+            return String("OK BOOT SET ") + key;
+        }
+        return "ERR BOOT unknown_setting";
+    }
+    if (!strncmp(command, "LIST ", 5)) {
+        char *kind = command + 5;
+        char *index_text = strchr(kind, ' ');
+        if (!index_text) return "ERR BOOT invalid_list";
+        *index_text++ = 0;
+        char *end;
+        long index = strtol(index_text, &end, 10);
+        if (!index_text[0] || *end || index < 0 || index >= BOOT_GUI_MAX_FILES) return "ERR BOOT invalid_index";
+        const std::vector<std::string> *items = !strcmp(kind, "disk") ? &disk_files :
+            !strcmp(kind, "cdrom") ? &cdrom_files : !strcmp(kind, "extfs") ? &extfs_folders : nullptr;
+        if (!items) return "ERR BOOT invalid_list";
+        return String("OK BOOT ITEM ") + (unsigned int)items->size() + " " +
+            controlHex((size_t)index < items->size() ? (*items)[index].c_str() : "");
+    }
+    if (!strcmp(command, "RESCAN")) {
+        scanDiskFiles(); scanCDROMFiles(); scanExtFSFolders();
+        return "OK BOOT RESCAN";
+    }
+    if (!strcmp(command, "RELOAD")) {
+        if (!SD_FS.exists(SETTINGS_FILE)) return "ERR BOOT no_saved_settings";
+        selected_disk_path[0] = selected_cdrom_path[0] = selected_extfs_path[0] = 0;
+        wifi_ssid[0] = wifi_password[0] = 0;
+        selected_ram_mb = 8; rotation_degrees = 180;
+        skip_gui = wifi_auto_connect = boot_from_cd = false; audio_enabled = true;
+        loadSettings(); controlSyncSelections();
+        control_wifi_changed = true;
+        return "OK BOOT RELOAD";
+    }
+    if (!strcmp(command, "SAVE")) return saveSettings() ? "OK BOOT SAVE" : "ERR BOOT save_failed";
+    if (!strcmp(command, "START")) {
+        if (!controlPathValid("disk", selected_disk_path) ||
+            !controlPathValid("cdrom", selected_cdrom_path) ||
+            !controlPathValid("extfs", selected_extfs_path) ||
+            (boot_from_cd && !selected_cdrom_path[0])) return "ERR BOOT invalid_boot_media";
+        if (!saveSettings()) return "ERR BOOT save_failed";
+        control_boot_requested = true;
+        return "OK BOOT START";
+    }
+    if (!strcmp(command, "WIFI CONNECT")) {
+        if (!wifi_ssid[0]) return "ERR BOOT wifi_ssid_required";
+        initWiFi();
+        WiFi.disconnect(false);
+        WiFi.begin(wifi_ssid, wifi_password);
+        control_wifi_changed = false;
+        return "OK BOOT WIFI CONNECT";
+    }
+    if (!strcmp(command, "WIFI DISCONNECT")) {
+        if (wifi_initialized) WiFi.disconnect(false);
+        return "OK BOOT WIFI DISCONNECT";
+    }
+    return "ERR BOOT unknown_command";
+}
+
+bool BootGUI_ControlRequest(const char *command, char *reply, size_t capacity)
+{
+    if (!control_requests || !control_replies || strlen(command) >= sizeof(BootControlRequest::command)) return false;
+    static uint32_t next_id = 0; // Only the serial task calls this API.
+    BootControlRequest request = {};
+    request.id = ++next_id;
+    request.expires = millis() + 3000;
+    strcpy(request.command, command);
+    if (xQueueSend(control_requests, &request, 0) != pdTRUE) return false;
+    __atomic_store_n(&boot_control_pending, true, __ATOMIC_RELEASE);
+    BootControlReply result;
+    uint32_t deadline = millis() + 4000;
+    while ((int32_t)(deadline - millis()) > 0) {
+        if (xQueueReceive(control_replies, &result, pdMS_TO_TICKS(50)) == pdTRUE && result.id == request.id) {
+            snprintf(reply, capacity, "%s", result.text);
+            return true;
+        }
+    }
+    return false;
+}
+
+void BootGUI_ControlPoll(void)
+{
+    if (!control_requests) return;
+    __atomic_store_n(&boot_control_pending, control_restart_at != 0, __ATOMIC_RELEASE);
+    BootControlRequest request;
+    if (xQueueReceive(control_requests, &request, 0) != pdTRUE) return;
+    String text = (int32_t)(millis() - request.expires) >= 0 ?
+        String("ERR BOOT request_expired") : controlExecute(request.command);
+    if (control_restart_at) __atomic_store_n(&boot_control_pending, true, __ATOMIC_RELEASE);
+    BootControlReply reply = {};
+    reply.id = request.id;
+    snprintf(reply.text, sizeof(reply.text), "%s", text.c_str());
+    xQueueOverwrite(control_replies, &reply);
+}
+
+void BootGUI_ControlSetPhase(const char *phase) { control_phase = phase; }
+bool BootGUI_StartInSettings(void) { return control_hold; }
+bool BootGUI_RestartPending(void)
+{
+    return control_restart_at && (int32_t)(millis() - control_restart_at) >= 0;
+}
+void BootGUI_Restart(void)
+{
+    control_boot_cookie = CONTROL_BOOT_COOKIE;
+    esp_restart(); // Called on the main task; shutdown hook drains SD writes.
+}
+
+// ============================================================================
 // Settings Screen
 // ============================================================================
 
 static void runSettingsScreen(void)
 {
+    control_screen = "settings";
     Serial.println("[BOOT_GUI] Showing settings screen...");
     Serial.printf("[BOOT_GUI] Found %d disk files, %d CD-ROM files, %d shared folders\n",
                   (int)disk_files.size(), (int)cdrom_files.size(),
@@ -1892,6 +2160,8 @@ static void runSettingsScreen(void)
     TouchEvent touch;
     
     while (!should_boot && !open_wifi && !open_usb) {
+        BootGUI_ControlPoll();
+        if (control_boot_requested) break;
         bool disk_changed = false;
         bool cdrom_changed = false;
         bool extfs_changed = false;
@@ -2281,8 +2551,8 @@ static void runSettingsScreen(void)
         return;
     }
 
-    // Save settings before booting
-    saveSettings();
+    // Serial START already persisted and checked the settings.
+    if (!control_boot_requested) saveSettings();
 }
 
 // ============================================================================
@@ -2302,6 +2572,8 @@ static int wifi_scroll_offset = 0;
 
 static void runWiFiScreen(void)
 {
+    control_screen = "wifi";
+    control_leave_wifi = false;
     Serial.println("[BOOT_GUI] Showing WiFi screen...");
 
     // Immediate "Opening WiFi..." feedback, painted before the slow
@@ -2468,6 +2740,8 @@ static void runWiFiScreen(void)
     bool prev_ib_cancel_pressed = false;
     
     while (!should_exit) {
+        BootGUI_ControlPoll();
+        if (control_leave_wifi) break;
         // Check scan completion
         if (scanning) {
             int16_t result = WiFi.scanComplete();
@@ -3082,6 +3356,7 @@ static void usbMscTask(void *arg)
 
 static void runUsbMscScreen(void)
 {
+    control_screen = "usb";
     Serial.println("[BOOT_GUI] Entering USB Disk screen...");
 
     if (!UsbMsc_IsSupported()) {
@@ -3201,6 +3476,7 @@ static void runUsbMscScreen(void)
     TouchEvent touch;
 
     while (!should_exit) {
+        BootGUI_ControlPoll();
         // Touch handling.
         if (getTouchEvent(&touch)) {
             if (touch.was_pressed) {
@@ -3333,6 +3609,17 @@ bool BootGUI_Init(void)
         Serial.println("[BOOT_GUI] WiFi auto-connect disabled by build flag");
     }
 
+    control_requests = xQueueCreate(1, sizeof(BootControlRequest));
+    control_replies = xQueueCreate(1, sizeof(BootControlReply));
+    if (!control_requests || !control_replies) {
+        if (control_requests) vQueueDelete(control_requests);
+        if (control_replies) vQueueDelete(control_replies);
+        control_requests = control_replies = nullptr;
+        Serial.println("[BOOT_GUI] WARNING: Serial settings queues unavailable");
+    }
+    control_hold = esp_reset_reason() == ESP_RST_SW && control_boot_cookie == CONTROL_BOOT_COOKIE;
+    control_boot_cookie = 0; // One boot only; ordinary power cycles keep their behavior.
+    control_phase = "preboot";
     gui_initialized = true;
     Serial.println("[BOOT_GUI] Initialization complete");
 
@@ -3344,6 +3631,21 @@ bool BootGUI_Init(void)
 // it actually connected; otherwise powers it down to free runtime state.
 static void bootGuiCleanupWifi(void)
 {
+    // Serial edits take effect for this boot as well as the next power cycle.
+    // Keep servicing status while a changed auto-connect configuration settles.
+    if (control_wifi_changed) {
+        if (wifi_initialized) WiFi.disconnect(false);
+        if (BOOTGUI_ENABLE_WIFI_AUTOCONNECT && wifi_auto_connect && wifi_ssid[0]) {
+            initWiFi();
+            WiFi.begin(wifi_ssid, wifi_password);
+            uint32_t start = millis();
+            while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+                BootGUI_ControlPoll();
+                delay(20);
+            }
+        }
+        control_wifi_changed = false;
+    }
     if (!wifi_initialized) {
         return;
     }
@@ -3398,6 +3700,8 @@ void BootGUI_RunSettingsOnly(void)
     runSettingsScreen();
 
     // Stop the touch task before returning to emulator (emulator has its own input task)
+    control_screen = "none";
+    control_phase = "starting";
     stopTouchTask();
     bootGuiCleanupWifi();
 
@@ -3407,6 +3711,8 @@ void BootGUI_RunSettingsOnly(void)
 void BootGUI_FinishWithoutUI(void)
 {
     Serial.println("[BOOT_GUI] Finishing without settings UI");
+    control_screen = "none";
+    control_phase = "starting";
     stopTouchTask();
     bootGuiCleanupWifi();
 }

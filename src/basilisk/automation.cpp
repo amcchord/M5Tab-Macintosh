@@ -14,8 +14,8 @@
  *   @B2 RELEASE_ALL
  *
  * Replies are also prefixed with "@B2 ". Small input commands stay on serial.
- * Screenshots prefer a tokenized HTTP endpoint when WiFi is connected, with a
- * CRC-checked serial pull protocol retained as a universal fallback.
+ * Protocol 4 adds boot-scoped request/reply IDs and cached acknowledgements.
+ * Screenshots use CRC-checked serial block reads; HTTP remains a fallback.
  */
 
 #include "sysdeps.h"
@@ -31,6 +31,7 @@
 #include <WiFi.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -43,7 +44,7 @@ extern void CPUTrapProfileReset(void);
 extern uint32 CPUTrapProfileRead(uint16 trap_index);
 extern uint32 CPUTrapProfileReadLayer(uint8 selector);
 
-#define AUTOMATION_PROTOCOL_VERSION 3
+#define AUTOMATION_PROTOCOL_VERSION 4
 #define AUTOMATION_TASK_STACK_SIZE 8192
 #define AUTOMATION_TASK_PRIORITY 3
 #define AUTOMATION_TASK_CORE 0
@@ -53,18 +54,19 @@ extern uint32 CPUTrapProfileReadLayer(uint8 selector);
 #define AUTOMATION_LINE_CAPACITY 1024
 #define AUTOMATION_TYPE_KEY_HOLD_MS 10
 #define AUTOMATION_TYPE_KEY_GAP_MS 15
-/* ASCII encoding avoids XON/XOFF and other control bytes being interpreted by
- * host tty layers. Forty-eight payload bytes become a line under 160 bytes. */
+/* Retain the v3 packet format for older clients. The v4 READ path below uses
+ * larger ASCII records with the same per-record and whole-frame CRC checks. */
 #define AUTOMATION_SCREENSHOT_CHUNK_SIZE 48
 #define AUTOMATION_SCREENSHOT_RECORD_CAPACITY 160
 #define AUTOMATION_SCREENSHOT_BATCH_MAX 16
+#define AUTOMATION_SCREENSHOT_READ_MAX 768
 #define AUTOMATION_SERIAL_WRITE_RETRIES 5
-#define AUTOMATION_SERIAL_WRITE_CHUNK_SIZE 32
 #define AUTOMATION_HTTP_PORT 8052
 #define AUTOMATION_HTTP_REQUEST_CAPACITY 160
 #define AUTOMATION_HTTP_TIMEOUT_MS 30000
 #define AUTOMATION_HTTP_WRITE_CHUNK_SIZE 1024
-#define AUTOMATION_SERIAL_SCREENSHOT_LEASE_MS 120000
+#define AUTOMATION_SERIAL_SCREENSHOT_LEASE_MS 15000
+#define AUTOMATION_INPUT_IDLE_RELEASE_MS 30000
 #define AUTOMATION_LZ_HASH_BITS 12
 #define AUTOMATION_LZ_HASH_SIZE (1U << AUTOMATION_LZ_HASH_BITS)
 #define AUTOMATION_LZ_MAX_MATCH 130
@@ -72,6 +74,7 @@ extern uint32 CPUTrapProfileReadLayer(uint8 selector);
 static TaskHandle_t automation_task_handle = NULL;
 static TaskHandle_t automation_network_task_handle = NULL;
 static volatile bool automation_task_running = false;
+static volatile bool s_emulator_ready = false;
 static volatile bool automation_network_task_running = false;
 static uint8_t *s_screenshot_payload = NULL;
 static size_t s_screenshot_payload_size = 0;
@@ -85,6 +88,7 @@ static bool s_automation_http_started = false;
 static char s_automation_http_token[9] = {};
 static SemaphoreHandle_t s_screenshot_mutex = NULL;
 static bool s_serial_screenshot_locked = false;
+static volatile bool s_serial_capture_busy = false;
 static uint32_t s_serial_screenshot_last_activity_ms = 0;
 static portMUX_TYPE s_network_state_lock = portMUX_INITIALIZER_UNLOCKED;
 static int s_automation_wifi_status = WL_IDLE_STATUS;
@@ -94,10 +98,41 @@ static char s_automation_wifi_ip[16] = "0.0.0.0";
 static char s_automation_http_url[96] = {};
 static volatile bool s_automation_wifi_has_ip = false;
 static bool s_automation_wifi_events_registered = false;
+static char s_request_tag[9] = {};
+static char s_session_tag[9] = {};
+static char s_last_request_tag[9] = {};
+static char s_last_request[AUTOMATION_LINE_CAPACITY] = {};
+static char s_last_reply[1024] = {};
+static bool s_cache_reply = false;
+
+static bool writeScreenshotRecord(const uint8_t *data, size_t size);
+
+// All acknowledgements use one write, including the optional request tag.
+// The last tagged result is cached for retries in this boot session, so a
+// lost ACK does not require repeating an input action.
+static void protocolReply(const char *format, ...)
+{
+    char response[1024];
+    size_t prefix = 0;
+    if (s_request_tag[0]) {
+        prefix = (size_t)snprintf(response, sizeof(response), "@B2 RES %s ", s_request_tag);
+        format += 4; // All callers supply the @B2 prefix.
+    }
+    va_list args;
+    va_start(args, format);
+    const int size = vsnprintf(response + prefix, sizeof(response) - prefix, format, args);
+    va_end(args);
+    if (size >= 0 && (size_t)size < sizeof(response) - prefix) {
+        if (s_cache_reply) {
+            memcpy(s_last_reply, response, prefix + (size_t)size + 1);
+        }
+        writeScreenshotRecord((const uint8_t *)response, prefix + (size_t)size);
+    }
+}
 
 extern "C" bool AutomationSerialCaptureActive(void)
 {
-    return s_serial_screenshot_locked;
+    return s_serial_capture_busy;
 }
 
 struct AutomationKeyStroke {
@@ -330,29 +365,15 @@ static size_t automationLzCompress(const uint8_t *input, size_t input_size,
 static bool writeScreenshotRecord(const uint8_t *data, size_t size)
 {
     size_t offset = 0;
-    while (offset < size) {
-        const size_t remaining = size - offset;
-        const size_t write_size =
-            remaining < AUTOMATION_SERIAL_WRITE_CHUNK_SIZE
-                ? remaining
-                : AUTOMATION_SERIAL_WRITE_CHUNK_SIZE;
-        bool completed = false;
-        for (int attempt = 0; attempt < AUTOMATION_SERIAL_WRITE_RETRIES;
-             ++attempt) {
-            const size_t written = Serial.write(data + offset, write_size);
-            Serial.flush();
-            if (written != 0) {
-                offset += written;
-                completed = true;
-                break;
-            }
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        if (!completed) return false;
-        vTaskDelay(pdMS_TO_TICKS(1));
+    for (int attempt = 0; offset < size && attempt < AUTOMATION_SERIAL_WRITE_RETRIES; ++attempt) {
+        // HWCDC owns the TX queue and serializes writers. Flushing every 32
+        // bytes both stalls the task and can discard queued data after a USB
+        // timeout. Submit the complete record and let its ISR drain the FIFO.
+        const size_t written = Serial.write(data + offset, size - offset);
+        offset += written;
+        if (offset < size) vTaskDelay(pdMS_TO_TICKS(1));
     }
-    vTaskDelay(pdMS_TO_TICKS(2));
-    return true;
+    return offset == size;
 }
 
 static void releaseScreenshot(void)
@@ -384,7 +405,7 @@ static bool captureScreenshot(bool announce)
         if (pixels != NULL) free(pixels);
         if (compressed != NULL) free(compressed);
         if (hash_table != NULL) heap_caps_free(hash_table);
-        if (announce) Serial.println("@B2 ERR SCREENSHOT out_of_memory");
+        if (announce) protocolReply("@B2 ERR SCREENSHOT out_of_memory\n");
         return false;
     }
 
@@ -395,7 +416,7 @@ static bool captureScreenshot(bool announce)
         heap_caps_free(hash_table);
         free(compressed);
         free(pixels);
-        if (announce) Serial.println("@B2 ERR SCREENSHOT frame_unavailable");
+        if (announce) protocolReply("@B2 ERR SCREENSHOT frame_unavailable\n");
         return false;
     }
 
@@ -406,7 +427,7 @@ static bool captureScreenshot(bool announce)
     if (compressed_size == 0) {
         free(compressed);
         free(pixels);
-        if (announce) Serial.println("@B2 ERR SCREENSHOT compression_failed");
+        if (announce) protocolReply("@B2 ERR SCREENSHOT compression_failed\n");
         return false;
     }
 
@@ -422,7 +443,7 @@ static bool captureScreenshot(bool announce)
     if (payload == NULL) {
         free(compressed);
         free(pixels);
-        if (announce) Serial.println("@B2 ERR SCREENSHOT out_of_memory");
+        if (announce) protocolReply("@B2 ERR SCREENSHOT out_of_memory\n");
         return false;
     }
     memcpy(payload, palette_bytes, sizeof(palette_bytes));
@@ -446,7 +467,7 @@ static bool captureScreenshot(bool announce)
     /* Compact framing keeps the complete header in one 64-byte USB FIFO. The
      * pixel format is fixed by protocol version 1. */
     if (announce) {
-        Serial.printf("@B2 F %lu %u %u %u %u %08lX %u L\n",
+        protocolReply("@B2 F %lu %u %u %u %u %08lX %u L\n",
                       (unsigned long)frame_id, width, height,
                       (unsigned)payload_size, (unsigned)raw_size,
                       (unsigned long)crc, (unsigned)chunk_count);
@@ -461,7 +482,7 @@ static bool captureMonochromeScreenshot(void)
         (size_t)BOARD_MAC_SCREEN_WIDTH * BOARD_MAC_SCREEN_HEIGHT;
     uint8_t *pixels = (uint8_t *)ps_malloc(pixel_capacity);
     if (pixels == NULL) {
-        Serial.println("@B2 ERR SCREENSHOT out_of_memory");
+        protocolReply("@B2 ERR SCREENSHOT out_of_memory\n");
         return false;
     }
 
@@ -470,7 +491,7 @@ static bool captureMonochromeScreenshot(void)
     uint16_t height = 0;
     if (!VideoCaptureFrame(pixels, pixel_capacity, palette, &width, &height)) {
         free(pixels);
-        Serial.println("@B2 ERR SCREENSHOT frame_unavailable");
+        protocolReply("@B2 ERR SCREENSHOT frame_unavailable\n");
         return false;
     }
 
@@ -487,7 +508,7 @@ static bool captureMonochromeScreenshot(void)
         if (compressed != NULL) free(compressed);
         if (hash_table != NULL) heap_caps_free(hash_table);
         free(pixels);
-        Serial.println("@B2 ERR SCREENSHOT out_of_memory");
+        protocolReply("@B2 ERR SCREENSHOT out_of_memory\n");
         return false;
     }
 
@@ -514,7 +535,7 @@ static bool captureMonochromeScreenshot(void)
     free(packed);
     if (compressed_size == 0) {
         free(compressed);
-        Serial.println("@B2 ERR SCREENSHOT compression_failed");
+        protocolReply("@B2 ERR SCREENSHOT compression_failed\n");
         return false;
     }
 
@@ -535,7 +556,7 @@ static void announceTokenizedScreenshot(uint16_t request_token,
     const size_t chunk_count =
         (s_screenshot_payload_size + AUTOMATION_SCREENSHOT_CHUNK_SIZE - 1) /
         AUTOMATION_SCREENSHOT_CHUNK_SIZE;
-    Serial.printf("@B2 %s %04X %lu %u %u %u %u %08lX %u L\n",
+    protocolReply("@B2 %s %04X %lu %u %u %u %u %08lX %u L\n",
                   monochrome ? "M2" : "F2",
                   request_token, (unsigned long)s_screenshot_id,
                   s_screenshot_width, s_screenshot_height,
@@ -613,7 +634,7 @@ static void automationWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
 
 static void pollAutomationHttp(void)
 {
-    if (!s_automation_wifi_has_ip) return;
+    if (!s_emulator_ready || !s_automation_wifi_has_ip) return;
     int wifi_status = WL_IDLE_STATUS;
     char ip[16];
     getNetworkState(&wifi_status, ip, sizeof(ip), NULL, 0);
@@ -692,14 +713,14 @@ static void pollAutomationHttp(void)
 static void sendScreenshotChunk(uint32_t frame_id, size_t chunk)
 {
     if (s_screenshot_payload == NULL || frame_id != s_screenshot_id) {
-        Serial.println("@B2 ERR SCREENSHOT invalid_frame");
+        protocolReply("@B2 ERR SCREENSHOT invalid_frame\n");
         return;
     }
     const size_t chunk_count =
         (s_screenshot_payload_size + AUTOMATION_SCREENSHOT_CHUNK_SIZE - 1) /
         AUTOMATION_SCREENSHOT_CHUNK_SIZE;
     if (chunk >= chunk_count) {
-        Serial.println("@B2 ERR SCREENSHOT invalid_chunk");
+        protocolReply("@B2 ERR SCREENSHOT invalid_chunk\n");
         return;
     }
 
@@ -709,7 +730,7 @@ static void sendScreenshotChunk(uint32_t frame_id, size_t chunk)
                                   ? remaining
                                   : AUTOMATION_SCREENSHOT_CHUNK_SIZE;
     if (chunk > UINT16_MAX) {
-        Serial.println("@B2 ERR SCREENSHOT invalid_chunk");
+        protocolReply("@B2 ERR SCREENSHOT invalid_chunk\n");
         return;
     }
     static const char hex[] = "0123456789ABCDEF";
@@ -718,7 +739,7 @@ static void sendScreenshotChunk(uint32_t frame_id, size_t chunk)
                                (unsigned long)frame_id, (unsigned)chunk);
     if (record_size < 0 ||
         (size_t)record_size + chunk_size * 2 + 10 > sizeof(record)) {
-        Serial.println("@B2 ERR SCREENSHOT record_overflow");
+        protocolReply("@B2 ERR SCREENSHOT record_overflow\n");
         return;
     }
     for (size_t i = 0; i < chunk_size; ++i) {
@@ -734,7 +755,7 @@ static void sendScreenshotChunk(uint32_t frame_id, size_t chunk)
                             " %08lX\n", (unsigned long)record_crc);
     if (record_size <= 0 ||
         !writeScreenshotRecord((const uint8_t *)record, (size_t)record_size)) {
-        Serial.println("@B2 ERR SCREENSHOT data_write_failed");
+        protocolReply("@B2 ERR SCREENSHOT data_write_failed\n");
     }
 }
 
@@ -748,24 +769,33 @@ static bool parseKeyCode(const char *text, uint8_t *code)
     return true;
 }
 
-static void processCommand(char *command)
+static void processLegacyCommand(char *command)
 {
     if (strcmp(command, "PING") == 0) {
-        Serial.printf("@B2 OK PONG %d\n", AUTOMATION_PROTOCOL_VERSION);
+        protocolReply("@B2 OK PONG %d %s\n", AUTOMATION_PROTOCOL_VERSION, s_session_tag);
         return;
     }
     if (strcmp(command, "INFO") == 0) {
-        Serial.printf("@B2 OK INFO %d %s %d %d\n", AUTOMATION_PROTOCOL_VERSION,
+        protocolReply("@B2 OK INFO %d %s %d %d\n", AUTOMATION_PROTOCOL_VERSION,
                       BOARD_NAME, BOARD_MAC_SCREEN_WIDTH, BOARD_MAC_SCREEN_HEIGHT);
+        return;
+    }
+    if (strncmp(command, "BOOT ", 5) == 0) {
+        char reply[600];
+        if (BootGUI_ControlRequest(command + 5, reply, sizeof(reply))) {
+            protocolReply("@B2 %s\n", reply);
+        } else {
+            protocolReply("@B2 ERR BOOT timeout_or_unavailable\n");
+        }
         return;
     }
     if (strcmp(command, "HTTP") == 0) {
         char url[96];
         getNetworkState(NULL, NULL, 0, url, sizeof(url));
         if (url[0] == '\0') {
-            Serial.println("@B2 ERR HTTP unavailable");
+            protocolReply("@B2 ERR HTTP unavailable\n");
         } else {
-            Serial.printf("@B2 OK HTTP %s\n", url);
+            protocolReply("@B2 OK HTTP %s\n", url);
         }
         return;
     }
@@ -774,10 +804,14 @@ static void processCommand(char *command)
         char ip[16];
         char url[96];
         getNetworkState(&wifi_status, ip, sizeof(ip), url, sizeof(url));
-        Serial.printf("@B2 OK NET status=%d ip=%s configured=%d auto=%d http=%d\n",
+        protocolReply("@B2 OK NET status=%d ip=%s configured=%d auto=%d http=%d\n",
                       wifi_status, ip, s_automation_wifi_configured ? 1 : 0,
                       s_automation_wifi_auto_connect ? 1 : 0,
                       url[0] != '\0' ? 1 : 0);
+        return;
+    }
+    if (!s_emulator_ready) {
+        protocolReply("@B2 ERR emulator_not_ready\n");
         return;
     }
     bool tokenized_screenshot = false;
@@ -798,25 +832,23 @@ static void processCommand(char *command)
             screenshot_request_token <= UINT16_MAX;
     }
     if (strcmp(command, "SCREENSHOT") == 0 || tokenized_screenshot) {
-        bool acquired_screenshot_lease = false;
         if (!s_serial_screenshot_locked) {
             if (s_screenshot_mutex == NULL ||
                 xSemaphoreTake(s_screenshot_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                Serial.println("@B2 ERR SCREENSHOT busy");
+                protocolReply("@B2 ERR SCREENSHOT busy\n");
                 return;
             }
             s_serial_screenshot_locked = true;
-            acquired_screenshot_lease = true;
         }
-        if (acquired_screenshot_lease) {
-            // Let a panel DMA transfer that began just before the lease finish.
-            // The video task observes AutomationSerialCaptureActive() and will
-            // not start another transfer until SCREENSHOT CLOSE.
-            vTaskDelay(pdMS_TO_TICKS(120));
-        }
+        // Pause the panel only while copying/compressing. The immutable
+        // payload can be transferred while the physical screen keeps running,
+        // even if the host disappears before closing the frame.
+        s_serial_capture_busy = true;
+        vTaskDelay(pdMS_TO_TICKS(120));
         const bool captured = monochrome_screenshot
                                   ? captureMonochromeScreenshot()
                                   : captureScreenshot(!tokenized_screenshot);
+        s_serial_capture_busy = false;
         if (!captured) {
             s_serial_screenshot_locked = false;
             xSemaphoreGive(s_screenshot_mutex);
@@ -830,15 +862,56 @@ static void processCommand(char *command)
         }
         return;
     }
+    if (strcmp(command, "SCREENSHOT ABORT") == 0) {
+        if (s_serial_screenshot_locked) {
+            releaseScreenshot();
+            s_serial_screenshot_locked = false;
+            s_serial_screenshot_last_activity_ms = 0;
+            xSemaphoreGive(s_screenshot_mutex);
+        }
+        protocolReply("@B2 OK SCREENSHOT ABORT\n");
+        return;
+    }
     unsigned long screenshot_frame = 0;
     unsigned screenshot_chunk = 0;
     unsigned screenshot_batch_count = 0;
+    unsigned screenshot_offset = 0;
+    unsigned screenshot_count = 0;
+    char trailing = 0;
+    if (sscanf(command, "SCREENSHOT READ %lu %u %u %c",
+               &screenshot_frame, &screenshot_offset, &screenshot_count, &trailing) == 3) {
+        if (!s_serial_screenshot_locked || s_screenshot_payload == NULL ||
+            (uint32_t)screenshot_frame != s_screenshot_id) {
+            protocolReply("@B2 ERR SCREENSHOT invalid_frame\n");
+            return;
+        }
+        if (!screenshot_count || screenshot_count > AUTOMATION_SCREENSHOT_READ_MAX ||
+            screenshot_offset >= s_screenshot_payload_size ||
+            screenshot_count > s_screenshot_payload_size - screenshot_offset) {
+            protocolReply("@B2 ERR SCREENSHOT invalid_range\n");
+            return;
+        }
+        s_serial_screenshot_last_activity_ms = millis();
+        char record[AUTOMATION_SCREENSHOT_READ_MAX * 2 + 64];
+        size_t used = (size_t)snprintf(record, sizeof(record), "@B2 R %lu %u ",
+                                      screenshot_frame, screenshot_offset);
+        static const char hex[] = "0123456789ABCDEF";
+        const uint8_t *data = s_screenshot_payload + screenshot_offset;
+        for (unsigned i = 0; i < screenshot_count; ++i) {
+            record[used++] = hex[data[i] >> 4];
+            record[used++] = hex[data[i] & 15];
+        }
+        const uint32_t crc = crc32Update(0xffffffffU, data, screenshot_count) ^ 0xffffffffU;
+        used += (size_t)snprintf(record + used, sizeof(record) - used, " %08lX\n", (unsigned long)crc);
+        writeScreenshotRecord((const uint8_t *)record, used);
+        return;
+    }
     if (sscanf(command, "SCREENSHOT BATCH %lu %u %u",
                &screenshot_frame, &screenshot_chunk,
                &screenshot_batch_count) == 3) {
         if (s_screenshot_payload == NULL ||
             (uint32_t)screenshot_frame != s_screenshot_id) {
-            Serial.println("@B2 ERR SCREENSHOT invalid_frame");
+            protocolReply("@B2 ERR SCREENSHOT invalid_frame\n");
             return;
         }
         const size_t chunk_count =
@@ -848,7 +921,7 @@ static void processCommand(char *command)
             screenshot_batch_count > AUTOMATION_SCREENSHOT_BATCH_MAX ||
             screenshot_chunk >= chunk_count ||
             screenshot_batch_count > chunk_count - screenshot_chunk) {
-            Serial.println("@B2 ERR SCREENSHOT invalid_batch");
+            protocolReply("@B2 ERR SCREENSHOT invalid_batch\n");
             return;
         }
         s_serial_screenshot_last_activity_ms = millis();
@@ -861,7 +934,7 @@ static void processCommand(char *command)
             sendScreenshotChunk((uint32_t)screenshot_frame,
                                 screenshot_chunk + offset);
         }
-        Serial.printf("@B2 OK SCREENSHOT BATCH %lu %u %u\n",
+        protocolReply("@B2 OK SCREENSHOT BATCH %lu %u %u\n",
                       screenshot_frame, screenshot_chunk,
                       screenshot_batch_count);
         return;
@@ -876,10 +949,10 @@ static void processCommand(char *command)
     if (sscanf(command, "SCREENSHOT CLOSE %lu", &screenshot_frame) == 1) {
         if (s_screenshot_payload == NULL ||
             (uint32_t)screenshot_frame != s_screenshot_id) {
-            Serial.println("@B2 ERR SCREENSHOT invalid_frame");
+            protocolReply("@B2 ERR SCREENSHOT invalid_frame\n");
         } else {
             releaseScreenshot();
-            Serial.printf("@B2 OK SCREENSHOT CLOSE %lu\n", screenshot_frame);
+            protocolReply("@B2 OK SCREENSHOT CLOSE %lu\n", screenshot_frame);
             if (s_serial_screenshot_locked) {
                 s_serial_screenshot_locked = false;
                 s_serial_screenshot_last_activity_ms = 0;
@@ -890,19 +963,19 @@ static void processCommand(char *command)
     }
     if (strcmp(command, "RELEASE_ALL") == 0) {
         InputAutomationReleaseAll();
-        Serial.println("@B2 OK RELEASE_ALL");
+        protocolReply("@B2 OK RELEASE_ALL\n");
         return;
     }
     if (strcmp(command, "TRAPS RESET") == 0) {
         CPUTrapProfileReset();
         QuickDrawAccelResetStats();
-        Serial.println("@B2 OK TRAPS RESET");
+        protocolReply("@B2 OK TRAPS RESET\n");
         return;
     }
     if (strcmp(command, "QDACCEL") == 0) {
         QuickDrawAccelStats stats = {};
         QuickDrawAccelReadStats(&stats);
-        Serial.printf("@B2 OK QDACCEL ca=%lu ch=%lu carg=%lu cbm=%lu cport=%lu cexec=%lu "
+        protocolReply("@B2 OK QDACCEL ca=%lu ch=%lu carg=%lu cbm=%lu cport=%lu cexec=%lu "
                       "sa=%lu sh=%lu sarg=%lu sport=%lu srgn=%lu sbg=%lu sexec=%lu "
                       "sha=%lu shh=%lu shf=%lu "
                       "ma=%lu mh=%lu mf=%lu la=%lu lh=%lu lf=%lu "
@@ -963,14 +1036,15 @@ static void processCommand(char *command)
             used += (size_t)written;
         }
         if (used + 1 < sizeof(response)) response[used++] = '\n';
-        Serial.write((const uint8_t *)response, used);
+        response[used] = '\0';
+        protocolReply("@B2 %s", response + 4);
         return;
     }
     int layer_profile_offset = 0;
     if (strcmp(command, "LAYER") == 0 ||
         sscanf(command, "LAYER %d", &layer_profile_offset) == 1) {
         if (layer_profile_offset < 0 || layer_profile_offset >= 16) {
-            Serial.println("@B2 ERR LAYER invalid_offset");
+            protocolReply("@B2 ERR LAYER invalid_offset\n");
             return;
         }
         uint8_t top_selector[16] = {};
@@ -1002,14 +1076,15 @@ static void processCommand(char *command)
             used += (size_t)written;
         }
         if (used + 1 < sizeof(response)) response[used++] = '\n';
-        Serial.write((const uint8_t *)response, used);
+        response[used] = '\0';
+        protocolReply("@B2 %s", response + 4);
         return;
     }
     int trap_profile_offset = 0;
     if (strcmp(command, "TRAPS") == 0 ||
         sscanf(command, "TRAPS %d", &trap_profile_offset) == 1) {
         if (trap_profile_offset < 0 || trap_profile_offset >= 16) {
-            Serial.println("@B2 ERR TRAPS invalid_offset");
+            protocolReply("@B2 ERR TRAPS invalid_offset\n");
             return;
         }
         uint16_t top_index[16] = {};
@@ -1041,7 +1116,8 @@ static void processCommand(char *command)
             used += (size_t)written;
         }
         if (used + 1 < sizeof(response)) response[used++] = '\n';
-        Serial.write((const uint8_t *)response, used);
+        response[used] = '\0';
+        protocolReply("@B2 %s", response + 4);
         return;
     }
 
@@ -1050,18 +1126,18 @@ static void processCommand(char *command)
     int button = 0;
     if (sscanf(command, "MOUSE MOVE %d %d", &x, &y) == 2) {
         InputAutomationMouseMove(x, y, false);
-        Serial.printf("@B2 OK MOUSE MOVE %d %d\n", x, y);
+        protocolReply("@B2 OK MOUSE MOVE %d %d\n", x, y);
         return;
     }
     if (sscanf(command, "MOUSE REL %d %d", &x, &y) == 2) {
         InputAutomationMouseMove(x, y, true);
-        Serial.printf("@B2 OK MOUSE REL %d %d\n", x, y);
+        protocolReply("@B2 OK MOUSE REL %d %d\n", x, y);
         return;
     }
     int click_fields = sscanf(command, "MOUSE CLICK %d %d %d", &x, &y, &button);
     if (click_fields == 2 || click_fields == 3) {
         if (button < 0 || button > 2) {
-            Serial.println("@B2 ERR MOUSE invalid_button");
+            protocolReply("@B2 ERR MOUSE invalid_button\n");
             return;
         }
         InputAutomationMouseMove(x, y, false);
@@ -1069,18 +1145,18 @@ static void processCommand(char *command)
         InputAutomationMouseButton((uint8_t)button, true);
         vTaskDelay(pdMS_TO_TICKS(25));
         InputAutomationMouseButton((uint8_t)button, false);
-        Serial.printf("@B2 OK MOUSE CLICK %d %d %d\n", x, y, button);
+        protocolReply("@B2 OK MOUSE CLICK %d %d %d\n", x, y, button);
         return;
     }
     if (sscanf(command, "MOUSE DOWN %d", &button) == 1 ||
         sscanf(command, "MOUSE UP %d", &button) == 1) {
         if (button < 0 || button > 2) {
-            Serial.println("@B2 ERR MOUSE invalid_button");
+            protocolReply("@B2 ERR MOUSE invalid_button\n");
             return;
         }
         const bool pressed = strncmp(command, "MOUSE DOWN", 10) == 0;
         InputAutomationMouseButton((uint8_t)button, pressed);
-        Serial.printf("@B2 OK MOUSE %s %d\n", pressed ? "DOWN" : "UP", button);
+        protocolReply("@B2 OK MOUSE %s %d\n", pressed ? "DOWN" : "UP", button);
         return;
     }
 
@@ -1088,12 +1164,12 @@ static void processCommand(char *command)
         char action[8] = {};
         char code_text[16] = {};
         if (sscanf(command + 4, "%7s %15s", action, code_text) != 2) {
-            Serial.println("@B2 ERR KEY invalid_arguments");
+            protocolReply("@B2 ERR KEY invalid_arguments\n");
             return;
         }
         uint8_t code = 0;
         if (!parseKeyCode(code_text, &code)) {
-            Serial.println("@B2 ERR KEY invalid_keycode");
+            protocolReply("@B2 ERR KEY invalid_keycode\n");
             return;
         }
         if (strcmp(action, "DOWN") == 0) {
@@ -1104,10 +1180,10 @@ static void processCommand(char *command)
             AutomationKeyStroke stroke = {code, false};
             tapKey(stroke);
         } else {
-            Serial.println("@B2 ERR KEY invalid_action");
+            protocolReply("@B2 ERR KEY invalid_action\n");
             return;
         }
-        Serial.printf("@B2 OK KEY %s 0x%02X\n", action, code);
+        protocolReply("@B2 OK KEY %s 0x%02X\n", action, code);
         return;
     }
 
@@ -1117,13 +1193,13 @@ static void processCommand(char *command)
         const size_t decoded_capacity = (encoded_length * 3) / 4 + 3;
         uint8_t *decoded = (uint8_t *)malloc(decoded_capacity);
         if (decoded == NULL) {
-            Serial.println("@B2 ERR TYPE out_of_memory");
+            protocolReply("@B2 ERR TYPE out_of_memory\n");
             return;
         }
         size_t decoded_size = 0;
         if (!decodeBase64(encoded, decoded, decoded_capacity, &decoded_size)) {
             free(decoded);
-            Serial.println("@B2 ERR TYPE invalid_base64");
+            protocolReply("@B2 ERR TYPE invalid_base64\n");
             return;
         }
         for (size_t i = 0; i < decoded_size; ++i) {
@@ -1132,17 +1208,57 @@ static void processCommand(char *command)
                 const unsigned bad = decoded[i];
                 free(decoded);
                 InputAutomationReleaseAll();
-                Serial.printf("@B2 ERR TYPE unsupported_byte_%02X\n", bad);
+                protocolReply("@B2 ERR TYPE unsupported_byte_%02X\n", bad);
                 return;
             }
             tapKey(stroke);
         }
         free(decoded);
-        Serial.printf("@B2 OK TYPE %u\n", (unsigned)decoded_size);
+        protocolReply("@B2 OK TYPE %u\n", (unsigned)decoded_size);
         return;
     }
 
-    Serial.println("@B2 ERR unknown_command");
+    protocolReply("@B2 ERR unknown_command\n");
+}
+
+static void processCommand(char *command)
+{
+    if (strncmp(command, "REQ ", 4) != 0) {
+        processLegacyCommand(command);
+        return;
+    }
+    // Fixed-width hexadecimal IDs make malformed envelopes unambiguous.
+    if (strlen(command) < 23 || command[12] != ' ' || command[21] != ' ') {
+        protocolReply("@B2 ERR invalid_request\n");
+        return;
+    }
+    for (int i = 4; i < 21; ++i) {
+        if (i == 12) continue;
+        if (!isxdigit((unsigned char)command[i])) {
+            protocolReply("@B2 ERR invalid_request\n");
+            return;
+        }
+    }
+    memcpy(s_request_tag, command + 4, 8);
+    s_request_tag[8] = '\0';
+    if (strncmp(command + 13, s_session_tag, 8) != 0) {
+        // Do not replay input from a host still talking to the previous boot.
+        protocolReply("@B2 ERR session_changed\n");
+    } else if (strcmp(s_request_tag, s_last_request_tag) == 0) {
+        if (strcmp(command + 22, s_last_request) == 0 && s_last_reply[0]) {
+            writeScreenshotRecord((const uint8_t *)s_last_reply, strlen(s_last_reply));
+        } else {
+            protocolReply("@B2 ERR request_id_reused\n");
+        }
+    } else {
+        memcpy(s_last_request_tag, s_request_tag, sizeof(s_request_tag));
+        snprintf(s_last_request, sizeof(s_last_request), "%s", command + 22);
+        s_last_reply[0] = '\0';
+        s_cache_reply = true;
+        processLegacyCommand(command + 22);
+        s_cache_reply = false;
+    }
+    s_request_tag[0] = '\0';
 }
 
 static void automationTask(void *param)
@@ -1151,8 +1267,9 @@ static void automationTask(void *param)
     static char line[AUTOMATION_LINE_CAPACITY];
     size_t length = 0;
     bool overflow = false;
+    uint32_t last_command_ms = millis();
 
-    Serial.printf("@B2 READY %d\n", AUTOMATION_PROTOCOL_VERSION);
+    protocolReply("@B2 READY %d\n", AUTOMATION_PROTOCOL_VERSION);
     while (automation_task_running) {
         while (Serial.available() > 0) {
             const int raw = Serial.read();
@@ -1160,12 +1277,14 @@ static void automationTask(void *param)
             const char ch = (char)raw;
             if (ch == '\n') {
                 if (overflow) {
-                    Serial.println("@B2 ERR line_too_long");
+                    protocolReply("@B2 ERR line_too_long\n");
                 } else {
                     if (length > 0 && line[length - 1] == '\r') --length;
                     line[length] = '\0';
                     if (strncmp(line, "@B2 ", 4) == 0) {
+                        last_command_ms = millis();
                         processCommand(line + 4);
+                        last_command_ms = millis();
                     }
                 }
                 length = 0;
@@ -1177,6 +1296,10 @@ static void automationTask(void *param)
                     overflow = true;
                 }
             }
+        }
+        if ((uint32_t)(millis() - last_command_ms) >= AUTOMATION_INPUT_IDLE_RELEASE_MS) {
+            if (s_emulator_ready) InputAutomationReleaseAll();
+            last_command_ms = millis();
         }
         if (s_serial_screenshot_locked &&
             (uint32_t)(millis() - s_serial_screenshot_last_activity_ms) >=
@@ -1222,7 +1345,7 @@ extern "C" void AutomationPrepareNetwork(void)
     s_automation_wifi_events_registered = true;
 }
 
-extern "C" bool AutomationInit(void)
+extern "C" bool AutomationStartSerial(void)
 {
     if (automation_task_handle != NULL) return true;
 #if defined(BOARD_M5STACK_TAB5)
@@ -1234,9 +1357,8 @@ extern "C" bool AutomationInit(void)
 #endif
     snprintf(s_automation_http_token, sizeof(s_automation_http_token),
              "%08lX", (unsigned long)esp_random());
+    snprintf(s_session_tag, sizeof(s_session_tag), "%08lX", (unsigned long)esp_random());
     AutomationPrepareNetwork();
-    s_automation_wifi_configured = BootGUI_GetWiFiSSID()[0] != '\0';
-    s_automation_wifi_auto_connect = BootGUI_GetWiFiAutoConnect();
     s_screenshot_mutex = xSemaphoreCreateMutex();
     if (s_screenshot_mutex == NULL) {
         Serial.println("[AUTOMATION] ERROR: Failed to create screenshot lock");
@@ -1254,6 +1376,17 @@ extern "C" bool AutomationInit(void)
         Serial.println("[AUTOMATION] ERROR: Failed to start serial control task");
         return false;
     }
+    Serial.println("[AUTOMATION] Serial control enabled in preboot");
+    return true;
+}
+
+extern "C" bool AutomationInit(void)
+{
+    if (!AutomationStartSerial()) return false;
+    s_automation_wifi_configured = BootGUI_GetWiFiSSID()[0] != '\0';
+    s_automation_wifi_auto_connect = BootGUI_GetWiFiAutoConnect();
+    s_emulator_ready = true;
+    if (automation_network_task_handle != NULL) return true;
     automation_network_task_running = true;
     const BaseType_t network_result = xTaskCreatePinnedToCore(
         automationNetworkTask, "AutomationNet", AUTOMATION_NETWORK_TASK_STACK_SIZE,
@@ -1270,18 +1403,12 @@ extern "C" bool AutomationInit(void)
 
 extern "C" void AutomationExit(void)
 {
-    automation_task_running = false;
+    s_emulator_ready = false;
     automation_network_task_running = false;
-    for (int i = 0; i < 100 && automation_task_handle != NULL; ++i) {
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
     for (int i = 0; i < 100 && automation_network_task_handle != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(5));
     }
     InputAutomationReleaseAll();
-    if (s_screenshot_mutex != NULL && automation_network_task_handle == NULL &&
-        automation_task_handle == NULL) {
-        vSemaphoreDelete(s_screenshot_mutex);
-        s_screenshot_mutex = NULL;
-    }
+    // Keep the serial task and its mutex alive on the safe-to-power-off screen.
+    // The main idle loop continues to serve BOOT commands there.
 }

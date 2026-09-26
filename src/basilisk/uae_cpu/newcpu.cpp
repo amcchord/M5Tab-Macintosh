@@ -55,6 +55,8 @@ B2_mutex *spcflags_lock = NULL;
 #endif
 
 bool quit_program = false;
+extern bool boot_control_pending;
+extern void cpu_do_check_control(void);
 #if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
 volatile spcflags_t spcflags_urgent = 0;
 #endif
@@ -1774,6 +1776,7 @@ int m68k_do_specialties (void)
 		Exception (9,last_trace_ad);
 	}
 	while (SPCFLAGS_TEST( SPCFLAG_STOP )) {
+		if (__atomic_load_n(&boot_control_pending, __ATOMIC_ACQUIRE)) cpu_do_check_control();
 		if (SPCFLAGS_TEST( SPCFLAG_INT | SPCFLAG_DOINT )){
 			SPCFLAGS_CLEAR( SPCFLAG_INT | SPCFLAG_DOINT );
 			int intr = intlev ();
@@ -2066,6 +2069,7 @@ void m68k_do_execute (void)
 		
 		// Decrement tick counter by number of instructions actually executed
 		// This maintains accurate instruction counting for IPS monitoring
+		if (__atomic_load_n(&boot_control_pending, __ATOMIC_ACQUIRE)) cpu_do_check_control();
 		emulated_ticks -= instructions_executed;
 			if (emulated_ticks <= 0) {
 #if CPU_CORE_PROFILE

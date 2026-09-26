@@ -1266,8 +1266,8 @@ static void videoRenderTaskOptimized(void *param)
 
         // The logical framebuffer snapshot is the source of truth for host
         // automation. Avoid competing with its USB compression/transfer task
-        // for Core 0 and PSRAM bandwidth; the panel catches up immediately
-        // after the short capture lease closes.
+        // for Core 0 and PSRAM bandwidth during capture/compression. The panel
+        // resumes while the immutable snapshot is transferred to the host.
         if (AutomationSerialCaptureActive()) {
             continue;
         }

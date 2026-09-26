@@ -46,28 +46,28 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## v4.7: silicon compatibility, clock settings, and crash recovery
+## v4.7.1: faster serial testing and preboot control
 
-[Download v4.7](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7).
-Promoted to stable following maintainer testing on September 25, 2026. All four
-firmware downloads are byte-for-byte identical to v4.7-beta.1; if you already
-installed that beta, no reflash is needed. Elecrow support (#10) remains separate.
+[Download v4.7.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1).
+This patch adds reliable USB serial control for automated end-to-end testing.
 
-- **Production ESP32-P4 support (#17):** separate `Rev3` images use the
-  production bootloader and libraries. Both display backends let ESP-IDF choose
-  the correct DSI PHY clock. The original images remain available for older chips.
-- **Set the Mac clock (#13):** open the Mac's **Apple menu → Control Panels →
-  Date & Time** (named **General Controls** on some System versions). Guest RTC
-  writes now take effect and are saved in the device's flash. The boot menu uses
-  the same clock. The software clock resumes from its last save after restart;
-  it does not count time while powered off or synchronize with the internet.
-  Clock edits save on the next emulator loop; checkpoints occur every five
-  minutes and at clean Mac shutdown. Erasing or reflashing merged firmware can clear this setting.
-- **Crash recovery (#15):** panic, watchdog, and brownout resets open Boot
-  Settings instead of immediately restarting the guest. A splash tap opens
-  settings even with `skip_gui=yes`. Audio backends now validate the complete
-  guest sample-buffer range before reading it. These changes add audio safety
-  and recovery; maintainer testing confirmed the beta changes work.
+- **Faster screenshots:** larger CRC-checked transfers and buffered reads reduced
+  measured Tab5 color captures from 22.2 seconds to about 0.55 seconds and mono
+  captures from 2.2 seconds to about 0.20 seconds on the same desktop scene.
+- **Reliable control:** boot-session request IDs and cached acknowledgements make
+  retries safe. Reopening native USB serial no longer resets the device on POSIX
+  hosts; abandoned frames and held input have recovery timeouts.
+- **All saved preboot settings:** select disk/CD images and shared folders; change
+  RAM, audio, rotation, boot source, and WiFi configuration over serial. Enter
+  settings remotely, save or reload selections, and start the emulator through
+  the CLI, Python API, or MCP server. WiFi passwords are write-only.
+- **Boot reliability:** correct touch-task cleanup and verify settings files
+  before replacing them. Invalid values and missing boot media are rejected.
+
+All 40 automated tests pass. Hardware tests used a pre-v3 Tab5 with the opt-in
+USB debug SDK; the four standard board/silicon builds retain their existing SDK
+pins. See [release notes](RELEASE_NOTES.md) for download selection and validation,
+and [AUTOMATION.md](AUTOMATION.md) for commands and protocol details.
 
 ### Choose the image for your chip revision
 
@@ -76,10 +76,22 @@ Check the serial boot log or run `esptool --port PORT chip-id`.
 
 | Board / ESP32-P4 silicon | Download filename | PlatformIO environment |
 |---|---|---|
-| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7.bin` | `esp32p4_pioarduino` |
-| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7.bin` | `esp32p4_pioarduino_rev3` |
-| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.bin` | `waveshare_p4_101` |
-| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.bin` | `waveshare_p4_101_rev3` |
+| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7.1.bin` | `esp32p4_pioarduino` |
+| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7.1.bin` | `esp32p4_pioarduino_rev3` |
+| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.1.bin` | `waveshare_p4_101` |
+| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.1.bin` | `waveshare_p4_101_rev3` |
+
+The separate `M5Tab-Macintosh-USB-Debug-v4.7.1.bin` download is the tested
+**pre-v3 Tab5** configuration using Arduino 3.3.8 / IDF 5.5.4. It is useful for
+serial testing and for the SD-mount issue observed with the older standard Tab5
+SDK on the development unit. The standard profiles remain unchanged because
+their SDK choices also address board-specific display/WiFi regressions. This
+optional image is not for Rev3 silicon or Waveshare.
+
+The debug `-app.bin` companion flashes at **`0x10000`** on an existing compatible
+Tab5 installation; it preserves the bootloader, partition table, and NVS. All
+other firmware downloads are merged images for **`0x0`**. The host-tools ZIP
+contains the Python client, MCP server, benchmark, and instructions.
 
 The production SDK requires **v3.1 minimum**; v3.0 is not covered. Flash merged
 images at **`0x0`**. Using a Rev3 image on an older chip (or vice versa) can fail
@@ -106,6 +118,29 @@ changes the result, and the serial log from startup through the first crash.
 Elecrow CrowPanel Advanced 9-inch support (#10) is still under investigation.
 Its panel, audio, SD wiring and 1024×600 scaling need a separate board port;
 these downloads do not target it. See [the issue review](ISSUE_FIXES.md).
+
+## Previous release: v4.7
+
+[Download v4.7](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7).
+Promoted to stable following maintainer testing on September 25, 2026. All four
+firmware downloads are byte-for-byte identical to v4.7-beta.1; if you already
+installed that beta, no reflash is needed. Elecrow support (#10) remains separate.
+
+- **Production ESP32-P4 support (#17):** separate `Rev3` images use the
+  production bootloader and libraries. Both display backends let ESP-IDF choose
+  the correct DSI PHY clock. The original images remain available for older chips.
+- **Set the Mac clock (#13):** open the Mac's **Apple menu → Control Panels →
+  Date & Time** (named **General Controls** on some System versions). Guest RTC
+  writes now take effect and are saved in the device's flash. The boot menu uses
+  the same clock. The software clock resumes from its last save after restart;
+  it does not count time while powered off or synchronize with the internet.
+  Clock edits save on the next emulator loop; checkpoints occur every five
+  minutes and at clean Mac shutdown. Erasing or reflashing merged firmware can clear this setting.
+- **Crash recovery (#15):** panic, watchdog, and brownout resets open Boot
+  Settings instead of immediately restarting the guest. A splash tap opens
+  settings even with `skip_gui=yes`. Audio backends now validate the complete
+  guest sample-buffer range before reading it. These changes add audio safety
+  and recovery; maintainer testing confirmed the beta changes work.
 
 ## What's New in v4.5
 
@@ -294,11 +329,15 @@ This project runs a **Motorola 68040** emulator that can boot real Macintosh ROM
 
 The programming/serial connection can also expose the logical Mac framebuffer
 and inject ADB mouse/keyboard input. Small, ordered input commands stay on
-serial; screenshots prefer a tokenized, CRC-checked WiFi endpoint with an
-integrity-checked serial fallback. Transfer tasks run on core 0 while 68k
+serial; screenshots use larger CRC-checked USB blocks with a tokenized WiFi
+fallback. Command reply IDs and buffered host reads support reliable automated
+tests. Transfer tasks run on core 0 while 68k
 emulation stays on core 1. The included Python bridge can save PNG screenshots,
 click, drag, type, send key chords, or run as a persistent MCP stdio server for
-an LLM-driven `screenshot -> act -> screenshot` loop. See
+an LLM-driven `screenshot -> act -> screenshot` loop. It also controls all saved
+preboot settings: use `boot-enter`, `boot-get`, `boot-list`, `boot-set`, and
+`boot-start` to run tests with different disk images, RAM, display, audio,
+and WiFi settings. See
 [`AUTOMATION.md`](AUTOMATION.md) for setup and commands.
 
 ## Hardware
@@ -593,30 +632,30 @@ platform requires it). For an isolated build environment:
 python3.13 -m venv .build/release-tools
 .build/release-tools/bin/python -m pip install platformio==6.2.0 esptool==5.4.0
 PATH="$PWD/.build/release-tools/bin:$PATH" PIO="$PWD/.build/release-tools/bin/pio" \
-  ./scripts/build_release.sh v4.7
+  ./scripts/build_release.sh v4.7.1
 ```
 
 For an existing supported toolchain, use the release script:
 
 ```bash
 # Create all four versioned firmware images
-./scripts/build_release.sh v4.7
+./scripts/build_release.sh v4.7.1
 
 # Or build only production-silicon Waveshare firmware
-./scripts/build_release.sh v4.7 waveshare-rev3
+./scripts/build_release.sh v4.7.1 waveshare-rev3
 
 # Output:
-#   release/M5Tab-Macintosh-v4.7.bin
-#   release/M5Tab-Macintosh-Rev3-v4.7.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.bin
+#   release/M5Tab-Macintosh-v4.7.1.bin
+#   release/M5Tab-Macintosh-Rev3-v4.7.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.1.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7.bin
+    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7.1.bin
 ```
 
 ---

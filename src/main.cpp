@@ -97,6 +97,12 @@ static void haltWith(const char *msg)
 
 void setup(void)
 {
+#if defined(BOARD_M5STACK_TAB5)
+    // Configure before begin(): replacing live HWCDC queues races its ISR.
+    // A complete automation READ reply fits in TX; TYPE fits in RX.
+    Serial.setTxBufferSize(2048);
+    Serial.setRxBufferSize(2048);
+#endif
     Serial.begin(115200);
     delay(500);
 
@@ -158,6 +164,11 @@ void setup(void)
         haltWith("Boot GUI initialization failed");
     }
 
+    if (!AutomationStartSerial()) {
+        Serial.println("[MAIN] WARNING: Preboot serial control unavailable");
+    }
+    BootGUI_ControlPoll();
+
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     const bool recovery = reset_reason == ESP_RST_PANIC ||
         reset_reason == ESP_RST_INT_WDT || reset_reason == ESP_RST_TASK_WDT ||
@@ -166,7 +177,7 @@ void setup(void)
     if (recovery) {
         Serial.printf("[RECOVERY] Opening settings (reset reason %d). Disk images are unchanged.\n", reset_reason);
     }
-    if (openSettings || recovery) {
+    if (openSettings || recovery || BootGUI_StartInSettings()) {
         BootGUI_RunSettingsOnly();
     } else {
         BootGUI_FinishWithoutUI();
@@ -186,6 +197,7 @@ void setup(void)
     Serial.println("[MAIN] Starting BasiliskII emulator...");
     basilisk_setup();
 
+    BootGUI_ControlSetPhase("stopped");
     Serial.println("[MAIN] Emulator exited");
 
     /* Final sync: emulator just stopped, no more writes are coming.
@@ -209,6 +221,8 @@ void setup(void)
 void loop(void)
 {
     Board_Update();
+    BootGUI_ControlPoll();
+    if (BootGUI_RestartPending()) BootGUI_Restart();
     /* Emulator owns its own tasks after basilisk_setup(); we only get here
      * if it exits. */
     delay(100);

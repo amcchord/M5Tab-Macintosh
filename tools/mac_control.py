@@ -22,12 +22,20 @@ from typing import Any, BinaryIO, Iterable
 import urllib.error
 import urllib.request
 import zlib
+from collections import deque
 
 
 PROTOCOL_PREFIX = "@B2 "
 DEFAULT_BAUD = 115200
 DEFAULT_TIMEOUT = 120.0
 SCREENSHOT_BATCH_SIZE = 4
+SCREENSHOT_READ_SIZE = 768
+MAX_PROTOCOL_LINE = 4096
+BOOT_STRING_SETTINGS = {"disk": 255, "cdrom": 255, "extfs": 255, "wifi_ssid": 32, "wifi_pass": 63}
+BOOT_BOOL_SETTINGS = {"skip_gui", "wifi_auto", "audio", "boot_from_cd", "wifi_password_set"}
+BOOT_INT_SETTINGS = {"ramsize": (4, 8, 12, 16), "rotation": (0, 180)}
+BOOT_READ_SETTINGS = tuple(k for k in BOOT_STRING_SETTINGS if k != "wifi_pass") + ("ramsize", "rotation", "skip_gui", "wifi_auto", "audio", "boot_from_cd", "wifi_password_set")
+BOOT_WRITE_SETTINGS = tuple(BOOT_STRING_SETTINGS) + tuple(BOOT_INT_SETTINGS) + ("skip_gui", "wifi_auto", "audio", "boot_from_cd")
 MONO_RGB_LOOKUP = tuple(
     b"".join(
         b"\xff\xff\xff" if value & (0x80 >> bit) else b"\x00\x00\x00"
@@ -39,6 +47,26 @@ MONO_RGB_LOOKUP = tuple(
 
 class ControlError(RuntimeError):
     pass
+
+
+class _AtomicModemLines:
+    """Set native USB/JTAG control lines without an intermediate reset state.
+
+    pyserial's POSIX open updates DTR and RTS separately. If the driver starts
+    with both asserted, clearing DTR first briefly leaves only RTS asserted,
+    which resets the P4. TIOCMSET changes the pair in one USB control request.
+    """
+
+    def _update_dtr_state(self):
+        import fcntl
+        import termios
+
+        bits = (termios.TIOCM_DTR if self._dtr_state else 0) | (
+            termios.TIOCM_RTS if self._rts_state else 0
+        )
+        fcntl.ioctl(self.fd, termios.TIOCMSET, struct.pack("I", bits))
+
+    _update_rts_state = _update_dtr_state
 
 
 def find_serial_port() -> str:
@@ -144,11 +172,24 @@ class MacControl:
             ) from exc
 
         self.port = port or os.environ.get("BASILISK_PORT") or find_serial_port()
-        connection = serial.Serial()
+        port_info = next(
+            (item for item in list_ports.comports() if item.device == self.port), None
+        )
+        self._uses_usb_jtag = bool(
+            port_info is not None and port_info.vid == 0x303A and port_info.pid == 0x1001
+        )
+        if os.name == "posix" and self._uses_usb_jtag:
+            class USBJTAGSerial(_AtomicModemLines, serial.Serial):
+                pass
+            connection = USBJTAGSerial()
+        else:
+            connection = serial.Serial()
         connection.port = self.port
         connection.baudrate = baud
         connection.timeout = 0.25
         connection.write_timeout = 5
+        if os.name == "posix":
+            connection.exclusive = True
         # Opening a native USB/JTAG tty with pyserial's asserted defaults can
         # reset the P4. An automation client should attach to a running Mac
         # without disturbing it, so preload both lines inactive. connect()
@@ -173,18 +214,12 @@ class MacControl:
                 # without termios retain the persistent MCP connection path.
                 pass
         self.serial = connection
-        port_info = next(
-            (item for item in list_ports.comports() if item.device == self.port),
-            None,
-        )
-        self._uses_usb_jtag = bool(
-            port_info is not None
-            and port_info.vid == 0x303A
-            and port_info.pid == 0x1001
-        )
         self._reset_on_failure = reset_on_failure
         self._recovery_reset_done = False
         self._http_url: str | bool | None = None
+        self.protocol_version = 3
+        self._rx_buffer = bytearray()
+        self._rx_lines: deque[str] = deque()
 
     def close(self) -> None:
         if self.serial.is_open:
@@ -254,32 +289,94 @@ class MacControl:
             yield PROTOCOL_PREFIX + fragment
 
     def _protocol_lines(self, deadline: float) -> Iterable[str]:
+        # readline() can return a partial record on timeout. Keep those bytes
+        # across calls, and read available USB data in bulk instead of doing a
+        # Python/OS read for every byte in a screenshot.
+        if not hasattr(self, "_rx_buffer"):
+            self._rx_buffer = bytearray()
+            self._rx_lines = deque()
         while time.monotonic() < deadline:
-            raw = self.serial.readline()
+            while self._rx_lines:
+                yield self._rx_lines.popleft()
+            previous_timeout = self.serial.timeout
+            self.serial.timeout = max(0, min(0.05, deadline - time.monotonic()))
+            try:
+                if hasattr(self.serial, "read"):
+                    raw = self.serial.read(min(8192, max(1, self.serial.in_waiting)))
+                else:
+                    raw = self.serial.readline()
+            finally:
+                self.serial.timeout = previous_timeout
             if not raw:
                 continue
-            yield from self._protocol_fragments(raw)
+            self._rx_buffer.extend(raw)
+            while b"\n" in self._rx_buffer:
+                line, _, rest = self._rx_buffer.partition(b"\n")
+                self._rx_buffer = bytearray(rest)
+                self._rx_lines.extend(self._protocol_fragments(line))
+            if len(self._rx_buffer) > MAX_PROTOCOL_LINE:
+                # Bound memory on noise; retain a possible split marker.
+                self._rx_buffer = self._rx_buffer[-3:]
 
     def request(self, command: str, expected: str, timeout: float = 5.0) -> str:
-        self._write(command)
+        token = None
+        if getattr(self, "protocol_version", 3) >= 4:
+            self._request_id = (getattr(self, "_request_id", time.monotonic_ns()) + 1) & 0xFFFFFFFF
+            token = f"{self._request_id:08X}"
         deadline = time.monotonic() + timeout
-        for line in self._protocol_lines(deadline):
-            if line.startswith(f"{PROTOCOL_PREFIX}ERR"):
-                raise ControlError(line[len(PROTOCOL_PREFIX) :])
-            if line.startswith(f"{PROTOCOL_PREFIX}{expected}"):
-                return line
-        raise ControlError(f"timed out waiting for {expected!r} after {command!r}")
+        wire_command = f"REQ {token} {getattr(self, 'session_id', '00000000')} {command}" if token else command
+        # v4 caches the last tagged response within a boot session. Retrying
+        # that exact envelope repairs a lost ACK without repeating input.
+        # TYPE executes synchronously at ~25 ms/character; allow it to finish.
+        attempt_timeout = max(0.5, len(command) * 0.03) if command.startswith("TYPE ") else 0.5
+        if command.startswith("BOOT "):
+            attempt_timeout = 5.0
+        self.last_request_retries = 0
+        for attempt in range(5 if token else 1):
+            if time.monotonic() >= deadline:
+                break
+            self._write(wire_command)
+            self.last_request_retries = attempt
+            attempt_deadline = min(deadline, time.monotonic() + attempt_timeout) if token else deadline
+            for line in self._protocol_lines(attempt_deadline):
+                if token:
+                    prefix = f"{PROTOCOL_PREFIX}RES {token} "
+                    if not line.startswith(prefix):
+                        continue
+                    line = PROTOCOL_PREFIX + line[len(prefix):]
+                if line.startswith(f"{PROTOCOL_PREFIX}ERR"):
+                    raise ControlError(line[len(PROTOCOL_PREFIX) :])
+                if line == f"{PROTOCOL_PREFIX}{expected}" or line.startswith(f"{PROTOCOL_PREFIX}{expected} "):
+                    return line
+        description = "BOOT SET wifi_pass <redacted>" if command.startswith("BOOT SET wifi_pass ") else command
+        raise ControlError(f"timed out waiting for {expected!r} after {description!r}")
+
+    def _accept_handshake(self, response: str) -> str:
+        parts = response.split()
+        try:
+            version = int(parts[3])
+            if version >= 4:
+                session = parts[4]
+                if len(session) != 8 or any(ch not in "0123456789ABCDEF" for ch in session):
+                    raise ValueError("bad boot session")
+                self.session_id = session
+        except (IndexError, ValueError) as exc:
+            raise ControlError("invalid protocol handshake") from exc
+        self.protocol_version = version
+        return response
 
     def connect(self, timeout: float = DEFAULT_TIMEOUT) -> str:
+        self.protocol_version = 3  # Unwrapped handshake also works after a reboot.
         deadline = time.monotonic() + timeout
         last_error: Exception | None = None
 
         # Preserve the guest first. This is long enough for the normal board,
         # SD, and boot-GUI path when the host attaches during power-up.
-        attach_deadline = min(deadline, time.monotonic() + 25.0)
+        attach_deadline = min(deadline, time.monotonic() + 25.0) if self._reset_on_failure else deadline
         while time.monotonic() < attach_deadline:
             try:
                 response = self.request("PING", "OK PONG", timeout=1.0)
+                self._accept_handshake(response)
                 self._recovery_reset_done = True
                 return response
             except (ControlError, OSError) as exc:
@@ -299,7 +396,8 @@ class MacControl:
             self._recovery_reset_done = True
             while time.monotonic() < deadline:
                 try:
-                    return self.request("PING", "OK PONG", timeout=1.0)
+                    response = self.request("PING", "OK PONG", timeout=1.0)
+                    return self._accept_handshake(response)
                 except (ControlError, OSError) as exc:
                     last_error = exc
                     time.sleep(0.2)
@@ -309,6 +407,115 @@ class MacControl:
 
     def info(self) -> str:
         return self.request("INFO", "OK INFO")
+
+    def _boot_request(self, command: str, expected: str) -> str:
+        return self.request(f"BOOT {command}", f"OK BOOT {expected}", timeout=15.0)
+
+    def boot_status(self) -> dict[str, Any]:
+        fields = self._boot_request("STATUS", "STATUS").split()
+        if len(fields) != 7 or fields[6] not in ("0", "1"):
+            raise ControlError("invalid boot status response")
+        return {"phase": fields[4], "screen": fields[5], "restart_pending": fields[6] == "1"}
+
+    @staticmethod
+    def _boot_decode(encoded: str) -> str:
+        try:
+            return "" if encoded == "-" else bytes.fromhex(encoded).decode("utf-8")
+        except (ValueError, UnicodeError) as exc:
+            raise ControlError("invalid boot value encoding") from exc
+
+    def boot_get(self, key: str | None = None) -> Any:
+        """Read current selections. Wi-Fi passwords are write-only."""
+        if key is None:
+            return {name: self.boot_get(name) for name in BOOT_READ_SETTINGS}
+        if key not in BOOT_READ_SETTINGS:
+            raise ControlError(f"unknown or write-only boot setting: {key}")
+        prefix = f"@B2 OK BOOT VALUE {key} "
+        line = self._boot_request(f"GET {key}", f"VALUE {key}")
+        value = self._boot_decode(line[len(prefix):])
+        if key in BOOT_BOOL_SETTINGS:
+            if value not in ("true", "false"):
+                raise ControlError("invalid boot boolean response")
+            return value == "true"
+        if key in BOOT_INT_SETTINGS:
+            if value not in tuple(str(n) for n in BOOT_INT_SETTINGS[key]):
+                raise ControlError("invalid boot numeric response")
+            return int(value)
+        return value
+
+    def boot_set(self, key: str, value: Any) -> None:
+        """Change a preboot selection; SAVE or START persists it."""
+        if key not in BOOT_WRITE_SETTINGS:
+            raise ControlError(f"unknown or read-only boot setting: {key}")
+        if key in BOOT_BOOL_SETTINGS:
+            if isinstance(value, bool):
+                value = "true" if value else "false"
+            if value not in ("true", "false"):
+                raise ControlError(f"{key} requires true or false")
+        elif key in BOOT_INT_SETTINGS:
+            value = str(value)
+            if value not in tuple(str(n) for n in BOOT_INT_SETTINGS[key]):
+                raise ControlError(f"invalid choice for {key}: {value}")
+        elif not isinstance(value, str):
+            raise ControlError(f"{key} requires a string")
+        raw = value.encode("utf-8")
+        if any(ch < 32 or ch == 127 for ch in raw) or len(raw) > BOOT_STRING_SETTINGS.get(key, 255):
+            raise ControlError(f"invalid length or control character for {key}")
+        self._boot_request(f"SET {key} {raw.hex() or '-'}", f"SET {key}")
+
+    def boot_list(self, kind: str) -> list[str]:
+        if kind not in ("disk", "cdrom", "extfs"):
+            raise ControlError("boot list must be disk, cdrom, or extfs")
+        result: list[str] = []
+        for index in range(32):
+            fields = self._boot_request(f"LIST {kind} {index}", "ITEM").split()
+            try:
+                count = int(fields[4])
+                if len(fields) != 6 or not 0 <= count <= 32:
+                    raise ValueError()
+            except (IndexError, ValueError) as exc:
+                raise ControlError("invalid boot list response") from exc
+            if index >= count:
+                return result
+            result.append(self._boot_decode(fields[5]))
+            if len(result) == count:
+                return result
+        return result
+
+    def boot_action(self, action: str) -> None:
+        commands = {"save": "SAVE", "reload": "RELOAD", "rescan": "RESCAN",
+                    "wifi-connect": "WIFI CONNECT", "wifi-disconnect": "WIFI DISCONNECT"}
+        if action not in commands:
+            raise ControlError(f"unknown boot action: {action}")
+        self._boot_request(commands[action], commands[action])
+
+    def _wait_boot_phase(self, phase: str, timeout: float) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                status = self.boot_status()
+                if status["phase"] == phase and not status["restart_pending"]:
+                    if phase != "preboot" or status["screen"] == "settings":
+                        return status
+            except (ControlError, OSError):
+                # A deliberate reboot changes the request session; re-handshake
+                # without pulsing reset or repeating ENTER in the new session.
+                try:
+                    self.connect(timeout=min(5.0, max(0.1, deadline - time.monotonic())))
+                except (ControlError, OSError):
+                    pass
+            time.sleep(0.1)
+        raise ControlError(f"device did not reach {phase} within {timeout:g}s")
+
+    def boot_enter(self, timeout: float = 60.0) -> dict[str, Any]:
+        """Reboot into settings once (or stay there), then wait for the UI."""
+        self._boot_request("ENTER", "ENTER")
+        return self._wait_boot_phase("preboot", timeout)
+
+    def boot_start(self, timeout: float = 60.0) -> dict[str, Any]:
+        """Save selections and boot; waits for emulator initialization, not Finder."""
+        self._boot_request("START", "START")
+        return self._wait_boot_phase("emulator", timeout)
 
     def screenshot_png(self, timeout: float = 90.0) -> tuple[bytes, int, int]:
         """Capture the fast 1-bit machine-control view as a PNG."""
@@ -386,6 +593,19 @@ class MacControl:
     def _screenshot_png_once(
         self, timeout: float, monochrome: bool = True
     ) -> tuple[bytes, int, int]:
+        try:
+            return self._screenshot_png_transfer(timeout, monochrome)
+        except (ControlError, OSError):
+            if getattr(self, "protocol_version", 3) >= 4:
+                try:
+                    self.request("SCREENSHOT ABORT", "OK SCREENSHOT ABORT", timeout=0.5)
+                except (ControlError, OSError):
+                    pass
+            raise
+
+    def _screenshot_png_transfer(
+        self, timeout: float, monochrome: bool = True
+    ) -> tuple[bytes, int, int]:
         # A prior timed-out transfer can leave a valid-looking frame header in
         # the OS tty buffer after the firmware has released that frame. Never
         # pair a new chunk request with stale capture metadata.
@@ -393,7 +613,11 @@ class MacControl:
             self.serial.reset_input_buffer()
         except (AttributeError, OSError):
             pass
-        deadline = time.monotonic() + timeout
+        self._rx_buffer = bytearray()
+        self._rx_lines = deque()
+        started = time.monotonic()
+        deadline = started + timeout
+        self._block_retries = 0
         header: list[str] | None = None
         # A header is a single USB packet but the first packet after an idle
         # period can still be lost. Retry with a new nonce; delayed replies for
@@ -421,23 +645,36 @@ class MacControl:
             raise ControlError("timed out starting screenshot")
 
         frame_id = header[3]
-        width = int(header[4])
-        height = int(header[5])
-        payload_size = int(header[6])
-        raw_size = int(header[7])
-        expected_crc = int(header[8], 16)
-        chunk_count = int(header[9])
+        try:
+            width = int(header[4])
+            height = int(header[5])
+            payload_size = int(header[6])
+            raw_size = int(header[7])
+            expected_crc = int(header[8], 16)
+            chunk_count = int(header[9])
+        except ValueError as exc:
+            raise ControlError("invalid screenshot metadata") from exc
         encoding = header[10]
+        captured_at = time.monotonic()
+        if not (frame_id.isdecimal() and 0 < width <= 2048 and 0 < height <= 2048 and
+                0 < payload_size <= 2 * width * height + 1024 and
+                chunk_count == (payload_size + 47) // 48):
+            raise ControlError("invalid screenshot metadata")
 
         payload = bytearray()
         previous_serial_timeout = self.serial.timeout
         self.serial.timeout = 0.02
         try:
-            for start in range(0, chunk_count, SCREENSHOT_BATCH_SIZE):
-                count = min(SCREENSHOT_BATCH_SIZE, chunk_count - start)
-                payload.extend(
-                    self._screenshot_batch(frame_id, start, count, deadline)
-                )
+            if getattr(self, "protocol_version", 3) >= 4:
+                for offset in range(0, payload_size, SCREENSHOT_READ_SIZE):
+                    count = min(SCREENSHOT_READ_SIZE, payload_size - offset)
+                    payload.extend(self._screenshot_read(frame_id, offset, count, deadline))
+            else:
+                for start in range(0, chunk_count, SCREENSHOT_BATCH_SIZE):
+                    count = min(SCREENSHOT_BATCH_SIZE, chunk_count - start)
+                    payload.extend(
+                        self._screenshot_batch(frame_id, start, count, deadline)
+                    )
         finally:
             self.serial.timeout = previous_serial_timeout
             try:
@@ -456,12 +693,42 @@ class MacControl:
             )
 
         if monochrome:
-            return self._monochrome_payload_to_png(
+            result = self._monochrome_payload_to_png(
                 bytes(payload), width, height, raw_size, expected_crc, encoding
             )
-        return self._payload_to_png(
-            bytes(payload), width, height, raw_size, expected_crc, encoding
-        )
+        else:
+            result = self._payload_to_png(
+                bytes(payload), width, height, raw_size, expected_crc, encoding
+            )
+        self.last_screenshot_stats = {
+            "transport": "serial-read" if getattr(self, "protocol_version", 3) >= 4 else "serial-legacy",
+            "payload_bytes": payload_size,
+            "capture_seconds": captured_at - started,
+            "total_seconds": time.monotonic() - started,
+            "block_retries": self._block_retries,
+        }
+        return result
+
+    def _screenshot_read(self, frame_id: str, offset: int, count: int, deadline: float) -> bytes:
+        # Reads are idempotent: retry only the damaged/missing block.
+        for attempt in range(5):
+            if time.monotonic() >= deadline:
+                break
+            if attempt:
+                self._block_retries = getattr(self, "_block_retries", 0) + 1
+            self._write(f"SCREENSHOT READ {frame_id} {offset} {count}")
+            reply_timeout = 0.15 if getattr(self, "_uses_usb_jtag", False) else 0.5
+            for line in self._protocol_lines(min(deadline, time.monotonic() + reply_timeout)):
+                if line.startswith("@B2 ERR SCREENSHOT"):
+                    raise ControlError(line[4:])
+                record = self._parse_screenshot_record(line, frame_id, kind="R", max_size=SCREENSHOT_READ_SIZE)
+                if record is not None and record[0] == offset and len(record[1]) == count:
+                    return record[1]
+                if line.startswith(f"@B2 R {frame_id} {offset} "):
+                    # A complete but corrupt reply has already arrived. Do
+                    # not spend a whole timeout waiting for a second copy.
+                    break
+        raise ControlError(f"could not receive valid screenshot block at offset {offset}")
 
     def _screenshot_batch(
         self, frame_id: str, start: int, count: int, deadline: float
@@ -477,23 +744,17 @@ class MacControl:
         received: dict[int, bytes] = {}
         batch_deadline = min(deadline, time.monotonic() + 0.2 + count * 0.04)
         batch_complete = f"{PROTOCOL_PREFIX}OK SCREENSHOT BATCH {frame_id} {start} {count}"
-        batch_done = False
-        while pending and not batch_done and time.monotonic() < batch_deadline:
-            raw = self.serial.readline()
-            if not raw:
+        for line in self._protocol_lines(batch_deadline):
+            if line == batch_complete:
+                break
+            record = self._parse_screenshot_record(line, frame_id)
+            if record is None:
                 continue
-            for line in self._protocol_fragments(raw):
-                if line.startswith(batch_complete):
-                    batch_done = True
-                    break
-                record = self._parse_screenshot_record(line, frame_id)
-                if record is None:
-                    continue
-                sequence, data = record
-                if sequence not in pending:
-                    continue
-                received[sequence] = data
-                pending.remove(sequence)
+            sequence, data = record
+            if sequence not in pending:
+                continue
+            received[sequence] = data
+            pending.remove(sequence)
             if not pending:
                 break
 
@@ -580,10 +841,10 @@ class MacControl:
 
     @staticmethod
     def _parse_screenshot_record(
-        line: str, frame_id: str
+        line: str, frame_id: str, kind: str = "D", max_size: int = 48
     ) -> tuple[int, bytes] | None:
         parts = line.split()
-        if len(parts) != 6 or parts[:2] != ["@B2", "D"] or parts[2] != frame_id:
+        if len(parts) != 6 or parts[:2] != ["@B2", kind] or parts[2] != frame_id:
             return None
         try:
             sequence = int(parts[3])
@@ -591,7 +852,7 @@ class MacControl:
             expected_crc = int(parts[5], 16)
         except ValueError:
             return None
-        if len(data) > 48 or (zlib.crc32(data) & 0xFFFFFFFF) != expected_crc:
+        if sequence < 0 or not data or len(data) > max_size or (zlib.crc32(data) & 0xFFFFFFFF) != expected_crc:
             return None
         return sequence, data
 
@@ -840,7 +1101,31 @@ MCP_TOOLS = [
 ]
 
 
+MCP_TOOLS += [
+    {"name": "mac_boot_status", "description": "Read device boot phase and current preboot screen.",
+     "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "mac_boot_get", "description": "Read preboot settings. Wi-Fi passwords are write-only; wifi_password_set reports presence.",
+     "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "enum": list(BOOT_READ_SETTINGS)}}, "additionalProperties": False}},
+    {"name": "mac_boot_set", "description": "Change one setting while in preboot. Save or start to persist changes.",
+     "inputSchema": {"type": "object", "properties": {"key": {"type": "string", "enum": list(BOOT_WRITE_SETTINGS)}, "value": {"type": ["string", "boolean", "integer"]}}, "required": ["key", "value"], "additionalProperties": False}},
+    {"name": "mac_boot_list", "description": "List SD disk images, CD images, or shared folders in preboot.",
+     "inputSchema": {"type": "object", "properties": {"kind": {"type": "string", "enum": ["disk", "cdrom", "extfs"]}}, "required": ["kind"], "additionalProperties": False}},
+    {"name": "mac_boot_action", "description": "Enter reboots the device once into preboot settings; start saves and boots. Save persists, reload discards unsaved edits, rescan refreshes media; wifi-connect/disconnect operate on current credentials. Enter restarts the guest; shut it down first when a clean guest filesystem is needed.",
+     "inputSchema": {"type": "object", "properties": {"action": {"type": "string", "enum": ["enter", "start", "save", "reload", "rescan", "wifi-connect", "wifi-disconnect"]}}, "required": ["action"], "additionalProperties": False}},
+]
+
+
 def call_mcp_tool(control: MacControl, name: str, arguments: dict[str, Any]) -> list[dict[str, Any]]:
+    if name.startswith("mac_boot_"):
+        if name == "mac_boot_status": result = control.boot_status()
+        elif name == "mac_boot_get": result = control.boot_get(arguments.get("key"))
+        elif name == "mac_boot_set": result = control.boot_set(arguments["key"], arguments["value"])
+        elif name == "mac_boot_list": result = control.boot_list(arguments["kind"])
+        elif name == "mac_boot_action":
+            action = arguments["action"]
+            result = control.boot_enter() if action == "enter" else control.boot_start() if action == "start" else control.boot_action(action)
+        else: raise ControlError(f"unknown MCP tool {name!r}")
+        return [{"type": "text", "text": json.dumps(result if result is not None else {"ok": True})}]
     if name == "mac_screenshot":
         png, width, height = control.screenshot_png()
         return [
@@ -936,6 +1221,16 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("info")
+    subparsers.add_parser("boot-status")
+    get = subparsers.add_parser("boot-get", help="read current boot settings (passwords stay private)")
+    get.add_argument("key", nargs="?", choices=BOOT_READ_SETTINGS)
+    setting = subparsers.add_parser("boot-set", help="change a setting in preboot; save/start persists it")
+    setting.add_argument("key", choices=BOOT_WRITE_SETTINGS)
+    setting.add_argument("value")
+    media = subparsers.add_parser("boot-list")
+    media.add_argument("kind", choices=("disk", "cdrom", "extfs"))
+    for action in ("enter", "start", "save", "reload", "rescan", "wifi-connect", "wifi-disconnect"):
+        subparsers.add_parser(f"boot-{action}")
     screenshot = subparsers.add_parser("screenshot")
     screenshot.add_argument("output", type=Path)
     screenshot.add_argument(
@@ -973,7 +1268,17 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with MacControl(args.port, args.baud, not args.no_reset) as control:
             control.connect()
-            if args.command == "info":
+            if args.command.startswith("boot-"):
+                action = args.command[5:]
+                if action == "status": result = control.boot_status()
+                elif action == "get": result = control.boot_get(args.key)
+                elif action == "set": result = control.boot_set(args.key, args.value)
+                elif action == "list": result = control.boot_list(args.kind)
+                elif action == "enter": result = control.boot_enter()
+                elif action == "start": result = control.boot_start()
+                else: result = control.boot_action(action)
+                print(json.dumps(result if result is not None else {"ok": True}, indent=2))
+            elif args.command == "info":
                 print(control.info())
             elif args.command == "screenshot":
                 capture = control.screenshot_color_png if args.color else control.screenshot_png

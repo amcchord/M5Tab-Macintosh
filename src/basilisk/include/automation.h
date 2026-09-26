@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 bool AutomationInit(void);
+bool AutomationStartSerial(void);
 void AutomationExit(void);
 void AutomationPrepareNetwork(void);
 bool AutomationSerialCaptureActive(void);
