@@ -35,6 +35,7 @@
 #include "user_strings.h"
 #include "input.h"
 #include "automation.h"
+#include "boot_gui.h"
 
 #if USE_RV32_JIT
 #include "jit_compiler.h"
@@ -621,6 +622,7 @@ static void RunEmulator(void)
     Serial.println("[MAIN] Starting 68k CPU emulation on Core 1...");
     Serial.println("[MAIN] Video rendering running on Core 0...");
     
+    BootGUI_ControlSetPhase("emulator");
     emulator_running = true;
     last_disk_flush_time = millis();
     last_xpram_flush_time = last_disk_flush_time;
@@ -645,9 +647,13 @@ void basilisk_setup(void)
     if (!InitEmulator()) {
         Serial.println("[MAIN] Emulator initialization failed!");
         
-        // Display error and halt
+        // Keep serial recovery available if a selected configuration cannot
+        // initialize the emulator (for example, a damaged disk image).
+        BootGUI_ControlSetPhase("stopped");
         while (1) {
-            delay(1000);
+            BootGUI_ControlPoll();
+            if (BootGUI_RestartPending()) BootGUI_Restart();
+            delay(10);
         }
     }
     
@@ -699,9 +705,22 @@ static void reportMainPerfStats(uint32 current_time)
  *  - Input polling is handled by input task on Core 0
  *  - This loop stays focused on maintenance work (flush/stats/yield)
  */
+// Serial configuration requests need a safe CPU boundary even when the guest
+// is idle and the instruction-count maintenance tick is many seconds away.
+void cpu_do_check_control(void)
+{
+    BootGUI_ControlPoll();
+    if (BootGUI_RestartPending()) {
+        SaveXPRAM();
+        MacClockSave(true);
+        BootGUI_Restart();
+    }
+}
+
 void basilisk_loop(void)
 {
     uint32 current_time = millis();
+    cpu_do_check_control();
     MacClockSave();
     
     perf_loop_count++;

@@ -11,6 +11,7 @@
 #define BOOT_GUI_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 // Maximum path length for file paths
 #define BOOT_GUI_MAX_PATH 256
@@ -28,6 +29,16 @@
  *  a second one.
  */
 bool BootGUI_Init(void);
+
+// Serial requests are copied through queues and executed by the main task,
+// which also owns the GUI and SD settings. No GUI state crosses task boundaries.
+bool BootGUI_ControlRequest(const char *command, char *reply, size_t capacity);
+void BootGUI_ControlPoll(void);
+extern bool boot_control_pending; // Access only with __atomic_* operations.
+void BootGUI_ControlSetPhase(const char *phase);
+bool BootGUI_StartInSettings(void);
+bool BootGUI_RestartPending(void);
+void BootGUI_Restart(void);
 
 /*
  *  Run the full-screen settings UI. Returns when the user taps the Boot
