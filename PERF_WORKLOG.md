@@ -483,7 +483,7 @@ inside `m68k_do_execute`.
 
 Scope: review v3.4.2 through v4.7.1 and repair display/input correctness.
 Candidate branch: `codex/display-reliability`, based on v4.7.1 / `11f4d60`.
-Worktree: `/Users/austinmcchord/.codex/worktrees/display-reliability/M5Tab-Macintosh`.
+Worktree: `<Codex managed worktree>/M5Tab-Macintosh`.
 The control checkout's uncommitted performance branch was preserved and has
 not been integrated. This pass is not a new performance benchmark.
 
@@ -501,9 +501,8 @@ ignored `artifacts/display-reliability/` in this checkout; candidate images,
 SHA256 manifest and the review are in the control checkout's ignored
 `artifacts/display-reliability-20260926/`.
 
-No flashing, device interaction, push or published release. The firmware
-still reports version 4.7.1; artifact names and the saved source SHA identify
-this candidate. Single-buffer tearing, hardware compatibility and performance
+No flashing, device interaction, push or published release. Artifact names and the saved source SHA identify this pre-release
+candidate, which predates the 5.0 startup version banner. Single-buffer tearing, hardware compatibility and performance
 remain to be tested. Next: Austin flashes the matching board/silicon profile
 and follows the hardware checklist, then integrates with performance work
 if the result is accepted.
@@ -537,3 +536,31 @@ under artifacts/display-reliability-20260926/{hardware-flash,quickdraw-regressio
 in the control checkout. Bootloader/partition table/NVS were not reflashed.
 No push or published release. Next: Austin checks physical display behavior;
 re-enable native drawing only after differential guest-pixel validation.
+
+
+## v5.0 stable release preparation — 2026-09-26
+
+Austin approved the corrected display and requested publication as
+"5.0 - Stable". Release preparation stays on `codex/display-reliability`;
+the original checkout's uncommitted performance work remains untouched.
+Added a port-specific 5.0 startup banner and updated download/release notes.
+Native QuickDraw remains disabled. Final validation passed 46 host tests
+in 8.826 seconds and all five firmware builds; the four standard merged
+images match their bootloader, partition and application components.
+
+The final debug app SHA256 is
+`485a9e3096f5e9a83754f4b957570ff83197e2305ac57bc99e6980601d6dc4b8`.
+Only the application was flashed, and full readback matched. Saved settings
+were preserved. Serial checks alone passed, but the screenshot showed a guest
+illegal-instruction dialog after sustained SD CRC/status errors. One software
+restart produced a damaged-System-file message. This supersedes the initial
+serial-only health result: the guest desktop has not passed final verification.
+A full user-assisted power cycle was requested; neither disk replacement nor
+host-side repair was performed. The cause remains unconfirmed.
+
+Evidence is in the control checkout's ignored `artifacts/release-v5.0/`,
+including both failed screenshots, serial logs, readback, packaging script
+and `release-status.json`. Packaging now requires an explicit verified guest
+desktop result. Stable publication is pending this hardware check. Next:
+inspect after cold start, resolve any remaining issue, then merge/publish
+and record exact source/tag/asset identity in the release manifest.

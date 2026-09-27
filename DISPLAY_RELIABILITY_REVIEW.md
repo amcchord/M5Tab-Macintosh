@@ -3,8 +3,9 @@
 This candidate repairs reproducible display and input defects found while
 reviewing `v3.4.2..v4.7.1` (12 commits, 86 changed files). It is based on
 `v4.7.1` / `11f4d60820ad08f3f59788add04d16b2040f344c`, on local branch
-`codex/display-reliability`. The embedded version remains 4.7.1; this is a
-hardware-test candidate, not a published release.
+`codex/display-reliability`. This review initially described a hardware-test candidate; the subsequent
+5.0 stable release scope is documented in RELEASE_NOTES.md. WORKBOOK.md
+records the current publication status.
 
 **Hardware follow-up:** Austin authorized flashing, then reported dotted Finder
 borders. The same scene became solid when native QuickDraw was disabled with
@@ -13,10 +14,10 @@ all profiles. [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md) records the A/B
 evidence. This supersedes the initial no-hardware-test status below; the
 earlier verification section documents the original 82e5266 candidate.
 
-The control checkout at `/Users/austinmcchord/Development/M5Tab-Macintosh`
+The control checkout at `<project root>`
 already contained uncommitted performance work. It was preserved. This work
 uses the attached checkout at
-`/Users/austinmcchord/.codex/worktrees/display-reliability/M5Tab-Macintosh`.
+`<Codex managed worktree>/M5Tab-Macintosh`.
 Existing display fixes in that work supplied the initial dirty-range and
 direct-surface approach; they were reviewed, consolidated, and extended here.
 CPU optimizations and performance instrumentation from that work are not part

@@ -1,10 +1,44 @@
 # M5Tab-Macintosh workbook
 
+## v5.0 Stable release — 2026-09-26
+
+Austin approved the corrected Tab5 display and explicitly requested publication
+as **5.0 - Stable**. Release work stays on `codex/display-reliability`; the
+control checkout's uncommitted performance changes remain separate.
+
+The release includes shared display publication, atomic damage and coherent
+visual state, safe renderer/capture lifetimes, HID/key ownership fixes, and
+native QuickDraw disabled by default after the Finder-border A/B test. A serial
+startup banner identifies version 5.0. See RELEASE_NOTES.md for board images,
+validation, limits and rollback. Publication evidence and packaged downloads
+are retained under the control checkout's `artifacts/release-v5.0/`.
+
+Final-source validation passed 46 host tests (8.826 seconds), the debug build,
+and all four standard profiles. Standard merged images match their components.
+The 5.0 debug application was flashed and fully read back with matching SHA256
+`485a9e3096f5e9a83754f4b957570ff83197e2305ac57bc99e6980601d6dc4b8`.
+
+**Publication is pending hardware validation.** Serial startup and settings
+checks passed, but visual inspection caught a guest illegal-instruction dialog
+after sustained SD CRC/status errors. A software restart then showed a damaged
+System-file message. The cause and whether the disk image is damaged are not
+yet established. Austin has been asked to fully power-cycle the Tab. No disk
+image has been replaced by host tools. The final application remains installed;
+the original application backup remains available under
+`artifacts/display-reliability-20260926/hardware-flash/`.
+
+Next action: inspect the guest desktop after the cold start, resolve any
+remaining failure, then finish the release PR and publish v5.0. Packaging
+requires explicit visual verification; the machine-readable current state is
+`artifacts/release-v5.0/release-status.json`. Exact source/release commits,
+component hashes and publication outcome will be retained with that evidence.
+
+
 ## Display reliability and QuickDraw regression — 2026-09-26
 
 Active work is on local branch `codex/display-reliability`, based on v4.7.1,
 in the attached checkout
-`/Users/austinmcchord/.codex/worktrees/display-reliability/M5Tab-Macintosh`.
+`<Codex managed worktree>/M5Tab-Macintosh`.
 The original control checkout's uncommitted performance work is preserved;
 these changes have not been integrated with it or pushed.
 
@@ -28,11 +62,11 @@ SD mounted, the emulator started, and existing settings were preserved.
 Austin then reported dotted Finder borders. An A/B firmware comparison with
 only `CPU_NATIVE_QD_ACCEL=0` eliminated them in the guest screenshot.
 
-Native QuickDraw is now disabled by default in every firmware profile. The
-Tab5 is running the matching no-acceleration build; [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md)
+Native QuickDraw is now disabled by default in every firmware profile. At the
+end of that comparison the Tab5 ran the matching no-acceleration build; [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md)
 records the comparison, image hashes and remaining limits. The previous app
 partition is backed up under the artifact package's `hardware-flash/` directory.
-Next: Austin continues physical display testing. Single-buffer optical tearing
+The release-preparation section above supersedes this device state. Single-buffer optical tearing
 and the performance cost of disabling QuickDraw still need measurement. The
 device-state statements below are historical v4.7.1 evidence.
 

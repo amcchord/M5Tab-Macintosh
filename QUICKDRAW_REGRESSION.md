@@ -13,8 +13,7 @@ fallback, not a claim that the native implementation has been repaired.
 
 ## Evidence
 
-Device: M5Stack Tab5, ESP32-P4 revision 1.3, USB serial
-`30:ED:A0:E2:FC:2B`, using the pre-v3 debug SDK profile (Arduino 3.3.8 / IDF
+Device: M5Stack Tab5, ESP32-P4 revision 1.3, native USB/JTAG, using the pre-v3 debug SDK profile (Arduino 3.3.8 / IDF
 5.5.4). Both runs used 16 MB RAM, rotation 180, audio enabled, the same disk
 image, and the same 640×360 Finder window.
 
@@ -57,24 +56,26 @@ SHA256 `951e58e01d66d65dea449db1993101779d7ca997a8abea3c985a35f4b470a287`.
 A full application readback matched that SHA. It booted, mounted SD and
 preserved the saved settings, but retained the dotted borders.
 
-The currently installed comparison application is the same source with
+The application installed for the comparison used the same source with
 `CPU_NATIVE_QD_ACCEL=0`, SHA256
 `d79cac3ca0745b242d60d363701fc7e3ab1cb54af56191f6a762a51d550aee6d`.
 Esptool verified the write. Startup, settings and a color serial screenshot
 were checked, and native QuickDraw counters remained zero. Its effective
-firmware flags match the new repository default. The firmware still reports
-4.7.1; identify this build by its application hash.
+firmware flags match the new repository default. This pre-release build predates the 5.0 startup version banner; identify it
+by its application hash.
 
 To roll back the application from the `hardware-flash/` directory:
 
 ```sh
-python -m esptool --chip esp32p4 --port /dev/cu.usbmodem211201 \
+python -m esptool --chip esp32p4 --port PORT \
   --baud 1500000 write-flash 0x10000 original-app-partition.bin
 ```
 
 The port may change after reconnect. The backup hash and full first-flash
 record are in `hardware-flash/flash-record.json`. The comparison upload and
-health record supersede that file's installed-image identity.
+health record supersede that file's installed-image identity at the time of
+the A/B test. WORKBOOK.md records subsequent release preparation and the
+current device state.
 
 ## Validation and limits
 
@@ -86,5 +87,5 @@ do not establish equivalence with guest QuickDraw.
 Disabling native QuickDraw may reduce graphics throughput. No new benchmark
 claim is made. The screenshots establish the guest-pixel fix, while physical
 panel behavior, optical tearing and other hardware cases still need Austin's
-testing. No source was pushed and no release was published. The separate
+testing. At the end of the comparison no source had been pushed or released. The separate
 uncommitted performance work in the control checkout remains preserved.
