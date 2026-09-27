@@ -36,6 +36,7 @@ flash, readback match, `Firmware: 5.0.1` banner, settings preserved, Finder
 desktop, one Performance Rating (PR 0.765) and a clean `PANEL VERIFY`. The
 Tab5 runs that image.
 
+Release PR: https://github.com/amcchord/M5Tab-Macintosh/pull/22.
 Evidence, packaging script and hardware gate are in the control checkout's
 `artifacts/release-v5.0.1/`; per-build experiments are in
 `artifacts/speedometer-perf/`. Publication outcome (commit, tag, asset
