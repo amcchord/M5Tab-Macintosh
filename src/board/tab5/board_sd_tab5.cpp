@@ -33,7 +33,7 @@ extern "C" bool BoardSD_Init(void)
 
     SPI.begin(BOARD_SD_SPI_SCK, BOARD_SD_SPI_MISO, BOARD_SD_SPI_MOSI, BOARD_SD_SPI_CS);
 
-    constexpr uint32_t kSdSpiHz = 25000000;
+    constexpr uint32_t kSdSpiHz = 10000000;
     /* Pass BOARD_SD_MOUNT_POINT explicitly so the VFS prefix the rest
      * of the firmware uses (POSIX stat/mkdir for ExtFS, etc.) stays
      * pinned to a single source of truth. Arduino SD's default is

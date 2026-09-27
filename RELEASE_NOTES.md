@@ -1,97 +1,98 @@
-# v4.7.1 — Serial testing and preboot control
+# 5.0 - Stable
 
-This patch makes the attached serial connection usable for automated
-screenshot/action/screenshot tests and configuration changes before boot.
+A stability release focused on correct drawing and reliable display updates
+on M5Stack Tab5 and Waveshare ESP32-P4 10.1 boards.
 
-## Improvements
+## What changed
 
-- Larger screenshot blocks, CRC-checked selective retries, and buffered host
-  reads. On the same Tab5 desktop, median color capture improved from 22.2 s
-  to 0.55 s; monochrome improved from 2.2 s to 0.20 s.
-- Boot-session request IDs and cached replies prevent duplicate input when an
-  acknowledgement is lost. Native USB/JTAG opens set DTR/RTS atomically on POSIX
-  hosts, preserving the running guest when reconnecting.
-- All eleven saved preboot settings can be read or changed through USB serial,
-  Python, CLI, and MCP. List/rescan SD media, enter settings remotely, save or
-  reload selections, and boot without tapping the screen. WiFi passwords are
-  write-only; `wifi_password_set` reports whether one is configured.
-- Configuration requests execute on the task that owns settings and SD access.
-  Invalid values and missing media are rejected. Saves verify a temporary file
-  and retain a recoverable previous copy while replacing the settings file.
-- Fix boot touch-task cleanup, release abandoned screenshot leases, and avoid
-  holding the panel paused for the entire screenshot transfer.
-- Add a serial benchmark and an opt-in Tab5 SDK profile matching the device
-  used for physical testing. Protocol 3 screenshot clients remain supported.
+- **Fixed dotted Finder borders.** Native QuickDraw acceleration is disabled
+  by default. A hardware A/B comparison showed alternating black/white pixels
+  around scrollbars with acceleration enabled and solid borders through the
+  original Mac QuickDraw path. This may reduce graphics throughput; earlier
+  native-acceleration benchmark scores do not apply to this release.
+- **One display publication path.** Both boards write into the panel driver's
+  framebuffer with synchronous cache publication. Duplicate asynchronous DMA
+  scratch-buffer paths and unused buffers have been removed.
+- **Reliable dirty tracking.** Bulk writes mark every affected tile in all
+  indexed color depths. Writes arriving during rendering remain pending, and
+  failed publication is retried. Early frame notifications cannot strand updates.
+- **Coherent visual state.** Mode and palette changes are captured together.
+  Tab5 tiles follow the saved rotation, and touch overlays use a stable state
+  snapshot throughout each frame batch. Hiding overlays redraws their old area.
+- **Safer startup and shutdown.** Splash handoff handles packed stipples and
+  idle timeouts. Video initialization reports task failures; exit waits for
+  rendering to finish and protects concurrent screenshot access.
+- **Input fixes.** Mouse fields stay within their report IDs; wrong-ID and
+  truncated reports are ignored. Shared physical/automation key ownership and
+  event ordering are serialized.
+- **Conservative Tab5 SD clock.** SPI is reduced from 25 MHz to 10 MHz after
+  intermittent SD CRC/status errors during guest startup. Three starts with
+  the slower clock avoided the observed errors on the development Tab5. This
+  may reduce disk throughput; Waveshare SDMMC settings are unchanged.
+- **Version identification.** The serial startup banner identifies firmware
+  version 5.0. The existing serial automation protocol and preboot controls remain.
+
+See the [display review](DISPLAY_RELIABILITY_REVIEW.md) and
+[QuickDraw regression record](QUICKDRAW_REGRESSION.md) for implementation and
+comparison details. The [SD startup record](SD_STABILITY.md) documents the
+clock comparison and its limits. Board-specific SDK pins are unchanged.
 
 ## Downloads
 
 | Hardware / use | Filename | Flash offset |
 | --- | --- | --- |
-| Tab5, pre-v3, standard SDK | `M5Tab-Macintosh-v4.7.1.bin` | `0x0` |
-| Tab5, v3.1+ | `M5Tab-Macintosh-Rev3-v4.7.1.bin` | `0x0` |
-| Waveshare 10.1, pre-v3 | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.1.bin` | `0x0` |
-| Waveshare 10.1, v3.1+ | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.1.bin` | `0x0` |
-| Tab5, pre-v3, tested USB debug SDK | `M5Tab-Macintosh-USB-Debug-v4.7.1.bin` | `0x0` |
-| Same debug application, existing compatible Tab5 installation | `M5Tab-Macintosh-USB-Debug-v4.7.1-app.bin` | `0x10000` |
-| Python CLI, MCP server, and benchmark | `M5Tab-Macintosh-Host-Tools-v4.7.1.zip` | — |
+| Tab5, pre-v3, standard SDK | `M5Tab-Macintosh-v5.0.bin` | `0x0` |
+| Tab5, v3.1+ | `M5Tab-Macintosh-Rev3-v5.0.bin` | `0x0` |
+| Waveshare 10.1, pre-v3 | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin` | `0x0` |
+| Waveshare 10.1, v3.1+ | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin` | `0x0` |
+| Tab5, pre-v3, tested USB debug SDK | `M5Tab-Macintosh-USB-Debug-v5.0.bin` | `0x0` |
+| Same debug application, existing compatible Tab5 installation | `M5Tab-Macintosh-USB-Debug-v5.0-app.bin` | `0x10000` |
+| Python CLI, MCP server, and benchmark | `M5Tab-Macintosh-Host-Tools-v5.0.zip` | — |
 
-Chip revision is separate from display/PCB revision. Rev3 images require v3.1
-minimum; v3.0 is not covered. Merged images include bootloader, partitions, and
-application; flashing them replaces a launcher and may clear NVS. The debug
-application-only image preserves those regions on a compatible installation.
-Neither package contains a Macintosh ROM, disk images, or device credentials.
+Chip revision is separate from panel or PCB revision. Rev3 images require
+ESP32-P4 revision **3.1 or newer**; revision 3.0 is not covered. Merged images
+include bootloader, partitions and application, and replace an existing launcher.
+The debug application-only image preserves bootloader, partition table and NVS
+on a compatible installation. Neither package includes a Macintosh ROM, disk
+images or credentials.
 
-The standard board/silicon profiles retain their v4.7 SDK pins. The optional
-pre-v3 Tab5 debug profile uses Arduino 3.3.8 / IDF 5.5.4, matching the working
-firmware on the attached development device. The older standard Tab5 SDK
-failed to mount that unit's SD card. Keeping this separate avoids changing the
-SDK choice for boards with different display/WiFi behavior.
+The optional pre-v3 Tab5 debug profile uses Arduino 3.3.8 / IDF 5.5.4 and matches
+the development device used for hardware testing. The standard Tab5 profile
+retains its separate SDK pin for boards affected by other display behavior.
+Use the matching board/silicon image; the debug image is not for Waveshare or
+production Rev3 hardware.
 
-Install `pyserial` using `tools/requirements.txt`, then run from the repository
-(or unpacked host-tools directory):
+## Verification
 
-```sh
-python3 tools/mac_control.py boot-enter
-python3 tools/mac_control.py boot-get
-python3 tools/mac_control.py boot-set ramsize 16
-python3 tools/mac_control.py boot-set audio false
-python3 tools/mac_control.py boot-start
-python3 tools/mac_control.py screenshot --color mac.png
-```
-
-`boot-enter` restarts the device once into settings. Firmware flushes SD handles,
-clock, and PRAM, but does not request a Mac OS shutdown; shut down the guest first
-when a clean guest filesystem is required. `boot-start` returns after emulator
-initialization; wait for Finder using screenshots. [Full automation reference](AUTOMATION.md).
-
-## Validation
-
-- 40 automated tests, including C++ AddressSanitizer/UndefinedBehaviorSanitizer,
-  serial retries/session handling, preboot validation, clock persistence, and
-  release-image checks.
-- Four standard firmware builds, with exact merged-component and linked-SDK
-  revision checks. Their binaries are build-validated, not newly tested on
-  all four hardware combinations.
-- Physical testing on an ESP32-P4 revision 1.3 Tab5 using the separately labeled
-  debug application: 400 control commands, 40 performance captures, 20 reconnects,
-  all saved settings, invalid-input rejection, persistence across reboots, and
-  restoration of the original device configuration.
-- The final preboot build passed another 25 complete settings reads (median
-  100 ms), remote entry and boot, and three color captures in 0.50–1.11 s.
-- `SHA256SUMS` and `BUILD-MANIFEST.json` identify the exact downloadable assets
-  and their firmware components. The debug application is the byte-for-byte
-  hardware-tested build.
+- 46 host tests, including production display/overlay code exercised with
+  AddressSanitizer and UndefinedBehaviorSanitizer, randomized dirty ranges and
+  rotation, packed color modes, publication failure/retry, lifecycle failures,
+  HID report IDs, concurrent key ownership and release-image checks.
+- All five firmware profiles build. Every merged image is checked against its
+  bootloader, partition table and application at the expected flash offsets;
+  linked SDK silicon minimums are checked separately.
+- Hardware checks on a pre-v3 ESP32-P4 revision 1.3 Tab5: application flashing,
+  readback verification, SD mounting, saved-setting preservation, emulator boot,
+  serial screenshots and the Finder border comparison. The user confirmed the
+  corrected display before requesting the stable release. The final debug app
+  also passed the SD-clock comparison and retained the original disk/settings.
+- `BUILD-MANIFEST.json` records exact source commits, component hashes and the
+  hardware-tested application. `SHA256SUMS` covers downloadable assets.
 
 ## Limits and rollback
 
-Screenshots capture the guest framebuffer, not the physical preboot screen.
-Serial service starts after SD/configuration initialization; earlier fatal
-board/SD/ROM failures remain outside the API. USB Disk mode must be exited on
-screen before settings commands can access the card. Replay protection assumes
-one serialized client and caches its last tagged request.
+This is a single scanout buffer; transient optical tearing is still possible.
+Serial screenshots show guest pixels, not physical scanout or touch overlays.
+The native QuickDraw implementation remains available for investigation but
+must pass differential checks against guest rendering before being re-enabled.
 
-Live WiFi association, power-loss injection during settings replacement,
-Waveshare/UART hardware, and production P4 hardware were not exercised in this
-pass. Existing v4.7 downloads remain available for rollback on their matching
-hardware. Preserve the SD card and a known-good firmware backup; a firmware
-rollback does not automatically revert settings saved on the SD card.
+Waveshare and production-silicon targets are build-validated, not newly tested
+on physical hardware in this pass. Broader application coverage, long-duration
+soak testing and the performance cost of the conservative drawing path remain
+follow-up work. The SD clock change is a mitigation from a limited hardware
+sample; the exact transport failure cause has not been isolated.
+
+The prior [v4.7.1 release](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1)
+remains available for rollback with a matching board/silicon image. Preserve
+known-good firmware and SD backups. Firmware rollback does not automatically
+revert settings or guest disk contents. [Serial control reference](AUTOMATION.md).

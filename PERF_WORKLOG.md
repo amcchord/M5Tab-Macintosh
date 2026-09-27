@@ -477,3 +477,120 @@ The final commit from this round keeps only:
 None of which actually move the benchmark. Real gains from here will
 require either newer ESP32-P4 silicon (rev 3.01+) or per-opcode work
 inside `m68k_do_execute`.
+
+
+## Display reliability audit — 2026-09-26
+
+Scope: review v3.4.2 through v4.7.1 and repair display/input correctness.
+Candidate branch: `codex/display-reliability`, based on v4.7.1 / `11f4d60`.
+Worktree: `<Codex managed worktree>/M5Tab-Macintosh`.
+The control checkout's uncommitted performance branch was preserved and has
+not been integrated. This pass is not a new performance benchmark.
+
+Implemented shared direct panel publication, complete atomic damage tracking,
+coherent palette/mode and overlay snapshots, publication retry, bounded splash
+handoff, renderer shutdown handshake and capture lifetime protection. Removed
+duplicate asynchronous DMA paths and unused buffers. Added conservative
+QuickDraw fallbacks, report-ID-aware mouse decoding and serialized key claims.
+See `DISPLAY_RELIABILITY_REVIEW.md` for findings and the ownership contract.
+
+Verification after code freeze: 46 host tests passed in 7.038 seconds,
+including six ASan/UBSan native targets; all five PlatformIO environments
+passed in 206.077 seconds. `git diff --check` passed. Test/build logs are in
+ignored `artifacts/display-reliability/` in this checkout; candidate images,
+SHA256 manifest and the review are in the control checkout's ignored
+`artifacts/display-reliability-20260926/`.
+
+No flashing, device interaction, push or published release. Artifact names and the saved source SHA identify this pre-release
+candidate, which predates the 5.0 startup version banner. Single-buffer tearing, hardware compatibility and performance
+remain to be tested. Next: Austin flashes the matching board/silicon profile
+and follows the hardware checklist, then integrates with performance work
+if the result is accepted.
+
+
+## Tab5 flash and dotted-border A/B — 2026-09-26
+
+Austin explicitly authorized flashing the connected Tab5, then reported dotted
+Finder borders around the scrollbars. The connected device is ESP32-P4 rev1.3.
+The full existing 6 MiB application partition was backed up, partition layout
+verified, and the 82e5266 pre-v3 debug app flashed at 0x10000. Full readback
+SHA256 matched 951e58e01d66d65dea449db1993101779d7ca997a8abea3c985a35f4b470a287.
+SD mounted, the emulator initialized and saved settings were unchanged.
+
+Serial capture confirmed the border problem already exists in guest pixels.
+A second build changed only CPU_NATIVE_QD_ACCEL from 1 to 0. It was flashed and
+verified by esptool, booted the same disk/settings, and restored solid Finder
+borders. The matched lower border changed from 160 black/160 white pixels to
+320 black pixels. Native counters were all zero in the comparison. The enabled
+run had shape and copy calls but no native lines; the exact faulty primitive
+has not been isolated.
+
+Current hardware app SHA256:
+d79cac3ca0745b242d60d363701fc7e3ab1cb54af56191f6a762a51d550aee6d.
+The branch now defaults native QuickDraw off on every profile, preserving the
+display pipeline cleanup. This prioritizes guest drawing correctness and may
+reduce graphics throughput; no new speed claim is made. All 46 host tests
+passed after the flag change. See QUICKDRAW_REGRESSION.md for the final build
+matrix, source/evidence mapping and rollback command. Evidence is retained
+under artifacts/display-reliability-20260926/{hardware-flash,quickdraw-regression}
+in the control checkout. Bootloader/partition table/NVS were not reflashed.
+No push or published release. Next: Austin checks physical display behavior;
+re-enable native drawing only after differential guest-pixel validation.
+
+
+## v5.0 stable release preparation — 2026-09-26
+
+Austin approved the corrected display and requested publication as
+"5.0 - Stable". Release preparation stays on `codex/display-reliability`;
+the original checkout's uncommitted performance work remains untouched.
+Added a port-specific 5.0 startup banner and updated download/release notes.
+Native QuickDraw remains disabled. Final validation passed 46 host tests
+in 8.826 seconds and all five firmware builds; the four standard merged
+images match their bootloader, partition and application components.
+
+The final debug app SHA256 is
+`485a9e3096f5e9a83754f4b957570ff83197e2305ac57bc99e6980601d6dc4b8`.
+Only the application was flashed, and full readback matched. Saved settings
+were preserved. Serial checks alone passed, but the screenshot showed a guest
+illegal-instruction dialog after sustained SD CRC/status errors. One software
+restart produced a damaged-System-file message. This supersedes the initial
+serial-only health result: the guest desktop has not passed final verification.
+A full user-assisted power cycle was requested; neither disk replacement nor
+host-side repair was performed. The cause remains unconfirmed.
+
+Evidence is in the control checkout's ignored `artifacts/release-v5.0/`,
+including both failed screenshots, serial logs, readback, packaging script
+and `release-status.json`. Packaging now requires an explicit verified guest
+desktop result. Stable publication is pending this hardware check. Next:
+inspect after cold start, resolve any remaining issue, then merge/publish
+and record exact source/tag/asset identity in the release manifest.
+
+
+## Tab5 SD mitigation and PR #16 review — 2026-09-26
+
+The user power-cycled the Tab; startup still reported a damaged System file.
+Austin then reported that another reboot got past it. An assistant BOOT ENTER
+interrupted that successful start; subsequent tests were coordinated with
+Austin, who explicitly approved flashing and running the SD diagnostic.
+
+Changed only Tab5 SD SPI from 25 MHz to 10 MHz in the diagnostic. Full app
+readback matched, original settings and disk selection were preserved, and
+three starts avoided the earlier SD errors. Finder was visually verified on
+starts one and three; start two reached the normal improper-shutdown notice.
+The release retains the 10 MHz setting as a conservative mitigation. Exact
+transport cause and throughput impact remain unmeasured. SD_STABILITY.md
+records the evidence and limits. The hardware-tested app and final debug
+build both hash to cfbc1d1592df1d49463434525a132d99592d71c19e56f410e9ab9ad5d93ee213.
+All 46 host tests passed in 7.126 seconds; the final firmware matrix and
+component checks are retained in artifacts/display-reliability/v5-sd-*.
+
+Reviewed PR #16 at 54b0f9a. Its multi-block transfers improve only USB Disk
+mode, not Mac OS disk access. Found undefined behavior in the derived-reference
+cast used to expose the protected drive number. Both the PR unit and a
+pointer-to-member replacement compile with the real Tab5 debug flags. Saved
+review/patch under artifacts/release-v5.0/pr16-review; no external review
+comment, merge, or contributor-branch change was made.
+
+Next: merge PR #21 and publish the authorized v5.0 stable release with the
+tested SD clock. The release manifest and local release-status.json retain
+exact commit, tag, asset hashes and publication outcome.

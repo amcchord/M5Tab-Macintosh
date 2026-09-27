@@ -67,8 +67,11 @@ TouchOverlayMode TouchOverlay_GetMode(void);
  */
 bool TouchOverlay_IsVisible(void);
 
+// Called by the video task after collecting dirty tiles, once per batch.
+void TouchOverlay_BeginFrame(void);
+
 /**
- * @brief Composite the current overlay onto a single RGB565 tile that
+ * @brief Composite the captured overlay onto a single RGB565 tile that
  *        the video task is about to push to the panel. `tile_x`/`tile_y`
  *        are the tile's top-left in physical display pixels; `tile_w` /
  *        `tile_h` are the tile's dimensions in physical pixels. `pixels`

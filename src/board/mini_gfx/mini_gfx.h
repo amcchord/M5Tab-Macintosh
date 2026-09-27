@@ -5,12 +5,11 @@
  * The boot GUI draws with a small API surface (fillRect, drawRect,
  * drawFastHLine/VLine, drawLine, drawCircle, drawPixel, drawString, ...).
  * MiniGfx provides exactly those methods on top of a landscape RGB565
- * PSRAM framebuffer, plus coordinate rotation so we can drive an 800x1280
- * portrait MIPI-DSI panel as if it were 1280x800 landscape.
+ * panel-owned framebuffer, plus coordinate rotation so we can drive a portrait
+ * MIPI-DSI panel as a landscape display.
  *
- * Draws update the backing framebuffer immediately. Call flushAll() or
- * flushRect() to copy the framebuffer to the panel (via the panel handle
- * registered with setPanel()).
+ * Draws update the backing framebuffer immediately. Call flushAll() to
+ * publish the changed CPU cache lines to continuous panel scanout.
  *
  * Method names and signatures mirror M5GFX / LovyanGFX for the subset that
  * boot_gui.cpp uses, so the same boot_gui code compiles against either
@@ -38,27 +37,10 @@ class MiniGfx {
 public:
     MiniGfx();
 
-    /* Allocate framebuffer and attach to an esp_lcd_panel. `logical_w` and
-     * `logical_h` are landscape dimensions. `panel_w`/`panel_h` are the
-     * native portrait panel dimensions. */
-    bool begin(void *panel_handle,
-               int  logical_w, int  logical_h,
-               int  panel_w,   int  panel_h);
-    bool beginSansPanel(int logical_w, int logical_h,
-                        int panel_w,   int panel_h);
-
-    /* Attach to an esp_lcd_panel using an externally-provided
-     * framebuffer pointer. The pointer MUST be one of the DPI panel's
-     * own internal framebuffers (obtained via
-     * esp_lcd_dpi_panel_get_frame_buffer). This lets flushAll take the
-     * "source buffer already lives in a panel FB" fast path inside
-     * esp_lcd_panel_draw_bitmap, which performs only a cache writeback
-     * (no PSRAM->PSRAM DMA2D copy). Avoiding that copy prevents
-     * MIPI-DSI bridge underruns that otherwise flash the panel to
-     * black during repeated full-frame flushes. */
-    bool beginExternalFb(void *panel_handle, void *external_fb,
-                         int  logical_w, int  logical_h,
-                         int  panel_w,   int  panel_h);
+    // Attach the DPI-owned framebuffer. Logical coordinates are landscape;
+    // storage is portrait. All publication is synchronous CPU cache writeback.
+    bool beginExternalFb(void *external_fb, int logical_w, int logical_h,
+                         int panel_w, int panel_h);
 
     /* Flip the landscape view 180 degrees. Default is off, matching the
      * 90-degree CW mapping (lx, ly) -> (_pw - 1 - ly, lx) used on boards
@@ -92,17 +74,13 @@ public:
 
     void drawString(const char *str, int x, int y);
 
-    /* Direct push of a rotated logical-rectangular RGB565 region into the
-     * framebuffer. No rotation is applied - pixels are laid out landscape. */
+    /* Copy landscape RGB565 pixels into the rotated portrait framebuffer. */
     void pushImage(int x, int y, int w, int h, const uint16_t *pixels);
 
-    /* Panel push. flushAll is a no-op when nothing has been drawn
-     * since the last flush; use flushAllForce to unconditionally re-
-     * push the current framebuffer (used by the initial bring-up
-     * clear). */
+    // Flush boot-UI damage, retaining concurrent writes or failed writeback.
     void flushAll(void);
-    void flushAllForce(void);
-    void flushRect(int x, int y, int w, int h);
+    // Publish a half-open range of physical portrait rows after a tile batch.
+    bool flushRows(int first, int last);
 
     /* Raw framebuffer (portrait orientation, size panel_w * panel_h). */
     uint16_t *portraitFb(void) { return _fb; }
@@ -110,9 +88,7 @@ public:
     int       panelH(void)     { return _ph; }
 
 private:
-    void *   _panel        = nullptr;  /* esp_lcd_panel_handle_t - opaque to avoid header dep */
     uint16_t *_fb          = nullptr;  /* RGB565, portrait, _pw x _ph */
-    bool     _fb_owned     = false;    /* true if we allocated _fb (must free); false for external FB */
     int      _lw           = 0;        /* logical landscape width  */
     int      _lh           = 0;        /* logical landscape height */
     int      _pw           = 0;        /* panel portrait width     */

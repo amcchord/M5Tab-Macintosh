@@ -108,8 +108,8 @@ static int32_t read_item_data(const uint8_t *p, int size_code)
     case 0: return 0;
     case 1: return sign_extend(p[0], 1);
     case 2: return sign_extend((int32_t)p[0] | ((int32_t)p[1] << 8), 2);
-    case 3: return (int32_t)p[0] | ((int32_t)p[1] << 8) |
-                   ((int32_t)p[2] << 16) | ((int32_t)p[3] << 24);
+    case 3: return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                            ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
     default: return 0;
     }
 }
@@ -173,15 +173,9 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
      * skip it before applying the bit offsets we record. */
     bool any_report_id_seen = false;
 
-    /* Whether we found X and Y at all. */
-    bool found_x = false;
-    bool found_y = false;
-
-    /* Track the largest report_id-specific length we observe so the
-     * caller can bounds-check incoming reports. We pick the layout for
-     * the report stream that contained X+Y. */
-    uint8_t  selected_id = 0;
-    uint16_t selected_total_bits = 0;
+    // Each Report ID has an independent layout. Never combine buttons or
+    // axes from unrelated streams on a composite/gaming mouse.
+    HidMouseLayout layouts[MAX_REPORT_IDS] = {};
 
     size_t i = 0;
     while (i < len) {
@@ -259,10 +253,14 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
 
                 ReportCursor *cur = get_cursor(cursors, &cursor_count,
                                                st.report_id);
-                uint16_t bit_offset = (cur != NULL) ? cur->bit_offset : 0;
+                if (!cur) return false;
+                HidMouseLayout *candidate = &layouts[cur - cursors];
+                const uint16_t bit_offset = cur->bit_offset;
 
                 uint16_t total_bits =
                     (uint16_t)st.report_size * (uint16_t)st.report_count;
+
+                if (total_bits > UINT16_MAX - bit_offset) return false;
 
                 if (is_constant) {
                     /* Padding: just advance the cursor. */
@@ -274,14 +272,14 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
                         /* Button bitfield. Record the starting bit
                          * offset and how many bits there are. We only
                          * support the first button group we see. */
-                        if (!out->has_buttons) {
-                            out->has_buttons = true;
-                            out->button_offset_bits = bit_offset;
+                        if (!candidate->has_buttons) {
+                            candidate->has_buttons = true;
+                            candidate->button_offset_bits = bit_offset;
                             uint16_t count = st.report_count;
                             if (count > 8) {
                                 count = 8;
                             }
-                            out->button_count = (uint8_t)count;
+                            candidate->button_count = (uint8_t)count;
                         }
                     } else if (st.usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP) {
                         /* For Generic Desktop fields, walk usages one at
@@ -300,24 +298,18 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
                             bool is_signed = (st.logical_min < 0);
 
                             if (usage == HID_USAGE_GD_X) {
-                                out->x_offset_bits = field_offset;
-                                out->x_size_bits = st.report_size;
-                                out->x_signed = is_signed;
-                                found_x = true;
-                                /* Tag this as the report stream that
-                                 * carries the cursor data. */
-                                selected_id = st.report_id;
+                                candidate->x_offset_bits = field_offset;
+                                candidate->x_size_bits = st.report_size;
+                                candidate->x_signed = is_signed;
                             } else if (usage == HID_USAGE_GD_Y) {
-                                out->y_offset_bits = field_offset;
-                                out->y_size_bits = st.report_size;
-                                out->y_signed = is_signed;
-                                found_y = true;
-                                selected_id = st.report_id;
+                                candidate->y_offset_bits = field_offset;
+                                candidate->y_size_bits = st.report_size;
+                                candidate->y_signed = is_signed;
                             } else if (usage == HID_USAGE_GD_WHEEL) {
-                                out->has_wheel = true;
-                                out->wheel_offset_bits = field_offset;
-                                out->wheel_size_bits = st.report_size;
-                                out->wheel_signed = is_signed;
+                                candidate->has_wheel = true;
+                                candidate->wheel_offset_bits = field_offset;
+                                candidate->wheel_size_bits = st.report_size;
+                                candidate->wheel_signed = is_signed;
                             }
                         }
                     }
@@ -326,10 +318,6 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
 
                 if (cur != NULL) {
                     cur->bit_offset = bit_offset + total_bits;
-                    if (cur->report_id == selected_id &&
-                        cur->bit_offset > selected_total_bits) {
-                        selected_total_bits = cur->bit_offset;
-                    }
                 }
             }
 
@@ -342,26 +330,20 @@ bool HidParseMouseDescriptor(const uint8_t *desc, size_t len,
         }
     }
 
-    if (!found_x || !found_y) {
-        memset(out, 0, sizeof(*out));
-        return false;
+    for (int c = 0; c < cursor_count; ++c) {
+        const auto &candidate = layouts[c];
+        if (!candidate.x_size_bits || candidate.x_size_bits > 16 ||
+            !candidate.y_size_bits || candidate.y_size_bits > 16 ||
+            (candidate.has_wheel && (!candidate.wheel_size_bits || candidate.wheel_size_bits > 16)))
+            continue;
+        if (any_report_id_seen && cursors[c].report_id == 0) continue;
+        *out = candidate;
+        out->valid = true;
+        out->report_id = cursors[c].report_id;
+        out->report_bytes = (cursors[c].bit_offset + 7u) / 8u + (any_report_id_seen ? 1 : 0);
+        return true;
     }
-
-    out->valid = true;
-    if (any_report_id_seen) {
-        out->report_id = selected_id;
-    } else {
-        out->report_id = 0;
-    }
-
-    /* Round bits up to whole bytes for the bounds check. Add 1 byte
-     * for the Report ID prefix when the device uses one. */
-    uint16_t bytes = (uint16_t)((selected_total_bits + 7) / 8);
-    if (any_report_id_seen) {
-        bytes++;
-    }
-    out->report_bytes = bytes;
-    return true;
+    return false;
 }
 
 static int16_t extract_field(const uint8_t *data, size_t len,
@@ -372,8 +354,8 @@ static int16_t extract_field(const uint8_t *data, size_t len,
         return 0;
     }
     /* Bounds check: don't read past end of buffer. */
-    uint16_t end_bit = bit_offset + bit_size;
-    if (((end_bit + 7) / 8) > (uint16_t)len) {
+    uint32_t end_bit = (uint32_t)bit_offset + bit_size;
+    if (((end_bit + 7) / 8) > len) {
         return 0;
     }
 
@@ -409,7 +391,7 @@ bool HidDecodeMouseReport(const uint8_t *data, size_t len,
     if (data == NULL || layout == NULL || !layout->valid) {
         return false;
     }
-    if (len == 0) {
+    if (len == 0 || len < layout->report_bytes) {
         return false;
     }
 

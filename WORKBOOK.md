@@ -1,5 +1,83 @@
 # M5Tab-Macintosh workbook
 
+## v5.0 Stable release — 2026-09-26
+
+Austin approved the corrected Tab5 display and explicitly requested publication
+as **5.0 - Stable**. Release work stays on `codex/display-reliability`; the
+control checkout's uncommitted performance changes remain separate.
+
+The release includes shared display publication, atomic damage and coherent
+visual state, safe renderer/capture lifetimes, HID/key ownership fixes, and
+native QuickDraw disabled by default after the Finder-border A/B test. A serial
+startup banner identifies version 5.0. See RELEASE_NOTES.md for board images,
+validation, limits and rollback. Publication evidence and packaged downloads
+are retained under the control checkout's `artifacts/release-v5.0/`.
+
+Final validation passed 46 host tests (7.126 seconds), the debug build,
+and the standard board/silicon build matrix. Tab5 SD SPI now runs at 10 MHz
+instead of 25 MHz following intermittent CRC/status failures during startup.
+The final debug app is byte-identical to the tested diagnostic, SHA256
+`cfbc1d1592df1d49463434525a132d99592d71c19e56f410e9ab9ad5d93ee213`.
+Application readback matched, and original settings were preserved.
+
+The earlier 25 MHz candidate sometimes displayed a guest illegal-instruction
+or damaged-System-file dialog. A cold start did not consistently clear it;
+Austin reported that another reboot got past it. The 10 MHz comparison then
+completed three starts without errors in captured SD logs. Finder was visually
+verified on the first and third starts; the second reached the normal
+improper-shutdown notice caused by the test reset. See SD_STABILITY.md for
+scope, evidence and limits. The original disk image was retained.
+
+Release PR: https://github.com/amcchord/M5Tab-Macintosh/pull/21.
+Next release operation: publish tag v5.0 as **5.0 - Stable** after validating
+all packaged component hashes. Exact source/release commits and publication
+outcome are retained in `artifacts/release-v5.0/release-status.json` and the
+release's BUILD-MANIFEST.json. The original application backup remains under
+`artifacts/display-reliability-20260926/hardware-flash/`.
+
+PR #16 was reviewed separately. Its multi-block transfers affect preboot USB
+Disk copying, not the emulator's SD file access. It remains unmerged; its
+invalid derived-reference filesystem accessor should be replaced before
+integration. Review evidence and a compiling accessor alternative are in
+`artifacts/release-v5.0/pr16-review/`.
+
+
+## Display reliability and QuickDraw regression — 2026-09-26
+
+Active work is on local branch `codex/display-reliability`, based on v4.7.1,
+in the attached checkout
+`<Codex managed worktree>/M5Tab-Macintosh`.
+The original control checkout's uncommitted performance work is preserved;
+the release branch is separate and is published through PR #21.
+
+[DISPLAY_RELIABILITY_REVIEW.md](DISPLAY_RELIABILITY_REVIEW.md) records the
+v3.4.2–v4.7.1 audit, fixed defects, display ownership contract, verification
+and hardware checklist. Both boards now share synchronous publication into
+their panel-owned framebuffer. Damage, palette/mode, overlay snapshots,
+shutdown and screenshot lifetime have explicit ordering. Conservative
+QuickDraw guards and HID/key-ownership fixes cover adjacent corruption risks.
+
+The final host suite passes 46 tests, including six native targets with
+AddressSanitizer/UndefinedBehaviorSanitizer. All five firmware profiles build.
+Build results and test logs are
+in this checkout's ignored `artifacts/display-reliability/`. Candidate images
+are retained under the control checkout's
+`artifacts/display-reliability-20260926/`, with source SHA and checksums.
+
+Austin subsequently authorized flashing the connected Tab5. The 82e5266
+pre-v3 debug application was flashed and read back with an exact SHA256 match;
+SD mounted, the emulator started, and existing settings were preserved.
+Austin then reported dotted Finder borders. An A/B firmware comparison with
+only `CPU_NATIVE_QD_ACCEL=0` eliminated them in the guest screenshot.
+
+Native QuickDraw is now disabled by default in every firmware profile. At the
+end of that comparison the Tab5 ran the matching no-acceleration build; [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md)
+records the comparison, image hashes and remaining limits. The previous app
+partition is backed up under the artifact package's `hardware-flash/` directory.
+The release-preparation section above supersedes this device state. Single-buffer optical tearing
+and the performance cost of disabling QuickDraw still need measurement. The
+device-state statements below are historical v4.7.1 evidence.
+
 ## v4.7.1 release — 2026-09-26
 
 The control checkout is the project root. Branch

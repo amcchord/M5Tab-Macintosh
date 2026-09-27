@@ -46,28 +46,33 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## v4.7.1: faster serial testing and preboot control
+## v5.0 — Stable
 
-[Download v4.7.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1).
-This patch adds reliable USB serial control for automated end-to-end testing.
+[Download v5.0 — Stable](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.0).
+This release focuses on display correctness and reliability.
 
-- **Faster screenshots:** larger CRC-checked transfers and buffered reads reduced
-  measured Tab5 color captures from 22.2 seconds to about 0.55 seconds and mono
-  captures from 2.2 seconds to about 0.20 seconds on the same desktop scene.
-- **Reliable control:** boot-session request IDs and cached acknowledgements make
-  retries safe. Reopening native USB serial no longer resets the device on POSIX
-  hosts; abandoned frames and held input have recovery timeouts.
-- **All saved preboot settings:** select disk/CD images and shared folders; change
-  RAM, audio, rotation, boot source, and WiFi configuration over serial. Enter
-  settings remotely, save or reload selections, and start the emulator through
-  the CLI, Python API, or MCP server. WiFi passwords are write-only.
-- **Boot reliability:** correct touch-task cleanup and verify settings files
-  before replacing them. Invalid values and missing boot media are rejected.
+- **Solid Finder borders:** native QuickDraw acceleration is disabled after
+  hardware A/B testing traced dotted scrollbar/window borders to that path.
+  Mac OS handles drawing through its original QuickDraw implementation.
+- **Reliable screen updates:** complete dirty-range tracking, coherent palette
+  and mode changes, retained updates after publication failures, and a shared
+  panel framebuffer path for both boards.
+- **Conservative Tab5 SD access:** SPI runs at 10 MHz after intermittent
+  startup CRC failures at 25 MHz; the same card passed repeated startup checks.
+  Disk throughput may be lower.
+- **Consistent rotation and overlays:** boot UI and emulator tiles use the same
+  rotation; keyboard/game overlays use a stable snapshot for each frame batch.
+- **Safer lifecycle and input:** renderer shutdown waits for completion, serial
+  captures protect framebuffer lifetime, and mouse report IDs and shared key
+  ownership are handled consistently.
 
-All 40 automated tests pass. Hardware tests used a pre-v3 Tab5 with the opt-in
-USB debug SDK; the four standard board/silicon builds retain their existing SDK
-pins. See [release notes](RELEASE_NOTES.md) for download selection and validation,
-and [AUTOMATION.md](AUTOMATION.md) for commands and protocol details.
+All 46 host tests pass, including native sanitizer tests, and all five firmware
+profiles build. Hardware validation used a pre-v3 Tab5 with the USB debug SDK;
+other board/silicon combinations remain build-validated. Disabling native
+QuickDraw may reduce graphics throughput; earlier acceleration benchmark
+scores do not describe v5.0. SDK pins and serial protocol remain unchanged.
+See [release notes](RELEASE_NOTES.md), the [display review](DISPLAY_RELIABILITY_REVIEW.md),
+and the [QuickDraw comparison](QUICKDRAW_REGRESSION.md).
 
 ### Choose the image for your chip revision
 
@@ -76,12 +81,12 @@ Check the serial boot log or run `esptool --port PORT chip-id`.
 
 | Board / ESP32-P4 silicon | Download filename | PlatformIO environment |
 |---|---|---|
-| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v4.7.1.bin` | `esp32p4_pioarduino` |
-| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v4.7.1.bin` | `esp32p4_pioarduino_rev3` |
-| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.1.bin` | `waveshare_p4_101` |
-| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.1.bin` | `waveshare_p4_101_rev3` |
+| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v5.0.bin` | `esp32p4_pioarduino` |
+| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v5.0.bin` | `esp32p4_pioarduino_rev3` |
+| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin` | `waveshare_p4_101` |
+| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin` | `waveshare_p4_101_rev3` |
 
-The separate `M5Tab-Macintosh-USB-Debug-v4.7.1.bin` download is the tested
+The separate `M5Tab-Macintosh-USB-Debug-v5.0.bin` download is the tested
 **pre-v3 Tab5** configuration using Arduino 3.3.8 / IDF 5.5.4. It is useful for
 serial testing and for the SD-mount issue observed with the older standard Tab5
 SDK on the development unit. The standard profiles remain unchanged because
@@ -118,6 +123,13 @@ changes the result, and the serial log from startup through the first crash.
 Elecrow CrowPanel Advanced 9-inch support (#10) is still under investigation.
 Its panel, audio, SD wiring and 1024×600 scaling need a separate board port;
 these downloads do not target it. See [the issue review](ISSUE_FIXES.md).
+
+## Previous release: v4.7.1
+
+[v4.7.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1)
+added faster CRC-checked serial screenshots, replay-safe input, and complete
+preboot settings control. Those features remain available in v5.0; see
+[AUTOMATION.md](AUTOMATION.md) for commands and protocol details.
 
 ## Previous release: v4.7
 
@@ -590,7 +602,7 @@ esptool.py --chip esp32p4 \
     --port /dev/ttyACM0 \
     --baud 921600 \
     write_flash \
-    0x0 M5Tab-Macintosh-v4.5.bin
+    0x0 M5Tab-Macintosh-v5.0.bin
 ```
 
 **Note**: Replace `/dev/ttyACM0` with your actual port:
@@ -632,30 +644,30 @@ platform requires it). For an isolated build environment:
 python3.13 -m venv .build/release-tools
 .build/release-tools/bin/python -m pip install platformio==6.2.0 esptool==5.4.0
 PATH="$PWD/.build/release-tools/bin:$PATH" PIO="$PWD/.build/release-tools/bin/pio" \
-  ./scripts/build_release.sh v4.7.1
+  ./scripts/build_release.sh v5.0
 ```
 
 For an existing supported toolchain, use the release script:
 
 ```bash
 # Create all four versioned firmware images
-./scripts/build_release.sh v4.7.1
+./scripts/build_release.sh v5.0
 
 # Or build only production-silicon Waveshare firmware
-./scripts/build_release.sh v4.7.1 waveshare-rev3
+./scripts/build_release.sh v5.0 waveshare-rev3
 
 # Output:
-#   release/M5Tab-Macintosh-v4.7.1.bin
-#   release/M5Tab-Macintosh-Rev3-v4.7.1.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v4.7.1.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v4.7.1.bin
+#   release/M5Tab-Macintosh-v5.0.bin
+#   release/M5Tab-Macintosh-Rev3-v5.0.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v4.7.1.bin
+    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v5.0.bin
 ```
 
 ---

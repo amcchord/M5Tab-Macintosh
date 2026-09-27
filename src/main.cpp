@@ -9,6 +9,7 @@
  */
 
 #include <Arduino.h>
+#include "firmware_version.h"
 
 #include "board.h"
 #include "board_config.h"
@@ -118,6 +119,7 @@ void setup(void)
 
     Serial.println("\n\n========================================");
     Serial.println("  BasiliskII ESP32 - Macintosh Emulator");
+    Serial.printf ("  Firmware: %s\n", M5TAB_FIRMWARE_VERSION);
     Serial.printf ("  Board: %s\n", BOARD_NAME);
     Serial.println("========================================\n");
 

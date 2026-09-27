@@ -89,3 +89,6 @@ idf_component.yml
 
 # Asset headers emitted by scripts/build_assets.py from ./assets at pre-build.
 src/generated/
+
+# Local investigation scripts
+scratch/
