@@ -19,6 +19,7 @@
 
 #include "board_config.h"
 #include "board_display.h"
+#include "panel_surface.h"
 #include "touch_overlay.h"
 
 // FreeRTOS for dual-core support
@@ -121,11 +122,23 @@ DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap
 DRAM_ATTR static uint32 write_dirty_tiles[(TOTAL_TILES + 31) / 32];    // Tiles dirtied by CPU writes
 
 
-// Lookup tables for fast 8-bit dirty-tile mapping.
-// Avoids repeated /40 and /640 math on the framebuffer write hot path.
-DRAM_ATTR static uint8 tile_col_lut[MAC_SCREEN_WIDTH];
-DRAM_ATTR static uint8 tile_row_base_lut[MAC_SCREEN_HEIGHT];
-static bool tile_lut_initialized = false;
+// Guest frame-buffer stores record damage as one flag byte per span of
+// VIDEO_DIRTY_SPAN_PIXELS pixels: 2^video_dirty_shift bytes at the current
+// depth, so a span is exactly one tile column wide at every depth. The
+// producer stores its pixels, fences, then sets the flag with a plain byte
+// store (memory.cpp does this inline for CPU stores); the video task drains
+// a word of flags with an atomic swap and maps spans to tiles. No
+// read-modify-write is needed on the CPU core. Offsets at or beyond
+// video_dirty_limit (below the displayed rows) are not tracked.
+#define VIDEO_DIRTY_SPAN_PIXELS 32
+#if TILE_WIDTH % VIDEO_DIRTY_SPAN_PIXELS != 0
+#error "a damage span must not straddle tiles"
+#endif
+#define VIDEO_DIRTY_CHUNKS ((MAC_SCREEN_WIDTH * MAC_SCREEN_HEIGHT + VIDEO_DIRTY_SPAN_PIXELS - 1) / VIDEO_DIRTY_SPAN_PIXELS)
+#define VIDEO_DIRTY_CHUNK_WORDS ((VIDEO_DIRTY_CHUNKS + 3) / 4)
+DRAM_ATTR uint32 video_dirty_chunks[VIDEO_DIRTY_CHUNK_WORDS];
+SDATA_ATTR("video_dirty_shift") uint32 video_dirty_shift = 5;
+SDATA_ATTR("video_dirty_limit") uint32 video_dirty_limit = 0;
 
 // Protected by frame_spinlock and consumed together with mode and palette.
 static bool force_full_update = true;
@@ -237,26 +250,19 @@ static void updateVideoStateCache(video_depth depth, uint32 bytes_per_row)
 {
     current_depth = depth;
     current_bytes_per_row = bytes_per_row;
+    uint32 shift = 5;  // log2(VIDEO_DIRTY_SPAN_PIXELS / pixels per byte)
     switch (depth) {
-        case VDEPTH_1BIT: current_pixels_per_byte = 8; break;
-        case VDEPTH_2BIT: current_pixels_per_byte = 4; break;
-        case VDEPTH_4BIT: current_pixels_per_byte = 2; break;
+        case VDEPTH_1BIT: current_pixels_per_byte = 8; shift = 2; break;
+        case VDEPTH_2BIT: current_pixels_per_byte = 4; shift = 3; break;
+        case VDEPTH_4BIT: current_pixels_per_byte = 2; shift = 4; break;
         default: current_pixels_per_byte = 1; break;
     }
-}
-
-static void initTileLuts(void)
-{
-    if (tile_lut_initialized) {
-        return;
-    }
-    for (int x = 0; x < MAC_SCREEN_WIDTH; x++) {
-        tile_col_lut[x] = (uint8)(x / TILE_WIDTH);
-    }
-    for (int y = 0; y < MAC_SCREEN_HEIGHT; y++) {
-        tile_row_base_lut[y] = (uint8)((y / TILE_HEIGHT) * TILES_X);
-    }
-    tile_lut_initialized = true;
+    // A mode change forces a full redraw, so spans recorded under the old
+    // geometry cannot be lost; bound the tracked bytes by the flag array.
+    uint32 limit = bytes_per_row * MAC_SCREEN_HEIGHT;
+    if (limit > ((uint32)VIDEO_DIRTY_CHUNKS << shift)) limit = (uint32)VIDEO_DIRTY_CHUNKS << shift;
+    video_dirty_shift = shift;
+    video_dirty_limit = limit;
 }
 
 /*
@@ -464,140 +470,43 @@ static inline void markTileDirtyBit(int tile_idx)
                       (1u << (tile_idx % 32)), __ATOMIC_RELEASE);
 }
 
-// Fast 8-bit path helper: convert framebuffer byte offset to tile index.
-static inline int fastTileIndex8Bit(uint32 offset)
+static inline void markDirtyChunks(uint32 offset, uint32 size)
 {
-    if (offset >= (uint32)(MAC_SCREEN_WIDTH * MAC_SCREEN_HEIGHT)) return -1;
-
-    const uint32 y = offset / MAC_SCREEN_WIDTH;
-    const uint32 row_base = y * MAC_SCREEN_WIDTH;
-
-    uint32 x = offset - row_base;
-    return (int)(tile_row_base_lut[y] + tile_col_lut[x]);
+    // Publish the pixels before the damage flags (see video_dirty_chunks).
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    const uint32 limit = video_dirty_limit;
+    if (offset >= limit) return;
+    if (size > limit - offset) size = limit - offset;
+    uint8 *flags = (uint8 *)video_dirty_chunks;
+    const uint32 shift = video_dirty_shift;
+    const uint32 last = (offset + size - 1) >> shift;
+    for (uint32 chunk = offset >> shift; chunk <= last; ++chunk)
+        flags[chunk] = 1;
 }
 
 /*
- *  Mark a tile as dirty at write-time (called from frame buffer put functions)
- *  This is MUCH faster than per-frame comparison as it only runs on actual writes.
- *  
- *  Handles packed pixel modes by mapping byte offset to pixel coordinates using
- *  current_bytes_per_row and current_pixels_per_byte.
- *  
- *  Each write publishes a dirty bit after writing the pixels. The video task
- *  atomically drains the producer bitmap before snapshotting; writes during
- *  that snapshot therefore remain pending for the following frame.
- *  
- *  @param offset  Byte offset into the Mac framebuffer
+ *  Mark frame-buffer bytes dirty at write time. Offsets are bytes into the
+ *  Mac frame buffer; the video task converts spans to tiles for the current
+ *  depth, so packed-pixel modes need no special handling here.
  */
 void VideoMarkDirtyOffset(uint32 offset)
 {
 #if VIDEO_DIRTY_MARK_NOOP
     UNUSED(offset);
-    return;
 #else
-    if (offset >= frame_buffer_size) return;
-
-    // Hot path: 8-bit mode (default mode for this port).
-    if (likely(current_depth == VDEPTH_8BIT && current_bytes_per_row == MAC_SCREEN_WIDTH)) {
-        int tile_idx = fastTileIndex8Bit(offset);
-        if (tile_idx >= 0) {
-            markTileDirtyBit(tile_idx);
-        }
-        return;
-    }
-    
-    // Get current bytes per row (volatile)
-    uint32 bpr = current_bytes_per_row;
-    int ppb = current_pixels_per_byte;
-    
-    // Calculate row from byte offset
-    int y = offset / bpr;
-    if (y >= MAC_SCREEN_HEIGHT) return;
-    
-    // Calculate byte position within row
-    int byte_in_row = offset % bpr;
-    
-    // Calculate pixel range that this byte affects
-    int pixel_start = byte_in_row * ppb;
-    int pixel_end = pixel_start + ppb - 1;
-    
-    // Clamp to screen width
-    if (pixel_start >= MAC_SCREEN_WIDTH) return;
-    if (pixel_end >= MAC_SCREEN_WIDTH) pixel_end = MAC_SCREEN_WIDTH - 1;
-    
-    // Calculate tile range
-    int tile_x_start = pixel_start / TILE_WIDTH;
-    int tile_x_end = pixel_end / TILE_WIDTH;
-    int tile_y = y / TILE_HEIGHT;
-    
-    // Mark all affected tiles dirty (unconditionally - even if being rendered)
-    // This ensures tiles written during rendering are re-rendered next frame
-    for (int tile_x = tile_x_start; tile_x <= tile_x_end; tile_x++) {
-        int tile_idx = tile_y * TILES_X + tile_x;
-        if (tile_idx < TOTAL_TILES) {
-            markTileDirtyBit(tile_idx);
-        }
-    }
+    if (offset < frame_buffer_size) markDirtyChunks(offset, 1);
 #endif
 }
 
-/*
- *  Mark a range of tiles as dirty at write-time
- *  Used for multi-byte writes (lput, wput)
- *  
- *  For packed pixel modes, a multi-byte write can span many pixels across
- *  potentially multiple rows and tiles.
- *  
- *  See VideoMarkDirtyOffset() for race condition handling notes.
- *  
- *  @param offset  Starting byte offset into the Mac framebuffer
- *  @param size    Number of bytes being written
- */
 void VideoMarkDirtyRange(uint32 offset, uint32 size)
 {
 #if VIDEO_DIRTY_MARK_NOOP
     UNUSED(offset);
     UNUSED(size);
-    return;
 #else
     if (size == 0 || offset >= frame_buffer_size) return;
-
-    // Clamp size to framebuffer bounds
-    if (size > frame_buffer_size - offset) {
-        size = frame_buffer_size - offset;
-    }
-
-    // Hot path: 8-bit mode with 2/4-byte writes.
-    if (size <= 4 && likely(current_depth == VDEPTH_8BIT && current_bytes_per_row == MAC_SCREEN_WIDTH)) {
-        int first_tile = fastTileIndex8Bit(offset);
-        if (first_tile >= 0) {
-            markTileDirtyBit(first_tile);
-        }
-
-        if (size > 1) {
-            uint32 end_offset = offset + size - 1;
-            int last_tile = fastTileIndex8Bit(end_offset);
-            if (last_tile >= 0 && last_tile != first_tile) {
-                markTileDirtyBit(last_tile);
-            }
-        }
-        return;
-    }
-
-    // Hot path: emulator memory writes are 2 or 4 bytes.
-    // Marking first and last touched bytes is sufficient here and avoids
-    // the expensive multi-row/full-row fallback path.
-    if (size <= 4) {
-        VideoMarkDirtyOffset(offset);
-        if (size > 1) {
-            VideoMarkDirtyOffset(offset + size - 1);
-        }
-        return;
-    }
-
-    markDirtyByteRange(offset, size, frame_buffer_size, current_bytes_per_row,
-                       current_pixels_per_byte, MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT,
-                       TILE_WIDTH, TILE_HEIGHT, [](uint32_t tile) { markTileDirtyBit(tile); });
+    if (size > frame_buffer_size - offset) size = frame_buffer_size - offset;
+    markDirtyChunks(offset, size);
 #endif
 }
 
@@ -646,18 +555,30 @@ extern "C" void VideoMarkTilesDirtyRect(int px, int py, int pw, int ph)
  *  Returns the number of dirty tiles
  *  Called at the start of each video frame
  */
-static int collectWriteDirtyTiles(void)
+static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uint32 shift)
 {
+    for (int i = 0; i < VIDEO_DIRTY_CHUNK_WORDS; i++) {
+        if (__atomic_load_n(&video_dirty_chunks[i], __ATOMIC_RELAXED) == 0) continue;
+        // Acquire pairs with the producers' release fence: pixels written
+        // before a flag was set are visible to the render that follows.
+        const uint32 flags = __atomic_exchange_n(&video_dirty_chunks[i], 0, __ATOMIC_ACQ_REL);
+        for (int byte = 0; byte < 4; byte++) {
+            if (!((flags >> (byte * 8)) & 0xff)) continue;
+            const uint32 offset = (uint32)(i * 4 + byte) << shift;
+            markDirtyByteRange(offset, 1u << shift, frame_buffer_size,
+                               bytes_per_row, (uint32)pixels_per_byte, MAC_SCREEN_WIDTH,
+                               MAC_SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT,
+                               [](uint32_t tile) { dirty_tiles[tile / 32] |= 1u << (tile % 32); });
+        }
+    }
+
     int count = 0;
-    
-    // Copy write_dirty_tiles to dirty_tiles and count
     for (int i = 0; i < (TOTAL_TILES + 31) / 32; i++) {
-        // Atomically read and clear the write dirty bitmap
+        // Tile-granular damage from non-CPU producers (touch overlay).
         uint32 bits = __atomic_exchange_n(&write_dirty_tiles[i], 0, __ATOMIC_ACQUIRE);
         dirty_tiles[i] |= bits;
         count += __builtin_popcount(dirty_tiles[i]);
     }
-    
     return count;
 }
 
@@ -754,7 +675,7 @@ static void snapshotTile(uint8 *src_buffer, int tile_x, int tile_y, uint8 *snaps
  */
 static void renderTileFromSnapshot(uint8 *snapshot, uint16 *local_palette, uint16 *out_buffer)
 {
-    int tile_pixel_width = TILE_WIDTH * PIXEL_SCALE;  // 80 pixels
+    int tile_pixel_width = TILE_WIDTH * PIXEL_SCALE;
     
     uint8 *src = snapshot;
     uint16 *out = out_buffer;
@@ -795,7 +716,7 @@ static void renderTileFromSnapshot(uint8 *snapshot, uint16 *local_palette, uint1
             dst_row1 += 8;
         }
         
-        // Handle remaining pixels (TILE_WIDTH=40 is divisible by 4, so this rarely runs)
+        // Handle remaining pixels when TILE_WIDTH is not a multiple of 4
         for (; x < TILE_WIDTH; x++) {
             uint16 c = local_palette[*src++];
             dst_row0[0] = c; dst_row0[1] = c;
@@ -816,20 +737,41 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
 {
     DRAM_ATTR static uint8 snapshot[TILE_WIDTH * TILE_HEIGHT];
     DRAM_ATTR static uint16 pixels[TILE_WIDTH * PIXEL_SCALE * TILE_HEIGHT * PIXEL_SCALE];
+    DRAM_ATTR static uint32 pairs[256];
     const int w = TILE_WIDTH * PIXEL_SCALE;
     const int h = TILE_HEIGHT * PIXEL_SCALE;
     bool ok = true;
     int rendered = 0;
+    int bits = 0;
+    switch (depth) {
+        case VDEPTH_1BIT: bits = 1; break;
+        case VDEPTH_2BIT: bits = 2; break;
+        case VDEPTH_4BIT: bits = 4; break;
+        case VDEPTH_8BIT: bits = 8; break;
+        default: break;
+    }
+    const bool indexed = bits != 0 && PIXEL_SCALE == 2;
+    if (indexed) {
+        for (int i = 0; i < (1 << bits); ++i)
+            pairs[i] = (uint32)local_palette[i] * 0x00010001u;
+    }
     if (!BoardDisplay_BeginTiles()) return;
     for (int ty = 0; ty < TILES_Y; ++ty) {
         for (int tx = 0; tx < TILES_X; ++tx) {
             if (!isTileDirty(ty * TILES_X + tx)) continue;
-            // Writes concurrent with this snapshot publish to write_dirty_tiles,
-            // which remains untouched until the next frame's acquire exchange.
-            snapshotTile(src_buffer, tx, ty, snapshot, depth, bpr);
-            renderTileFromSnapshot(snapshot, local_palette, pixels);
-            TouchOverlay_CompositeTile(tx * w, ty * h, w, h, pixels);
-            ok = BoardDisplay_PushTile(tx * w, ty * h, w, h, pixels) && ok;
+            // Guest writes concurrent with rendering set new damage flags,
+            // which stay pending until the next frame's acquire exchange.
+            if (indexed && !TouchOverlay_TileCovered(tx * w, ty * h, w, h)) {
+                // One pass from the guest frame buffer into the panel.
+                const uint8 *src = src_buffer + (uint32)ty * TILE_HEIGHT * bpr;
+                ok = BoardDisplay_PushIndexedTile(tx * w, ty * h, w, h, src, bpr, bits,
+                                                  tx * TILE_WIDTH, pairs) && ok;
+            } else {
+                snapshotTile(src_buffer, tx, ty, snapshot, depth, bpr);
+                renderTileFromSnapshot(snapshot, local_palette, pixels);
+                TouchOverlay_CompositeTile(tx * w, ty * h, w, h, pixels);
+                ok = BoardDisplay_PushTile(tx * w, ty * h, w, h, pixels) && ok;
+            }
             if ((++rendered & 7) == 0) taskYIELD();
         }
     }
@@ -897,6 +839,8 @@ static void renderPendingFrame(uint16 *local_palette)
     force_full_update = false;
     const video_depth frame_depth = current_depth;
     const uint32 frame_bpr = current_bytes_per_row;
+    const int frame_pixels_per_byte = current_pixels_per_byte;
+    const uint32 frame_dirty_shift = video_dirty_shift;
     if (palette_changed) {
         memcpy(local_palette, palette_rgb565, sizeof(palette_rgb565));
         palette_changed = false;
@@ -913,7 +857,7 @@ static void renderPendingFrame(uint16 *local_palette)
     }
     dirty_tile_count = TOTAL_TILES;
 #else
-    dirty_tile_count = collectWriteDirtyTiles();
+    dirty_tile_count = collectWriteDirtyTiles(frame_bpr, frame_pixels_per_byte, frame_dirty_shift);
 #endif
     t1 = micros();
     perf_detect_us += (t1 - t0);
@@ -1064,7 +1008,6 @@ bool VideoInit(bool classic)
     // Allocate Mac frame buffer in PSRAM
     // For 640x360 @ 8-bit = 230,400 bytes
     frame_buffer_size = MAC_SCREEN_WIDTH * MAC_SCREEN_HEIGHT;
-    initTileLuts();
     
     mac_frame_buffer = (uint8 *)ps_malloc(frame_buffer_size);
     if (!mac_frame_buffer) {
@@ -1081,6 +1024,7 @@ bool VideoInit(bool classic)
     // Initialize dirty tracking
     memset(dirty_tiles, 0, sizeof(dirty_tiles));
     memset(write_dirty_tiles, 0, sizeof(write_dirty_tiles));
+    memset(video_dirty_chunks, 0, sizeof(video_dirty_chunks));
     // initDefaultPalette publishes the initial mode/palette/redraw together.
 
     // Don't clear the panel here. The MacSplash checkerboard painted at
@@ -1199,6 +1143,7 @@ void VideoExit(void)
     // Clear dirty tracking (safety for potential re-init)
     memset(dirty_tiles, 0, sizeof(dirty_tiles));
     memset(write_dirty_tiles, 0, sizeof(write_dirty_tiles));
+    memset(video_dirty_chunks, 0, sizeof(video_dirty_chunks));
     
     if (video_capture_mutex) xSemaphoreTake(video_capture_mutex, portMAX_DELAY);
     if (mac_frame_buffer) {
@@ -1295,6 +1240,61 @@ uint32 VideoGetFrameBufferSize(void)
  * is clean. Packed 1/2/4-bit modes are expanded to palette indices so the host
  * always receives the same simple format.
  */
+/*
+ *  Diagnostic: compare the physical panel with the guest frame buffer.
+ *  Every 2x2 panel block is read through the scanout view (the memory the
+ *  display controller shows) and checked against the palette color of its
+ *  guest pixel. Pixels the guest changes during the scan, or a visible touch
+ *  overlay, count as mismatches, so use it on a settled screen.
+ */
+bool VideoVerifyPanel(uint32 *checked, uint32 *mismatched, int *first_x, int *first_y)
+{
+    if (!checked || !mismatched || !first_x || !first_y || video_capture_mutex == NULL)
+        return false;
+    MiniGfx &gfx = BoardDisplay_Gfx();
+    const uint16 *panel = gfx.scanoutFb();
+    if (!panel) return false;
+    xSemaphoreTake(video_capture_mutex, portMAX_DELAY);
+    if (!mac_frame_buffer) {
+        xSemaphoreGive(video_capture_mutex);
+        return false;
+    }
+    uint16 palette[256];
+    portENTER_CRITICAL(&frame_spinlock);
+    const video_depth depth = current_depth;
+    const uint32 bytes_per_row = current_bytes_per_row;
+    memcpy(palette, palette_rgb565, sizeof(palette_rgb565));
+    portEXIT_CRITICAL(&frame_spinlock);
+
+    static uint8 row[MAC_SCREEN_WIDTH];
+    *checked = 0;
+    *mismatched = 0;
+    *first_x = *first_y = -1;
+    for (int y = 0; y < MAC_SCREEN_HEIGHT; ++y) {
+        decodePackedRow(mac_frame_buffer + (uint32)y * bytes_per_row, row, MAC_SCREEN_WIDTH, depth);
+        for (int x = 0; x < MAC_SCREEN_WIDTH; ++x) {
+            const uint16 expected = palette[row[x]];
+            for (int dy = 0; dy < PIXEL_SCALE; ++dy) {
+                for (int dx = 0; dx < PIXEL_SCALE; ++dx) {
+                    const uint16 actual = readPanelPixel(panel, gfx.panelW(), gfx.panelH(), gfx.flip180(),
+                                                         x * PIXEL_SCALE + dx, y * PIXEL_SCALE + dy);
+                    ++*checked;
+                    if (actual != expected) {
+                        if (*mismatched == 0) {
+                            *first_x = x;
+                            *first_y = y;
+                        }
+                        ++*mismatched;
+                    }
+                }
+            }
+        }
+        if ((y & 0x1f) == 0x1f) taskYIELD();
+    }
+    xSemaphoreGive(video_capture_mutex);
+    return true;
+}
+
 bool VideoCaptureFrame(uint8 *pixels, uint32 pixel_capacity,
                        uint16 *palette, uint16 *width, uint16 *height)
 {

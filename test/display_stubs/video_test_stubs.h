@@ -12,6 +12,7 @@ using uint32 = uint32_t;
 using std::vector;
 #define UNUSED(x) ((void)(x))
 #define DRAM_ATTR
+#define SDATA_ATTR(name)
 #define likely(x) (x)
 #define D(x) ((void)0)
 struct FakeSerial {
@@ -38,6 +39,7 @@ inline int MacFrameLayout;
 inline bool AutomationSerialCaptureActive() { return false; }
 inline void TouchOverlay_BeginFrame() {}
 inline void TouchOverlay_CompositeTile(int,int,int,int,uint16 *) {}
+inline bool TouchOverlay_TileCovered(int,int,int,int) { return false; }
 struct esp_task_wdt_config_t { int timeout_ms; int idle_core_mask; bool trigger_panic; };
 inline void esp_task_wdt_reconfigure(esp_task_wdt_config_t *) {}
 void VideoSignalFrameReady();

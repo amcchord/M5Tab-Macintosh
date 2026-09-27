@@ -135,100 +135,115 @@ extern void VideoMarkDirtyRange(uint32 offset, uint32 size);
 #endif
 #endif
 
-// Fast-path long (32-bit) read
-// Framebuffer is excluded from read fast-path: Mac OS almost never reads its
-// own framebuffer. Removing those 2-3 comparisons from every non-RAM read
-// (ROM calls, hardware register reads) saves measurable cycles on the hot path.
-static inline uae_u32 longget_fastpath(uaecptr addr) {
-    if (likely(addr < RAMSize)) {
-        uae_u32 *m = (uae_u32 *)(RAMBaseHost + addr);
-        return do_get_mem_long(m);
-    }
-    if (addr >= ROMBaseMac && addr < ROMBaseMac + ROMSize) {
-        uae_u32 *m = (uae_u32 *)(ROMBaseHost + (addr - ROMBaseMac));
-        return do_get_mem_long(m);
-    }
-    return call_mem_get_func(get_mem_bank(addr).lget, addr);
+// Only guest RAM is expanded inline into the opcode handlers. ROM data,
+// frame-buffer writes and bank dispatch are rarer and live in compact
+// out-of-line helpers (memory.cpp), which keeps each handler small enough
+// for the instruction cache.
+extern "C" {
+uae_u32 REGPARAM2 mem_slow_lget(uaecptr addr) REGPARAM;
+uae_u32 REGPARAM2 mem_slow_wget(uaecptr addr) REGPARAM;
+uae_u32 REGPARAM2 mem_slow_bget(uaecptr addr) REGPARAM;
+void REGPARAM2 mem_slow_lput(uaecptr addr, uae_u32 l) REGPARAM;
+void REGPARAM2 mem_slow_wput(uaecptr addr, uae_u32 w) REGPARAM;
+void REGPARAM2 mem_slow_bput(uaecptr addr, uae_u32 b) REGPARAM;
 }
 
-// Fast-path word (16-bit) read
-static inline uae_u32 wordget_fastpath(uaecptr addr) {
-    if (likely(addr < RAMSize)) {
-        uae_u16 *m = (uae_u16 *)(RAMBaseHost + addr);
-        return do_get_mem_word(m);
-    }
-    if (addr >= ROMBaseMac && addr < ROMBaseMac + ROMSize) {
-        uae_u16 *m = (uae_u16 *)(ROMBaseHost + (addr - ROMBaseMac));
-        return do_get_mem_word(m);
-    }
-    return call_mem_get_func(get_mem_bank(addr).wget, addr);
+#if defined(__riscv) && !defined(MEM_SLOW_DIRECT_CALLS)
+// RAMBaseHost and RAMSize are fixed before the first guest instruction. An
+// input-free, non-volatile asm is a constant to GCC, so a handler loads each
+// once even though its guest stores could otherwise alias them and force
+// reloads. Both live in .sdata, so the linker relaxes the lui/lw pair into a
+// single gp-relative load.
+static ALWAYS_INLINE uint32 mem_ram_size(void) {
+    uint32 v;
+    __asm__("lui %0, %%hi(RAMSize)\n\tlw %0, %%lo(RAMSize)(%0)" : "=r"(v));
+    return v;
+}
+static ALWAYS_INLINE uint8 *mem_ram_base(void) {
+    uint8 *v;
+    __asm__("lui %0, %%hi(RAMBaseHost)\n\tlw %0, %%lo(RAMBaseHost)(%0)" : "=r"(v));
+    return v;
 }
 
-// Fast-path byte (8-bit) read
-static inline uae_u32 byteget_fastpath(uaecptr addr) {
-    if (likely(addr < RAMSize)) {
-        return *(uae_u8 *)(RAMBaseHost + addr);
+// The slow paths are reached through IRAM thunks (memory.cpp) that preserve
+// every integer register except the result and use t0 as the link register.
+// The inline fast path therefore contains no real call, so handlers need no
+// callee-saved spills. Floating-point temporaries are declared clobbered
+// because bank handlers are ordinary C code.
+#define MEM_SLOW_FP_CLOBBERS \
+    "ft0", "ft1", "ft2", "ft3", "ft4", "ft5", "ft6", "ft7", "ft8", "ft9", \
+    "ft10", "ft11", "fa0", "fa1", "fa2", "fa3", "fa4", "fa5", "fa6", "fa7"
+#define MEM_SLOW_GET(thunk, addr) ({ \
+    register uae_u32 mem_a0_ __asm__("a0") = (addr); \
+    __asm__ volatile("1: auipc t0, %%pcrel_hi(" #thunk ")\n\tjalr t0, %%pcrel_lo(1b)(t0)" \
+                     : "+r"(mem_a0_) : : "t0", "memory", MEM_SLOW_FP_CLOBBERS); \
+    mem_a0_; })
+#define MEM_SLOW_PUT(thunk, addr, value) do { \
+    register uae_u32 mem_a0_ __asm__("a0") = (addr); \
+    register uae_u32 mem_a1_ __asm__("a1") = (value); \
+    __asm__ volatile("1: auipc t0, %%pcrel_hi(" #thunk ")\n\tjalr t0, %%pcrel_lo(1b)(t0)" \
+                     : : "r"(mem_a0_), "r"(mem_a1_) : "t0", "memory", MEM_SLOW_FP_CLOBBERS); \
+} while (0)
+#define mem_slow_lget_fast(addr) MEM_SLOW_GET(mem_slow_lget_thunk, addr)
+#define mem_slow_wget_fast(addr) MEM_SLOW_GET(mem_slow_wget_thunk, addr)
+#define mem_slow_bget_fast(addr) MEM_SLOW_GET(mem_slow_bget_thunk, addr)
+#define mem_slow_lput_fast(addr, v) MEM_SLOW_PUT(mem_slow_lput_thunk, addr, v)
+#define mem_slow_wput_fast(addr, v) MEM_SLOW_PUT(mem_slow_wput_thunk, addr, v)
+#define mem_slow_bput_fast(addr, v) MEM_SLOW_PUT(mem_slow_bput_thunk, addr, v)
+#else
+static ALWAYS_INLINE uint32 mem_ram_size(void) { return RAMSize; }
+static ALWAYS_INLINE uint8 *mem_ram_base(void) { return RAMBaseHost; }
+#define mem_slow_lget_fast(addr) mem_slow_lget(addr)
+#define mem_slow_wget_fast(addr) mem_slow_wget(addr)
+#define mem_slow_bget_fast(addr) mem_slow_bget(addr)
+#define mem_slow_lput_fast(addr, v) mem_slow_lput(addr, v)
+#define mem_slow_wput_fast(addr, v) mem_slow_wput(addr, v)
+#define mem_slow_bput_fast(addr, v) mem_slow_bput(addr, v)
+#endif
+
+static ALWAYS_INLINE uae_u32 longget_fastpath(uaecptr addr) {
+    if (likely(addr < mem_ram_size())) {
+        return do_get_mem_long((uae_u32 *)(mem_ram_base() + addr));
     }
-    if (addr >= ROMBaseMac && addr < ROMBaseMac + ROMSize) {
-        return *(uae_u8 *)(ROMBaseHost + (addr - ROMBaseMac));
-    }
-    return call_mem_get_func(get_mem_bank(addr).bget, addr);
+    return mem_slow_lget_fast(addr);
 }
 
-// Fast-path long (32-bit) write
-static inline void longput_fastpath(uaecptr addr, uae_u32 l) {
-    // Fast path for RAM writes (most common case)
-    if (likely(addr < RAMSize)) {
-        uae_u32 *m = (uae_u32 *)(RAMBaseHost + addr);
-        do_put_mem_long(m, l);
-        return;
+static ALWAYS_INLINE uae_u32 wordget_fastpath(uaecptr addr) {
+    if (likely(addr < mem_ram_size())) {
+        return do_get_mem_word((uae_u16 *)(mem_ram_base() + addr));
     }
-    // Fast path for direct-layout frame buffer writes.
-    if (MacFrameLayout == FLAYOUT_DIRECT &&
-        addr >= BASILISK_FRAME_BASE_MAC &&
-        addr < (BASILISK_FRAME_BASE_MAC + MacFrameSize)) {
-        uae_u32 *m = (uae_u32 *)(MacFrameBaseHost + (addr - BASILISK_FRAME_BASE_MAC));
-        do_put_mem_long(m, l);
-        VideoMarkDirtyRange(addr - BASILISK_FRAME_BASE_MAC, 4);
-        return;
-    }
-    // ROM writes go to bank handler (which will log/ignore them)
-    // Frame buffer and hardware writes also go through bank handler
-    call_mem_put_func(get_mem_bank(addr).lput, addr, l);
+    return mem_slow_wget_fast(addr);
 }
 
-// Fast-path word (16-bit) write
-static inline void wordput_fastpath(uaecptr addr, uae_u32 w) {
-    if (likely(addr < RAMSize)) {
-        uae_u16 *m = (uae_u16 *)(RAMBaseHost + addr);
-        do_put_mem_word(m, w);
-        return;
+static ALWAYS_INLINE uae_u32 byteget_fastpath(uaecptr addr) {
+    if (likely(addr < mem_ram_size())) {
+        return *(uae_u8 *)(mem_ram_base() + addr);
     }
-    if (MacFrameLayout == FLAYOUT_DIRECT &&
-        addr >= BASILISK_FRAME_BASE_MAC &&
-        addr < (BASILISK_FRAME_BASE_MAC + MacFrameSize)) {
-        uae_u16 *m = (uae_u16 *)(MacFrameBaseHost + (addr - BASILISK_FRAME_BASE_MAC));
-        do_put_mem_word(m, w);
-        VideoMarkDirtyRange(addr - BASILISK_FRAME_BASE_MAC, 2);
-        return;
-    }
-    call_mem_put_func(get_mem_bank(addr).wput, addr, w);
+    return mem_slow_bget_fast(addr);
 }
 
-// Fast-path byte (8-bit) write
-static inline void byteput_fastpath(uaecptr addr, uae_u32 b) {
-    if (likely(addr < RAMSize)) {
-        *(uae_u8 *)(RAMBaseHost + addr) = b;
+static ALWAYS_INLINE void longput_fastpath(uaecptr addr, uae_u32 l) {
+    if (likely(addr < mem_ram_size())) {
+        do_put_mem_long((uae_u32 *)(mem_ram_base() + addr), l);
         return;
     }
-    if (MacFrameLayout == FLAYOUT_DIRECT &&
-        addr >= BASILISK_FRAME_BASE_MAC &&
-        addr < (BASILISK_FRAME_BASE_MAC + MacFrameSize)) {
-        *(uae_u8 *)(MacFrameBaseHost + (addr - BASILISK_FRAME_BASE_MAC)) = b;
-        VideoMarkDirtyOffset(addr - BASILISK_FRAME_BASE_MAC);
+    mem_slow_lput_fast(addr, l);
+}
+
+static ALWAYS_INLINE void wordput_fastpath(uaecptr addr, uae_u32 w) {
+    if (likely(addr < mem_ram_size())) {
+        do_put_mem_word((uae_u16 *)(mem_ram_base() + addr), w);
         return;
     }
-    call_mem_put_func(get_mem_bank(addr).bput, addr, b);
+    mem_slow_wput_fast(addr, w);
+}
+
+static ALWAYS_INLINE void byteput_fastpath(uaecptr addr, uae_u32 b) {
+    if (likely(addr < mem_ram_size())) {
+        *(uae_u8 *)(mem_ram_base() + addr) = b;
+        return;
+    }
+    mem_slow_bput_fast(addr, b);
 }
 
 // Use fast-path functions for all memory access
@@ -278,37 +293,37 @@ static __inline__ uae_u32 do_get_virtual_address(uae_u8 *addr)
 {
 	return (uintptr)addr - MEMBaseDiff;
 }
-static __inline__ uae_u32 get_long(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_long(uaecptr addr)
 {
     uae_u32 * const m = (uae_u32 *)do_get_real_address(addr);
     return do_get_mem_long(m);
 }
-static __inline__ uae_u32 get_word(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_word(uaecptr addr)
 {
     uae_u16 * const m = (uae_u16 *)do_get_real_address(addr);
     return do_get_mem_word(m);
 }
-static __inline__ uae_u32 get_byte(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_byte(uaecptr addr)
 {
     uae_u8 * const m = (uae_u8 *)do_get_real_address(addr);
     return do_get_mem_byte(m);
 }
-static __inline__ void put_long(uaecptr addr, uae_u32 l)
+static ALWAYS_INLINE void put_long(uaecptr addr, uae_u32 l)
 {
     uae_u32 * const m = (uae_u32 *)do_get_real_address(addr);
     do_put_mem_long(m, l);
 }
-static __inline__ void put_word(uaecptr addr, uae_u32 w)
+static ALWAYS_INLINE void put_word(uaecptr addr, uae_u32 w)
 {
     uae_u16 * const m = (uae_u16 *)do_get_real_address(addr);
     do_put_mem_word(m, w);
 }
-static __inline__ void put_byte(uaecptr addr, uae_u32 b)
+static ALWAYS_INLINE void put_byte(uaecptr addr, uae_u32 b)
 {
     uae_u8 * const m = (uae_u8 *)do_get_real_address(addr);
     do_put_mem_byte(m, b);
 }
-static __inline__ uae_u8 *get_real_address(uaecptr addr)
+static ALWAYS_INLINE uae_u8 *get_real_address(uaecptr addr)
 {
 	return do_get_real_address(addr);
 }
@@ -317,31 +332,31 @@ static __inline__ uae_u32 get_virtual_address(uae_u8 *addr)
 	return do_get_virtual_address(addr);
 }
 #else
-static __inline__ uae_u32 get_long(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_long(uaecptr addr)
 {
     return longget_1(addr);
 }
-static __inline__ uae_u32 get_word(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_word(uaecptr addr)
 {
     return wordget_1(addr);
 }
-static __inline__ uae_u32 get_byte(uaecptr addr)
+static ALWAYS_INLINE uae_u32 get_byte(uaecptr addr)
 {
     return byteget_1(addr);
 }
-static __inline__ void put_long(uaecptr addr, uae_u32 l)
+static ALWAYS_INLINE void put_long(uaecptr addr, uae_u32 l)
 {
     longput_1(addr, l);
 }
-static __inline__ void put_word(uaecptr addr, uae_u32 w)
+static ALWAYS_INLINE void put_word(uaecptr addr, uae_u32 w)
 {
     wordput_1(addr, w);
 }
-static __inline__ void put_byte(uaecptr addr, uae_u32 b)
+static ALWAYS_INLINE void put_byte(uaecptr addr, uae_u32 b)
 {
     byteput_1(addr, b);
 }
-static __inline__ uae_u8 *get_real_address(uaecptr addr)
+static ALWAYS_INLINE uae_u8 *get_real_address(uaecptr addr)
 {
     return get_mem_bank(addr).xlateaddr(addr);
 }

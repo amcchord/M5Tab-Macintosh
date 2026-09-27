@@ -150,6 +150,15 @@ static void reportIPSStats(uint32 current_time)
 }
 
 /*
+ *  Exact 68k instruction count at the last completed dispatch batch. Only
+ *  the emulator core may call this (the diagnostic sampler's interrupt).
+ */
+uint64_t EmulatorInstructionCount(void)
+{
+    return ips_total_instructions + (uint32_t)(emulated_ticks_quantum - emulated_ticks);
+}
+
+/*
  *  Get current IPS measurement (for external use)
  */
 uint32_t getEmulatorIPS(void)

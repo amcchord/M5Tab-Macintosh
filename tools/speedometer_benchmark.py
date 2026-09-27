@@ -9,8 +9,14 @@ QuickDraw (Command-G) and records a ranked A-line profile in ``profile.json``.
 ``--suite mono`` selects only the monochrome Color QuickDraw workload, which
 closely matches the headline Performance Rating Graphics test.
 
+``--suite rating`` runs Tests > Performance Rating (Command-R) for the tests
+named by ``--tests`` with ``--iterations`` each. ``--profile HZ`` also samples
+the emulator core (or ``--profile-core 0``) with the firmware PERF sampler and
+saves ``perf.json`` plus ``perf-samples.bin`` for ``tools/perf_report.py``.
+
 Examples:
     python tools/speedometer_benchmark.py --port /dev/cu.usbmodem14201 --label baseline
+    python tools/speedometer_benchmark.py --suite rating --tests cpu,graphics --label quick
     python tools/speedometer_benchmark.py --parse artifacts/tab5-speedometer-rating-2.png
 """
 
@@ -38,7 +44,12 @@ from mac_control import ControlError, MacControl, parse_key_code  # noqa: E402
 BASELINE_CPU = 0.553
 BASELINE_GRAPHICS = 0.310
 BASELINE_PR = 0.549
-SPEEDOMETER_ICON = (590, 95)
+# Fallback position of the "Speedometer 4.02 alias" desktop icon. The launcher
+# prefers the position recovered from the icon's OCR label (see
+# speedometer_icon_position) because Finder rearranges desktop icons.
+SPEEDOMETER_ICON = (590, 222)
+# Finder draws a 32px icon directly above its label.
+ICON_ABOVE_LABEL = 20
 
 
 @dataclass(frozen=True)
@@ -121,6 +132,101 @@ def capture(control: MacControl, output: Path, *, color: bool = False) -> Path:
     output.write_bytes(png)
     print(f"Captured {output} ({width}x{height})", flush=True)
     return output
+
+
+def _png_rgb_rows(image_path: Path) -> tuple[int, int, bytes]:
+    """Decode an RGB PNG written by our filter-0 encoder."""
+    png = image_path.read_bytes()
+    position = 8
+    width = 0
+    height = 0
+    compressed: list[bytes] = []
+    while position + 12 <= len(png):
+        size = struct.unpack(">I", png[position : position + 4])[0]
+        kind = png[position + 4 : position + 8]
+        payload = png[position + 8 : position + 8 + size]
+        position += 12 + size
+        if kind == b"IHDR":
+            width, height = struct.unpack(">II", payload[:8])
+        elif kind == b"IDAT":
+            compressed.append(payload)
+        elif kind == b"IEND":
+            break
+    rows = zlib.decompress(b"".join(compressed))
+    if len(rows) != (width * 3 + 1) * height:
+        raise ValueError("unexpected screenshot dimensions")
+    return width, height, rows
+
+
+def _pixel(rows: bytes, width: int, x: int, y: int) -> tuple[int, int, int]:
+    offset = y * (width * 3 + 1) + 1 + x * 3
+    return rows[offset], rows[offset + 1], rows[offset + 2]
+
+
+def unreadable_menus_splash(text: str) -> bool:
+    """Text-only splash fallback for depths where the disabled menus dither.
+
+    Behind the splash only the always-enabled Help title stays readable. When
+    the Tests and Analysis titles also read, the menus are enabled; OCR merely
+    dropped "File" next to the Apple menu, and a result window may be open.
+    """
+    menus_enabled = "Tests" in text and "Analysis" in text
+    return "Help" in text and "File" not in text and not menus_enabled
+
+
+def speedometer_icon_position(
+    image_path: Path, records: list[dict[str, object]]
+) -> tuple[int, int] | None:
+    """Locate the Speedometer alias from its Finder label.
+
+    Vision reports normalized boxes with a bottom-left origin. The label's
+    trailing glyphs are often misread ("alia", "sli."), so match the stable
+    "Speedometer" prefix only.
+    """
+    width, height, _ = _png_rgb_rows(image_path)
+    for record in records:
+        if not str(record.get("text", "")).strip().startswith("Speedometer"):
+            continue
+        center_x = (float(record["x"]) + float(record["width"]) / 2.0) * width
+        label_top = (1.0 - float(record["y"]) - float(record["height"])) * height
+        return round(center_x), max(0, round(label_top) - ICON_ABOVE_LABEL)
+    return None
+
+
+def menus_disabled(image_path: Path) -> bool:
+    """True when the Tests/Analysis menu titles are drawn grey (a modal is up)."""
+    width, _, rows = _png_rgb_rows(image_path)
+    black = grey = 0
+    for y in range(3, 16):
+        for x in range(112, 215):
+            red, green, blue = _pixel(rows, width, x, y)
+            if red < 60 and green < 60 and blue < 60:
+                black += 1
+            elif 90 < red < 200 and abs(red - green) < 20 and abs(green - blue) < 20:
+                grey += 1
+    return black < 10 and grey > 40
+
+
+def splash_visible(image_path: Path, text: str) -> bool:
+    """Recognise Speedometer's launch splash.
+
+    Its stylised artwork is not readable by OCR, while the disabled menu bar
+    behind it still reads as "File ... Tests ... Analysis". The splash is a
+    mostly dark picture in the middle of the screen with the menus disabled
+    and no dialog text.
+    """
+    if any(word in text for word in ("Performance Test", "PR Tests", "Register", "Organization", "OK")):
+        return False
+    if not menus_disabled(image_path):
+        return False
+    width, _, rows = _png_rgb_rows(image_path)
+    dark = total = 0
+    for y in range(90, 230, 2):
+        for x in range(200, 440, 2):
+            total += 1
+            if sum(_pixel(rows, width, x, y)) < 240:
+                dark += 1
+    return dark > total * 0.25
 
 
 def checkbox_checked(image_path: Path, center_x: int, center_y: int) -> bool:
@@ -255,10 +361,12 @@ def wait_for_speedometer(
     boot_attempt = 0
     splash_dismissed = False
     needs_launch = True
+    icon = SPEEDOMETER_ICON
     while True:
         name = "00-before-launch.png" if boot_attempt == 0 else f"boot-{boot_attempt:02d}.png"
         try:
-            image_path = capture(control, run_dir / name)
+            # Color: the splash check reads the grey (disabled) menu titles.
+            image_path = capture(control, run_dir / name, color=True)
         except (ControlError, OSError) as exc:
             if time.monotonic() >= deadline:
                 raise
@@ -271,6 +379,13 @@ def wait_for_speedometer(
             continue
         records = run_ocr(image_path)
         text = recognized_text(records)
+        if splash_visible(image_path, text):
+            held_click(control, 320, 160, label="dismiss splash screen")
+            splash_dismissed = True
+            needs_launch = False
+            print("Speedometer splash screen dismissed", flush=True)
+            time.sleep(2.0)
+            continue
         if "Organization:" in text and "Cancel" in text:
             retry_control("cancel registration form", lambda: control.click(502, 292))
             needs_launch = False
@@ -281,7 +396,7 @@ def wait_for_speedometer(
             needs_launch = False
             print("Speedometer registration prompt dismissed", flush=True)
             break
-        if "Help" in text and "File" not in text:
+        if unreadable_menus_splash(text):
             held_click(control, 330, 175, label="dismiss splash screen")
             splash_dismissed = True
             needs_launch = False
@@ -300,13 +415,19 @@ def wait_for_speedometer(
         # stable prefix plus the Finder menu is enough to identify this test
         # desktop without making launch depend on that one glyph.
         # At 1-bit depth Vision often drops the dithered Speedometer icon
-        # label entirely. This benchmark image has stable MicroMac/Shared
-        # volume names, so accept those as a second, depth-independent Finder
+        # label entirely. This benchmark image has a stable MicroMac volume
+        # name, so accept it as a second, depth-independent Finder
         # signature once the Finder's File/Special menus are also visible.
         finder_menus = "File" in text and "Special" in text
-        benchmark_icon = "Speedometer 4.0" in text
-        benchmark_desktop = "MicroMac" in text and "Shared" in text
+        benchmark_icon = "Speedometer" in text
+        # The Shared volume is only mounted when the host share is enabled.
+        benchmark_desktop = "MicroMac" in text
         if finder_menus and (benchmark_icon or benchmark_desktop):
+            located = speedometer_icon_position(image_path, records)
+            if located is not None:
+                icon = located
+            else:
+                print(f"Speedometer label not recognized; using fallback {icon}", flush=True)
             break
         if time.monotonic() >= deadline:
             raise TimeoutError("Finder desktop did not become ready before launch timeout")
@@ -318,7 +439,8 @@ def wait_for_speedometer(
         # Select the benchmark's icon, then use Finder's canonical Open command.
         # Separate serial CLICK commands cannot guarantee the guest's configured
         # double-click interval because each waits for a protocol round trip.
-        retry_control("select benchmark", lambda: control.click(*SPEEDOMETER_ICON))
+        print(f"Opening Speedometer alias at {icon}", flush=True)
+        retry_control("select benchmark", lambda: control.click(*icon))
         send_benchmark_chord(control, "command+o")
 
     attempt = 0
@@ -326,7 +448,7 @@ def wait_for_speedometer(
         time.sleep(20.0)
         attempt += 1
         try:
-            image_path = capture(control, run_dir / f"launch-{attempt:02d}.png")
+            image_path = capture(control, run_dir / f"launch-{attempt:02d}.png", color=True)
         except (ControlError, OSError) as exc:
             print(
                 f"Launch screenshot attempt {attempt} failed; preserving session: {exc}",
@@ -335,10 +457,8 @@ def wait_for_speedometer(
             continue
         records = run_ocr(image_path)
         text = recognized_text(records)
-        if (
-            not splash_dismissed
-            and "Help" in text
-            and "File" not in text
+        if splash_visible(image_path, text) or (
+            not splash_dismissed and unreadable_menus_splash(text)
         ):
             held_click(control, 330, 175, label="dismiss splash screen")
             splash_dismissed = True
@@ -443,6 +563,137 @@ def read_trap_profile(control: MacControl) -> dict[str, object]:
     }
 
 
+# Performance Rating dialog geometry (640x360 and 640x400 guests alike).
+RATING_ROWS = {"cpu": 121, "graphics": 143, "disk": 164, "math": 185}
+RATING_CHECKBOX_X = 257
+RATING_ITERATIONS_X = 392
+RATING_OK = (263, 232)
+
+
+def read_perf_samples(control: MacControl, run_dir: Path) -> dict[str, str]:
+    """Save the firmware PERF sampler's counters and raw samples."""
+    state = control.request("PERF STATE", "OK PERF STATE", timeout=15.0)
+    fields = dict(item.split("=", 1) for item in state.split()[4:])
+    count = int(fields["count"])
+    blob = bytearray()
+    while len(blob) // 16 < count:
+        reply = control.request(f"PERF READ {len(blob) // 16}", "OK PERF READ", timeout=15.0)
+        parts = reply.split()
+        if int(parts[5]) == 0:
+            break
+        blob += bytes.fromhex(parts[6])
+    (run_dir / "perf-samples.bin").write_bytes(bytes(blob))
+    (run_dir / "perf.json").write_text(json.dumps(fields, indent=2, sort_keys=True) + "\n")
+    return fields
+
+
+def configure_rating_dialog(
+    control: MacControl, run_dir: Path, tests: set[str], iterations: int
+) -> None:
+    """Open Tests > Performance Rating and select tests and iteration counts."""
+    for attempt in range(4):
+        send_benchmark_chord(control, "command+r")
+        time.sleep(2.0)
+        # Keep the pointer off the checkboxes that are read from pixels.
+        control.move(560, 330)
+        time.sleep(0.5)
+        dialog = capture(control, run_dir / f"01-rating-dialog-{attempt}.png", color=True)
+        text = recognized_text(run_ocr(dialog))
+        if "PR Tests" in text:
+            break
+        if splash_visible(dialog, text):
+            held_click(control, 320, 160, label="dismiss splash screen")
+            time.sleep(2.0)
+        else:
+            handle_suite_dialog(control, text)
+    else:
+        raise TimeoutError("Performance Rating dialog did not open")
+
+    for name, row in RATING_ROWS.items():
+        if checkbox_checked(dialog, RATING_CHECKBOX_X, row) != (name in tests):
+            held_click(control, RATING_CHECKBOX_X, row, label=f"toggle {name}",
+                       settle_seconds=0.1, hold_seconds=0.1)
+        if name in tests:
+            # Put the caret after the current count, erase it and type ours.
+            held_click(control, RATING_ITERATIONS_X, row, label=f"{name} iterations",
+                       settle_seconds=0.1, hold_seconds=0.1)
+            for _ in range(3):
+                control.key_code(parse_key_code("delete"), "tap")
+            control.type_text(str(iterations))
+    control.move(560, 330)
+    time.sleep(0.5)
+    configured = capture(control, run_dir / "02-rating-configured.png", color=True)
+    for name, row in RATING_ROWS.items():
+        if checkbox_checked(configured, RATING_CHECKBOX_X, row) != (name in tests):
+            raise RuntimeError(f"could not set the {name} checkbox")
+
+
+def run_rating(control: MacControl, run_dir: Path, args: argparse.Namespace) -> int:
+    tests = {name.strip() for name in args.tests.split(",") if name.strip()}
+    unknown = tests - set(RATING_ROWS)
+    if not tests or unknown:
+        raise ValueError(f"--tests must name some of {sorted(RATING_ROWS)}")
+    configure_rating_dialog(control, run_dir, tests, args.iterations)
+    held_click(control, *RATING_OK, label="start Performance Rating")
+    time.sleep(2.0)
+    if "disk" in tests:
+        drive = capture(control, run_dir / "03-drive.png", color=True)
+        handle_suite_dialog(control, recognized_text(run_ocr(drive)))
+    if args.profile:
+        try:
+            control.request("PERF FREE", "OK PERF FREE", timeout=15.0)
+        except ControlError:
+            pass
+        control.request(f"PERF START {args.profile} {args.profile_capacity} {args.profile_core}",
+                        "OK PERF START", timeout=15.0)
+
+    started = time.monotonic()
+    deadline = started + args.benchmark_timeout
+    sample = 0
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Performance Rating did not finish before the timeout")
+        time.sleep(args.poll_interval)
+        sample += 1
+        try:
+            image_path = capture(control, run_dir / f"sample-{sample:02d}.png", color=True)
+        except (ControlError, OSError) as exc:
+            print(f"Sample {sample}: screenshot failed; preserving session: {exc}", flush=True)
+            continue
+        text = recognized_text(run_ocr(image_path))
+        if "tests are done" in text.lower():
+            break
+        handle_suite_dialog(control, text)
+    elapsed = time.monotonic() - started
+    if args.profile:
+        control.request("PERF STOP", "OK PERF STOP", timeout=15.0)
+    retry_control("close tests-complete dialog", lambda: control.click(320, 153))
+    time.sleep(1.5)
+    control.move(560, 330)
+    result_image = capture(control, run_dir / "result.png", color=True)
+    records = run_ocr(result_image)
+    scores = {
+        label.lower(): _number_right_of(records, pattern)
+        for label, pattern in (("CPU", r"CPU:?"), ("Graphics", r"Graphics:?"),
+                               ("Disk", r"Disk:?"), ("Math", r"Math:?"), ("PR", r"PR(?::|A)?"))
+    }
+    payload: dict[str, object] = {
+        "captured_at": datetime.now().isoformat(),
+        "label": args.label,
+        "suite": "rating",
+        "tests": sorted(tests),
+        "iterations": args.iterations,
+        "elapsed_seconds": round(elapsed, 1),
+        "result": {name: scores[name] for name in ("cpu", "graphics", "disk", "math", "pr")},
+        "screenshot": result_image.name,
+    }
+    if args.profile:
+        payload["perf"] = read_perf_samples(control, run_dir)
+    (run_dir / "result.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    print(json.dumps(payload, indent=2, sort_keys=True), flush=True)
+    return 0
+
+
 def run_benchmark(args: argparse.Namespace) -> int:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     run_dir = args.output_root / f"{stamp}-{args.label}"
@@ -466,6 +717,8 @@ def run_benchmark(args: argparse.Namespace) -> int:
             run_dir,
             launch_timeout=args.launch_timeout,
         )
+        if args.suite == "rating":
+            return run_rating(control, run_dir, args)
         try:
             retry_control(
                 "reset trap profile",
@@ -580,8 +833,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", help="serial device (or BASILISK_PORT)")
     parser.add_argument("--label", default="run")
     parser.add_argument(
-        "--suite", choices=("all", "color", "mono"), default="all"
+        "--suite", choices=("all", "color", "mono", "rating"), default="all"
     )
+    parser.add_argument("--tests", default="cpu,graphics,disk,math",
+                        help="rating suite: comma-separated cpu, graphics, disk, math")
+    parser.add_argument("--iterations", type=int, default=1,
+                        help="rating suite: iterations of each selected test")
+    parser.add_argument("--profile", type=int, default=0, metavar="HZ",
+                        help="rating suite: sample with the firmware PERF sampler")
+    parser.add_argument("--profile-core", type=int, default=1, choices=(0, 1))
+    parser.add_argument("--profile-capacity", type=int, default=200000)
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -590,7 +851,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--connect-timeout", type=float, default=120.0)
     parser.add_argument("--launch-timeout", type=float, default=300.0)
     parser.add_argument("--benchmark-timeout", type=float, default=2400.0)
-    parser.add_argument("--poll-interval", type=float, default=90.0)
+    parser.add_argument("--poll-interval", type=float, default=None,
+                        help="seconds between screenshots (default 90, or 10 for rating)")
     parser.add_argument("--baseline-cpu", type=float, default=BASELINE_CPU)
     parser.add_argument("--baseline-graphics", type=float, default=BASELINE_GRAPHICS)
     parser.add_argument("--baseline-pr", type=float, default=BASELINE_PR)
@@ -606,6 +868,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.poll_interval is None:
+        args.poll_interval = 10.0 if args.suite == "rating" else 90.0
     if args.parse is not None:
         result = parse_result(run_ocr(args.parse))
         if result is None:

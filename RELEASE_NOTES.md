@@ -1,98 +1,111 @@
-# 5.0 - Stable
+# 5.0.1 - Performance
 
-A stability release focused on correct drawing and reliable display updates
-on M5Stack Tab5 and Waveshare ESP32-P4 10.1 boards.
+A performance release. It makes the 68040 interpreter and the display
+pipeline faster without changing what Mac OS draws, and fixes the Mac clock.
+
+Speedometer 4.02 Performance Rating on the development Tab5 (Quadra 605 = 1.0):
+
+| Score | 5.0 | 5.0.1 | Change |
+| --- | ---: | ---: | ---: |
+| CPU | 0.545 | 0.804 | +48% |
+| Graphics | 0.242 | 0.496 | +105% |
+| Disk | 1.02 | 1.03 | unchanged |
+| Math | 6.68 | 9.47 | +42% |
+| **Performance Rating** | **0.458** | **0.765** | **+67%** |
+
+5.0.1 values are medians of five full ratings on the final code.
 
 ## What changed
 
-- **Fixed dotted Finder borders.** Native QuickDraw acceleration is disabled
-  by default. A hardware A/B comparison showed alternating black/white pixels
-  around scrollbars with acceleration enabled and solid borders through the
-  original Mac QuickDraw path. This may reduce graphics throughput; earlier
-  native-acceleration benchmark scores do not apply to this release.
-- **One display publication path.** Both boards write into the panel driver's
-  framebuffer with synchronous cache publication. Duplicate asynchronous DMA
-  scratch-buffer paths and unused buffers have been removed.
-- **Reliable dirty tracking.** Bulk writes mark every affected tile in all
-  indexed color depths. Writes arriving during rendering remain pending, and
-  failed publication is retried. Early frame notifications cannot strand updates.
-- **Coherent visual state.** Mode and palette changes are captured together.
-  Tab5 tiles follow the saved rotation, and touch overlays use a stable state
-  snapshot throughout each frame batch. Hiding overlays redraws their old area.
-- **Safer startup and shutdown.** Splash handoff handles packed stipples and
-  idle timeouts. Video initialization reports task failures; exit waits for
-  rendering to finish and protects concurrent screenshot access.
-- **Input fixes.** Mouse fields stay within their report IDs; wrong-ID and
-  truncated reports are ignored. Shared physical/automation key ownership and
-  event ordering are serialized.
-- **Conservative Tab5 SD clock.** SPI is reduced from 25 MHz to 10 MHz after
-  intermittent SD CRC/status errors during guest startup. Three starts with
-  the slower clock avoided the observed errors on the development Tab5. This
-  may reduce disk throughput; Waveshare SDMMC settings are unchanged.
-- **Version identification.** The serial startup banner identifies firmware
-  version 5.0. The existing serial automation protocol and preboot controls remain.
+- **Faster guest memory access.** Guest RAM reads and writes are handled
+  inline in each instruction handler. ROM reads and screen writes go to small
+  register-preserving helpers in internal RAM, so the common instruction
+  paths stay compact and cache-friendly.
+- **Native Toolbox and OS trap dispatch.** Mac OS system calls skip the ROM
+  dispatcher's exception frame when the dispatcher is the unmodified ROM code.
+  Trap patches installed by Mac OS and extensions still run. A debugger or a
+  different ROM automatically gets the original path.
+- **Cheaper condition codes.** The generated instruction handlers compute
+  arithmetic flags with fewer instructions. A new host test checks them
+  against the original formulas.
+- **Hot code in internal RAM.** The 295 most frequently executed instruction
+  handlers and the core exception and addressing helpers now run from
+  internal SRAM.
+- **Finer, cheaper screen updates.** Screen changes are tracked in 32-pixel
+  spans at every color depth. Tiles are 32 pixels wide. A new tile writer
+  converts packed 1/2/4/8-bit pixels straight to the panel. Panel writes
+  bypass the CPU cache, which the emulator core also uses. The black-and-white
+  mode used by Speedometer's Graphics test benefits most.
+- **Mac clock now advances.** Earlier versions left the menu-bar clock at the
+  time the Mac booted, because the guest's `Time` value was never refreshed.
+  It now updates every second, as in upstream Basilisk II. This costs about
+  0.6% on Math and nothing elsewhere.
+- **Benchmark and diagnostic tools.** `tools/speedometer_benchmark.py --suite
+  rating` runs the Performance Rating unattended, including Speedometer's
+  splash and registration screens. New serial commands add a sampling
+  profiler (`PERF`), read-only guest memory inspection (`PEEK`) and a
+  full-screen pixel check (`PANEL VERIFY`). `tools/perf_report.py` symbolizes
+  profiles.
 
-See the [display review](DISPLAY_RELIABILITY_REVIEW.md) and
-[QuickDraw regression record](QUICKDRAW_REGRESSION.md) for implementation and
-comparison details. The [SD startup record](SD_STABILITY.md) documents the
-clock comparison and its limits. Board-specific SDK pins are unchanged.
+Native QuickDraw acceleration remains disabled, as in 5.0. The display
+reliability, SD clock and input fixes from 5.0 are unchanged.
+
+The [performance design guide](EMULATOR_PERFORMANCE.md) explains each change,
+its safety conditions and how to maintain it. The
+[performance report](PERFORMANCE_REPORT.md) has build-by-build measurements
+and rejected experiments. The [serial control reference](AUTOMATION.md)
+covers the benchmark runner and diagnostic commands.
 
 ## Downloads
 
 | Hardware / use | Filename | Flash offset |
 | --- | --- | --- |
-| Tab5, pre-v3, standard SDK | `M5Tab-Macintosh-v5.0.bin` | `0x0` |
-| Tab5, v3.1+ | `M5Tab-Macintosh-Rev3-v5.0.bin` | `0x0` |
-| Waveshare 10.1, pre-v3 | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin` | `0x0` |
-| Waveshare 10.1, v3.1+ | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin` | `0x0` |
-| Tab5, pre-v3, tested USB debug SDK | `M5Tab-Macintosh-USB-Debug-v5.0.bin` | `0x0` |
-| Same debug application, existing compatible Tab5 installation | `M5Tab-Macintosh-USB-Debug-v5.0-app.bin` | `0x10000` |
-| Python CLI, MCP server, and benchmark | `M5Tab-Macintosh-Host-Tools-v5.0.zip` | — |
+| Tab5, pre-v3, standard SDK | `M5Tab-Macintosh-v5.0.1.bin` | `0x0` |
+| Tab5, v3.1+ | `M5Tab-Macintosh-Rev3-v5.0.1.bin` | `0x0` |
+| Waveshare 10.1, pre-v3 | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.1.bin` | `0x0` |
+| Waveshare 10.1, v3.1+ | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.1.bin` | `0x0` |
+| Tab5, pre-v3, tested USB debug SDK | `M5Tab-Macintosh-USB-Debug-v5.0.1.bin` | `0x0` |
+| Same debug application, existing compatible Tab5 installation | `M5Tab-Macintosh-USB-Debug-v5.0.1-app.bin` | `0x10000` |
+| Python CLI, MCP server, and benchmark | `M5Tab-Macintosh-Host-Tools-v5.0.1.zip` | — |
 
 Chip revision is separate from panel or PCB revision. Rev3 images require
 ESP32-P4 revision **3.1 or newer**; revision 3.0 is not covered. Merged images
-include bootloader, partitions and application, and replace an existing launcher.
-The debug application-only image preserves bootloader, partition table and NVS
-on a compatible installation. Neither package includes a Macintosh ROM, disk
-images or credentials.
+include bootloader, partitions and application, and replace an existing
+launcher. The debug application-only image preserves bootloader, partition
+table and NVS on a compatible installation. Neither package includes a
+Macintosh ROM, disk images or credentials.
 
-The optional pre-v3 Tab5 debug profile uses Arduino 3.3.8 / IDF 5.5.4 and matches
-the development device used for hardware testing. The standard Tab5 profile
-retains its separate SDK pin for boards affected by other display behavior.
-Use the matching board/silicon image; the debug image is not for Waveshare or
-production Rev3 hardware.
+The optional pre-v3 Tab5 debug profile uses Arduino 3.3.8 / IDF 5.5.4 and
+matches the development device used for hardware testing. Use the matching
+board/silicon image; the debug image is not for Waveshare or production Rev3
+hardware.
 
 ## Verification
 
-- 46 host tests, including production display/overlay code exercised with
-  AddressSanitizer and UndefinedBehaviorSanitizer, randomized dirty ranges and
-  rotation, packed color modes, publication failure/retry, lifecycle failures,
-  HID report IDs, concurrent key ownership and release-image checks.
+- 52 host tests. New since 5.0: condition-code checks against the classic
+  formulas (exhaustive for bytes), 32-pixel span, rotation and indexed-tile
+  display cases, and benchmark-runner screen classification.
 - All five firmware profiles build. Every merged image is checked against its
-  bootloader, partition table and application at the expected flash offsets;
-  linked SDK silicon minimums are checked separately.
-- Hardware checks on a pre-v3 ESP32-P4 revision 1.3 Tab5: application flashing,
-  readback verification, SD mounting, saved-setting preservation, emulator boot,
-  serial screenshots and the Finder border comparison. The user confirmed the
-  corrected display before requesting the stable release. The final debug app
-  also passed the SD-clock comparison and retained the original disk/settings.
+  bootloader, partition table and application at the expected flash offsets.
+- Hardware checks on a pre-v3 ESP32-P4 revision 1.3 Tab5. The final
+  performance build completed eight full Performance Ratings with identical
+  CPU and Graphics results. Each run ended with a full-screen pixel check
+  showing 0 of 921,600 mismatches, and there were no resets or crashes.
+  Speedometer's Color QuickDraw test completed at 1, 2, 4 and 8 bits. The
+  released debug application was flashed and read back, printed the 5.0.1
+  banner, and booted to the Finder with saved settings intact. It then
+  completed a Performance Rating (0.765) with a clean pixel check.
 - `BUILD-MANIFEST.json` records exact source commits, component hashes and the
   hardware-tested application. `SHA256SUMS` covers downloadable assets.
 
 ## Limits and rollback
 
-This is a single scanout buffer; transient optical tearing is still possible.
-Serial screenshots show guest pixels, not physical scanout or touch overlays.
-The native QuickDraw implementation remains available for investigation but
-must pass differential checks against guest rendering before being re-enabled.
+Waveshare and production-silicon (Rev3) images share this code and build
+cleanly but were not run on hardware for this release. The optimized code
+uses about 46 KB more internal RAM; on the Tab5, free internal SRAM after
+startup is 177 KB, down from 231 KB.
 
-Waveshare and production-silicon targets are build-validated, not newly tested
-on physical hardware in this pass. Broader application coverage, long-duration
-soak testing and the performance cost of the conservative drawing path remain
-follow-up work. The SD clock change is a mitigation from a limited hardware
-sample; the exact transport failure cause has not been isolated.
-
-The prior [v4.7.1 release](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1)
+The [v5.0 release](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.0)
 remains available for rollback with a matching board/silicon image. Preserve
-known-good firmware and SD backups. Firmware rollback does not automatically
-revert settings or guest disk contents. [Serial control reference](AUTOMATION.md).
+known-good firmware and SD backups. Firmware rollback does not revert settings
+or guest disk contents.

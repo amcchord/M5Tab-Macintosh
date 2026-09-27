@@ -83,6 +83,12 @@ void TouchOverlay_CompositeTile(int tile_x, int tile_y,
                                 int tile_w, int tile_h,
                                 uint16_t *pixels);
 
+/**
+ * @brief True when the overlay captured by TouchOverlay_BeginFrame
+ *        intersects the physical tile, i.e. CompositeTile would draw.
+ */
+bool TouchOverlay_TileCovered(int tile_x, int tile_y, int tile_w, int tile_h);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

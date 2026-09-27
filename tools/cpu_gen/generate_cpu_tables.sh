@@ -52,6 +52,12 @@ sed -i '' '1i\
 ' cpustbl.cpp
 echo "  Done."
 
+# Step 6: Place profile-selected hot handlers in internal RAM
+echo ""
+echo "Step 6: Applying IRAM handler placement..."
+python3 "$SCRIPT_DIR/apply_iram_handlers.py" "$OUTPUT_DIR/cpuemu.cpp"
+echo "  Done."
+
 # List generated files
 echo ""
 echo "=== Generated files ==="

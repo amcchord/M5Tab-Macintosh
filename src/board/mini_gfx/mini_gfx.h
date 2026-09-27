@@ -38,7 +38,9 @@ public:
     MiniGfx();
 
     // Attach the DPI-owned framebuffer. Logical coordinates are landscape;
-    // storage is portrait. All publication is synchronous CPU cache writeback.
+    // storage is portrait. MiniGfx drawing goes through the CPU cache and is
+    // published by flushAll(); the emulator's tile renderer writes through
+    // scanoutFb() instead (see below).
     bool beginExternalFb(void *external_fb, int logical_w, int logical_h,
                          int panel_w, int panel_h);
 
@@ -78,17 +80,29 @@ public:
     void pushImage(int x, int y, int w, int h, const uint16_t *pixels);
 
     // Flush boot-UI damage, retaining concurrent writes or failed writeback.
+    // The written-back lines are also dropped from the cache, so no stale
+    // cached copy can later be written back over pixels stored through
+    // scanoutFb().
     void flushAll(void);
-    // Publish a half-open range of physical portrait rows after a tile batch.
+    // Publish a half-open range of physical portrait rows after a tile batch
+    // written through a cached view (needed only when scanoutIsCached()).
     bool flushRows(int first, int last);
 
     /* Raw framebuffer (portrait orientation, size panel_w * panel_h). */
     uint16_t *portraitFb(void) { return _fb; }
+    /* The same pixels through the non-cacheable PSRAM alias when the
+     * framebuffer lives in PSRAM, otherwise the cached pointer. Streaming
+     * emulator tiles this way keeps megabytes of panel traffic out of the L1
+     * data cache and L2 that the emulator core shares, and stores are visible
+     * to scanout without a writeback. */
+    uint16_t *scanoutFb(void)  { return _scanout; }
+    bool scanoutIsCached(void) const { return _scanout == _fb; }
     int       panelW(void)     { return _pw; }
     int       panelH(void)     { return _ph; }
 
 private:
     uint16_t *_fb          = nullptr;  /* RGB565, portrait, _pw x _ph */
+    uint16_t *_scanout     = nullptr;  /* _fb, or its non-cacheable alias */
     int      _lw           = 0;        /* logical landscape width  */
     int      _lh           = 0;        /* logical landscape height */
     int      _pw           = 0;        /* panel portrait width     */

@@ -140,27 +140,57 @@ typedef uae_u32 uaecptr;
 #define ALWAYS_INLINE inline __attribute__((always_inline))
 
 /*
- * Byte swapping functions for little-endian ESP32 accessing big-endian Mac data
- * Using GCC built-in byte swap for optimal performance
+ * Small globals read on every emulated instruction live in .sdata beside the
+ * global pointer, where the linker relaxes each access to one gp-relative
+ * instruction instead of a lui/addi pair.
  */
+#if defined(__riscv)
+#define SDATA_ATTR(name) __attribute__((section(".sdata." name)))
+#else
+#define SDATA_ATTR(name)
+#endif
 
-// Byte swap functions using GCC builtins (compile to single instructions)
+/*
+ * Byte swapping functions for little-endian ESP32 accessing big-endian Mac data
+ *
+ * The ESP32-P4 core has no Zbb byte-reverse instruction, so GCC lowers the
+ * bswap builtins to a libgcc call that lands in mask ROM. Every guest memory
+ * access paid that call. These shift/mask forms stay inline and use only
+ * immediates, so they also schedule well inside the opcode handlers.
+ */
 static ALWAYS_INLINE uae_u32 do_byteswap_32(uae_u32 v) {
-    return __builtin_bswap32(v);
+    return (v << 24) | ((v >> 8 & 0xff) << 16) | ((v >> 16 & 0xff) << 8) | (v >> 24);
 }
 
 static ALWAYS_INLINE uae_u16 do_byteswap_16(uae_u16 v) {
-    return __builtin_bswap16(v);
+    return (uae_u16)((v << 8) | (v >> 8));
 }
 
-// Get 32-bit big-endian value from memory (optimized with builtin swap)
+// Big-endian guest memory is accessed a byte at a time. On this core that is
+// shorter than a word access plus a shift/mask swap, and 68k long/word
+// operands at 2-byte alignment never become misaligned host accesses.
+// GCC's bswap pass would otherwise rebuild these byte loads into a word
+// load plus an expensive swap sequence; an empty asm hides the provenance
+// of the high byte(s) at no cost.
+#if defined(__riscv)
+#define UAE_OPAQUE(x) __asm__("" : "+r"(x))
+#else
+#define UAE_OPAQUE(x) ((void)0)
+#endif
+
 static ALWAYS_INLINE uae_u32 do_get_mem_long(uae_u32 *a) {
-    return __builtin_bswap32(*a);
+    const uae_u8 *p = (const uae_u8 *)a;
+    uae_u32 b0 = p[0], b2 = p[2];
+    UAE_OPAQUE(b0);
+    UAE_OPAQUE(b2);
+    return (b0 << 24) | ((uae_u32)p[1] << 16) | (b2 << 8) | p[3];
 }
 
-// Get 16-bit big-endian value from memory (optimized with builtin swap)
 static ALWAYS_INLINE uae_u32 do_get_mem_word(uae_u16 *a) {
-    return __builtin_bswap16(*a);
+    const uae_u8 *p = (const uae_u8 *)a;
+    uae_u32 b0 = p[0];
+    UAE_OPAQUE(b0);
+    return (b0 << 8) | p[1];
 }
 
 /*
@@ -177,14 +207,18 @@ static ALWAYS_INLINE uae_u32 do_get_mem_word_unswapped(const uae_u8 *a) {
 // Get 8-bit value from memory
 #define do_get_mem_byte(a) ((uae_u32)*((uae_u8 *)(a)))
 
-// Put 32-bit big-endian value to memory (optimized with builtin swap)
 static ALWAYS_INLINE void do_put_mem_long(uae_u32 *a, uae_u32 v) {
-    *a = __builtin_bswap32(v);
+    uae_u8 *p = (uae_u8 *)a;
+    p[0] = (uae_u8)(v >> 24);
+    p[1] = (uae_u8)(v >> 16);
+    p[2] = (uae_u8)(v >> 8);
+    p[3] = (uae_u8)v;
 }
 
-// Put 16-bit big-endian value to memory (optimized with builtin swap)
 static ALWAYS_INLINE void do_put_mem_word(uae_u16 *a, uae_u32 v) {
-    *a = __builtin_bswap16((uae_u16)v);
+    uae_u8 *p = (uae_u8 *)a;
+    p[0] = (uae_u8)(v >> 8);
+    p[1] = (uae_u8)v;
 }
 
 // Put 8-bit value to memory

@@ -60,7 +60,7 @@ extern void cpu_do_check_control(void);
 #if defined(ARDUINO_ARCH_ESP32) || defined(ESP32)
 volatile spcflags_t spcflags_urgent = 0;
 #endif
-struct flag_struct regflags;
+SDATA_ATTR("cpu_regflags") struct flag_struct regflags;
 
 /* Opcode of faulting instruction */
 uae_u16 last_op_for_exception_3;
@@ -69,12 +69,13 @@ uaecptr last_addr_for_exception_3;
 /* Address that generated the exception */
 uaecptr last_fault_for_exception_3;
 
-int areg_byteinc[] = { 1,1,1,1,1,1,1,2 };
-int imm8_table[] = { 8,1,2,3,4,5,6,7 };
+DRAM_ATTR int areg_byteinc[] = { 1,1,1,1,1,1,1,2 };
+DRAM_ATTR int imm8_table[] = { 8,1,2,3,4,5,6,7 };
 
-// Pre-computed movem tables (const to place in flash, not BSS)
+// Pre-computed MOVEM decode tables, consulted once per transferred register.
+// Kept in internal RAM: in flash .rodata each lookup can wait on the flash cache.
 // movem_index1: for each byte mask, find the lowest set bit index (0-7)
-const int movem_index1[256] = {
+DRAM_ATTR const int movem_index1[256] = {
     0,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
     4,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
     5,0,1,0,2,0,1,0,3,0,1,0,2,0,1,0,
@@ -94,7 +95,7 @@ const int movem_index1[256] = {
 };
 
 // movem_index2: 7 - movem_index1
-const int movem_index2[256] = {
+DRAM_ATTR const int movem_index2[256] = {
     7,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
     3,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
     2,7,6,7,5,7,6,7,4,7,6,7,5,7,6,7,
@@ -114,7 +115,7 @@ const int movem_index2[256] = {
 };
 
 // movem_next: i & (~(1 << j)) where j is the lowest set bit
-const int movem_next[256] = {
+DRAM_ATTR const int movem_next[256] = {
     0,0,0,2,0,4,4,6,0,8,8,10,8,12,12,14,
     0,16,16,18,16,20,20,22,16,24,24,26,24,28,28,30,
     0,32,32,34,32,36,36,38,32,40,40,42,40,44,44,46,
@@ -157,6 +158,9 @@ bool cpufunctbl_in_spiram = false;
 #define CPU_NATIVE_IS_LAYER 0
 #endif
 
+#ifndef CPU_NATIVE_TRAP_DISPATCH
+#define CPU_NATIVE_TRAP_DISPATCH 1
+#endif
 #ifndef CPU_NATIVE_QD_ACCEL
 #define CPU_NATIVE_QD_ACCEL 0
 #endif
@@ -690,9 +694,8 @@ void exit_m68k (void)
 #endif
 }
 
-// Place CPU registers in internal SRAM for fast access (accessed every instruction)
-// ESP32-P4 internal DRAM is ~10x faster than PSRAM
-DRAM_ATTR struct regstruct regs;
+// CPU registers are touched by every handler: internal SRAM, gp-relative.
+SDATA_ATTR("cpu_regs") struct regstruct regs;
 struct regstruct *lastint_regs_ptr = NULL;
 #define lastint_regs (*lastint_regs_ptr)
 // regs_backup removed - was 1856 bytes and never used
@@ -1007,7 +1010,10 @@ d8r_common:
 	return 0;
 }
 
-uae_u32 get_disp_ea_020 (uae_u32 base, uae_u32 dp)
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
+uae_u32 get_disp_ea_020_full (uae_u32 base, uae_u32 dp)
 {
 	int reg = (dp >> 12) & 15;
 	uae_s32 regd = regs.regs[reg];
@@ -1059,6 +1065,9 @@ uae_u32 get_disp_ea_000 (uae_u32 base, uae_u32 dp)
 #endif
 }
 
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
 void MakeSR (void)
 {
 #if 0
@@ -1078,6 +1087,9 @@ void MakeSR (void)
 			   | GET_CFLG);
 }
 
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
 void MakeFromSR (void)
 {
 	int oldm = regs.m;
@@ -1141,6 +1153,9 @@ void MakeFromSR (void)
 		SPCFLAGS_CLEAR( SPCFLAG_TRACE );
 }
 
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
 void Exception(int nr, uaecptr oldpc)
 {
 	uae_u32 currpc = m68k_getpc ();
@@ -1651,6 +1666,57 @@ void m68k_emulop(uae_u32 opcode)
 	MakeFromSR();
 }
 
+#if CPU_NATIVE_TRAP_DISPATCH
+/*
+ * Native A-line trap dispatch.
+ *
+ * For Toolbox traps the ROM dispatcher only saves D2/A2, reads the trap
+ * table entry, turns the exception frame into a return address and jumps to
+ * the routine (RTS, or RTD #4 for auto-pop traps). For OS traps it saves
+ * A2/D2/D1/A1 (and A0 unless trap bit 8 is set), calls the routine from the
+ * OS table and returns through a short epilogue that restores them and tests
+ * D0. Doing the prologue here skips the exception frame and ~10 68k
+ * instructions per call; OS routines still return into the ROM epilogue.
+ * This applies only while the line-A vector still reaches a dispatcher whose
+ * code matches this sequence exactly; a patched vector (a debugger, another
+ * ROM) takes the architectural exception path.
+ */
+static const uae_u16 kTrapDispatcher[] = {
+	0x2F0A, 0x2F02, 0x246F, 0x000A, 0x341A, 0x0C42, 0xA800, 0x6530,	// +00 save, fetch trap
+	0x0442, 0xAC00, 0x641A, 0x2F70, 0x25A0, 0x1E00, 0x0008, 0x2F4A,	// +10 Toolbox: entry
+	0x000C, 0x241F, 0x245F, 0x4E75, 0x0000, 0x0000, 0x0000, 0x0000,	// +20 return PC, RTS
+	0x2F70, 0x25A0, 0x0E00, 0x0008, 0x241F, 0x245F, 0x4E74, 0x0004,	// +30 auto-pop: RTD #4
+	0x2F01, 0x2F09, 0x3202, 0x2F4A, 0x0014, 0x0242, 0x0100, 0x6620,	// +40 OS: save, flags
+	0x1401, 0x2F08, 0x4EB0, 0x25A1, 0x0400, 0x205F, 0x225F, 0x221F,	// +50 save A0, JSR; +5A epilogue
+	0x241F, 0x245F, 0x4A40, 0x584F, 0x4E75, 0x0000, 0x0000, 0x0000,	// +60 restore, TST.W D0, RTS
+	0x1401, 0x4EB0, 0x2591, 0x225F, 0x221F, 0x241F, 0x245F, 0x4A40,	// +70 keep A0, JSR; +76 epilogue
+	0x584F, 0x4E75,
+};
+static const uae_u32 kOsEpilogueRestoreA0 = 0x5A;
+static const uae_u32 kOsEpilogueKeepA0 = 0x76;
+
+static uaecptr trap_vector_checked = 0;
+static bool trap_vector_native = false;
+
+static inline bool native_trap_dispatch_ok(void)
+{
+	const uaecptr vector = get_long(regs.vbr + 4 * 10);
+	if (vector != trap_vector_checked) {
+		trap_vector_checked = vector;
+		trap_vector_native = true;
+		for (unsigned i = 0; i < sizeof(kTrapDispatcher) / sizeof(kTrapDispatcher[0]); ++i) {
+			if (get_word(vector + 2 * i) != kTrapDispatcher[i]) {
+				trap_vector_native = false;
+				break;
+			}
+		}
+	}
+	// Exception entry would switch to the supervisor stack and clear T/M;
+	// the shortcut is exact only when those are already in that state.
+	return trap_vector_native && regs.s && !regs.m && !regs.t0 && !regs.t1;
+}
+#endif
+
 void REGPARAM2 op_illg (uae_u32 opcode)
 {
 	uaecptr pc = m68k_getpc ();
@@ -1688,6 +1754,61 @@ void REGPARAM2 op_illg (uae_u32 opcode)
 					return;
 				}
 			}
+		}
+#endif
+#if CPU_NATIVE_TRAP_DISPATCH
+		if (native_trap_dispatch_ok() && !(opcode & 0x0800)) {
+			// OS trap: the stack, registers and CCR the ROM prologue leaves at
+			// its JSR, including the frame slot the epilogue skips and the
+			// return address it finally pops.
+			uaecptr sp = m68k_areg(regs, 7);
+			MakeSR();
+			put_long(sp - 4, pc + 2);
+			put_word(sp - 6, (pc >> 16) & 0xffff);
+			put_word(sp - 8, regs.sr);
+			put_long(sp - 12, m68k_areg(regs, 2));
+			put_long(sp - 16, m68k_dreg(regs, 2));
+			put_long(sp - 20, m68k_dreg(regs, 1));
+			put_long(sp - 24, m68k_areg(regs, 1));
+			sp -= 24;
+			const bool keep_a0 = (opcode & 0x0100) != 0;
+			uae_u32 flag_value;
+			if (!keep_a0) {
+				sp -= 4;
+				put_long(sp, m68k_areg(regs, 0));
+				flag_value = m68k_areg(regs, 0);		// MOVE.L A0,-(SP)
+			} else {
+				flag_value = (uae_u32)(uae_s32)(uae_s8)opcode;	// MOVE.B D1,D2
+			}
+			sp -= 4;
+			put_long(sp, trap_vector_checked + (keep_a0 ? kOsEpilogueKeepA0 : kOsEpilogueRestoreA0));
+			m68k_areg(regs, 7) = sp;
+			m68k_areg(regs, 2) = pc + 2;
+			m68k_dreg(regs, 1) = (m68k_dreg(regs, 1) & 0xffff0000) | (opcode & 0xffff);
+			m68k_dreg(regs, 2) = (m68k_dreg(regs, 2) & 0xffff0000) | (opcode & 0x01ff);
+			SET_NFLG(((uae_s32)flag_value) < 0);
+			SET_ZFLG(flag_value == 0);
+			SET_VFLG(0);
+			SET_CFLG(0);
+			m68k_setpc(get_long(0x0400 + (opcode & 0x00ff) * 4));
+			return;
+		}
+		if ((opcode & 0x0800) && native_trap_dispatch_ok()) {
+			// Same register, stack and CCR state as the ROM dispatcher leaves:
+			// the routine address from the trap table, the caller's return
+			// address pushed unless auto-pop, and flags from MOVE.L (SP)+,D2.
+			const uaecptr routine = get_long(0x0E00 + (opcode & 0x03FF) * 4);
+			if (!(opcode & 0x0400)) {
+				m68k_areg(regs, 7) -= 4;
+				put_long(m68k_areg(regs, 7), pc + 2);
+			}
+			const uae_u32 d2 = m68k_dreg(regs, 2);
+			SET_NFLG(((uae_s32)d2) < 0);
+			SET_ZFLG(d2 == 0);
+			SET_VFLG(0);
+			SET_CFLG(0);
+			m68k_setpc(routine);
+			return;
 		}
 #endif
 		Exception(0xA,0);

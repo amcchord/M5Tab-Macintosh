@@ -37,21 +37,21 @@
 #include "compiler/compemu.h"
 
 
-// RAM and ROM pointers - DRAM_ATTR ensures fast internal SRAM placement.
-// These are loaded on every fast-path memory access; keeping them out of
-// PSRAM saves multiple cache-miss cycles per 68k instruction.
+// RAM, ROM and frame-buffer layout. The ones read by the memory fast paths
+// and slow-path thunks live in .sdata, so the linker turns each access into
+// a single gp-relative load.
 DRAM_ATTR uint32 RAMBaseMac = 0;	// RAM base (Mac address space) gb-- initializer is important
-DRAM_ATTR uint8 *RAMBaseHost;		// RAM base (host address space)
-DRAM_ATTR uint32 RAMSize;			// Size of RAM
-DRAM_ATTR uint32 ROMBaseMac;		// ROM base (Mac address space)
-DRAM_ATTR uint8 *ROMBaseHost;		// ROM base (host address space)
-DRAM_ATTR uint32 ROMSize;			// Size of ROM
+SDATA_ATTR("cpu_ram_base") uint8 *RAMBaseHost;		// RAM base (host address space)
+SDATA_ATTR("cpu_ram_size") uint32 RAMSize;			// Size of RAM
+SDATA_ATTR("cpu_rom_base_mac") uint32 ROMBaseMac;		// ROM base (Mac address space)
+SDATA_ATTR("cpu_rom_base") uint8 *ROMBaseHost;		// ROM base (host address space)
+SDATA_ATTR("cpu_rom_size") uint32 ROMSize;			// Size of ROM
 
 #if !REAL_ADDRESSING
 // Mac frame buffer
-DRAM_ATTR uint8 *MacFrameBaseHost;	// Frame buffer base (host address space)
-DRAM_ATTR uint32 MacFrameSize;		// Size of frame buffer
-DRAM_ATTR int MacFrameLayout;		// Frame buffer layout
+SDATA_ATTR("cpu_frame_base") uint8 *MacFrameBaseHost;	// Frame buffer base (host address space)
+SDATA_ATTR("cpu_frame_size") uint32 MacFrameSize;		// Size of frame buffer
+SDATA_ATTR("cpu_frame_layout") int MacFrameLayout;		// Frame buffer layout
 #endif
 
 #if DIRECT_ADDRESSING
