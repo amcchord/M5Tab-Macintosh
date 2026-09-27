@@ -594,3 +594,80 @@ comment, merge, or contributor-branch change was made.
 Next: merge PR #21 and publish the authorized v5.0 stable release with the
 tested SD clock. The release manifest and local release-status.json retain
 exact commit, tag, asset hashes and publication outcome.
+
+
+## Speedometer interpreter and display pass — 2026-09-26/27
+
+Austin asked for better Speedometer 4.02 Performance Rating CPU and Graphics
+(v5.0: CPU 0.545, Graphics 0.242, Disk 1.02, Math 6.681) with no stability
+regression, and authorized free use of the attached Tab5 test device. Work is
+on local branch `claude/speedometer-perf` in `worktrees/speedometer-perf`,
+based on v5.0 `1468a91`. It is uncommitted, not pushed, and has no release
+actions. The control checkout's pre-existing uncommitted work is untouched.
+
+Method: added a firmware `PERF` sampler, `PEEK` and `PANEL VERIFY`, plus a
+symbolizing `tools/perf_report.py`, then A/B-tested each change with
+repeated single-test ratings. Every build flashed (app only, 0x10000) is
+saved with its patch under `artifacts/speedometer-perf/builds/`, and runs are
+under `runs/` and `tool-runs/`.
+
+Kept: inline guest-RAM access with IRAM slow-path thunks (CPU 0.545→0.773),
+framebuffer stores in the thunk, 32-pixel dirty spans/tiles with a packed
+indexed tile writer, native Toolbox trap dispatch behind a ROM-signature
+check, 295 IRAM handlers, shifted-operand ALU flags (CPU 0.804),
+non-cacheable scanout writes (Graphics 0.398→0.492), and `.sdata` hot
+globals. Rejected: chained dispatch (0.728), fence removal, logical-flag
+rewrite and 64-pixel tiles (neutral). Native A-line QuickDraw was shelved:
+Mac OS 8 routes QuickDraw through RAM patches and private ROM vectors. The
+prototype patch is in `artifacts/speedometer-perf/shelved/`.
+
+Benchmark runner: `--suite rating` now runs Performance Rating unattended.
+It recognizes the OCR-unreadable splash by pixels (Austin had been clicking
+it by hand) and finds the desktop alias from its OCR label. A stale icon
+coordinate had opened "Browse the Internet" instead. A text-only splash
+fallback also looped forever when OCR dropped "File" beside an open result
+window; it now requires the Tests/Analysis titles to be unreadable.
+`test_speedometer_benchmark.py` covers both classifiers.
+
+Found and fixed a pre-existing bug: the guest `Time` global never advanced,
+so the menu-bar clock stayed at its boot value. The emulator thread now
+refreshes it on the 1 Hz interrupt, as upstream Basilisk II does. A
+Math-only A/B (3 runs each) measured 9.533 on final-23 and 9.475 on
+clock-24, a 0.6% cost. Math is now 9.45–9.48 in every procedure, against
+9.30–9.68 before.
+
+Verification: 52 host tests pass; all five profiles build with PlatformIO
+Core 6.2.0 (`.build/release-tools/bin/pio`); the debug build is
+byte-identical to the flashed clock-24 image
+(`2e1074ced92fb37b500d53dd4e26e0453666dd9f46ab11c0154d2f9c2e100de9`).
+Soaks gave 5 full ratings on final-23 (CPU 0.803, Graphics 0.496–0.497,
+PR 0.761–0.766) and 3 on clock-24 (CPU 0.804, Graphics 0.496–0.497,
+PR 0.765–0.766). Each run had 0/921,600 panel mismatches, no reboot and no
+crash markers. Color QuickDraw passed at 1/2/4/8-bit depth.
+
+Risks: Waveshare has not run this branch. Tab5 internal SRAM free after init
+fell from 231 KB to 177 KB because of the IRAM handlers.
+
+Next: Austin reviews the diff and decides whether to commit/PR. Waveshare
+hardware validation comes before release.
+
+
+## v5.0.1 release preparation — 2026-09-27
+
+Austin approved releasing the performance work as 5.0.1, explicitly waiving
+Waveshare hardware testing. Bumped `M5TAB_FIRMWARE_VERSION` to 5.0.1, rewrote
+RELEASE_NOTES.md and the README release/architecture sections, and added
+EMULATOR_PERFORMANCE.md as the design and maintenance guide. Before release,
+fixed the Speedometer runner's text splash fallback (it looped when OCR
+dropped "File") and added `test_speedometer_benchmark.py`; 52 host tests pass.
+
+Built the four release images with `scripts/build_release.sh v5.0.1`
+(PlatformIO Core 6.2.0) and the debug profile. The debug bootloader and
+partition table are byte-identical to v5.0's. Hardware gate
+(`artifacts/release-v5.0.1/hardware_gate.py`): app-only flash of SHA256
+`9dcf67f6…`, readback match, `Firmware: 5.0.1` banner, settings unchanged,
+Finder desktop. The gate rating scored CPU 0.804, Graphics 0.495, Disk 1.03,
+Math 9.431 and PR 0.765, with `PANEL VERIFY` 0/921,600.
+
+Next: merge, tag v5.0.1, publish the verified assets, and record the outcome
+in `artifacts/release-v5.0.1/release-status.json`.

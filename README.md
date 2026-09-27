@@ -46,33 +46,38 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## v5.0 — Stable
+## v5.0.1 — Performance
 
-[Download v5.0 — Stable](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.0).
-This release focuses on display correctness and reliability.
+[Download v5.0.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.0.1).
+This release makes the emulator substantially faster without changing what
+Mac OS draws.
 
-- **Solid Finder borders:** native QuickDraw acceleration is disabled after
-  hardware A/B testing traced dotted scrollbar/window borders to that path.
-  Mac OS handles drawing through its original QuickDraw implementation.
-- **Reliable screen updates:** complete dirty-range tracking, coherent palette
-  and mode changes, retained updates after publication failures, and a shared
-  panel framebuffer path for both boards.
-- **Conservative Tab5 SD access:** SPI runs at 10 MHz after intermittent
-  startup CRC failures at 25 MHz; the same card passed repeated startup checks.
-  Disk throughput may be lower.
-- **Consistent rotation and overlays:** boot UI and emulator tiles use the same
-  rotation; keyboard/game overlays use a stable snapshot for each frame batch.
-- **Safer lifecycle and input:** renderer shutdown waits for completion, serial
-  captures protect framebuffer lifetime, and mouse report IDs and shared key
-  ownership are handled consistently.
+| Speedometer 4.02 (Quadra 605 = 1.0) | v5.0 | v5.0.1 |
+|---|---:|---:|
+| CPU | 0.545 | **0.804** |
+| Graphics | 0.242 | **0.496** |
+| Math | 6.68 | **9.47** |
+| Performance Rating | 0.458 | **0.765** |
 
-All 46 host tests pass, including native sanitizer tests, and all five firmware
-profiles build. Hardware validation used a pre-v3 Tab5 with the USB debug SDK;
-other board/silicon combinations remain build-validated. Disabling native
-QuickDraw may reduce graphics throughput; earlier acceleration benchmark
-scores do not describe v5.0. SDK pins and serial protocol remain unchanged.
-See [release notes](RELEASE_NOTES.md), the [display review](DISPLAY_RELIABILITY_REVIEW.md),
-and the [QuickDraw comparison](QUICKDRAW_REGRESSION.md).
+- **Faster interpreter:** guest RAM access is inlined into each instruction,
+  ROM and screen accesses use small register-preserving helpers, Mac OS system
+  calls skip the ROM dispatcher when it is safe, condition codes take fewer
+  instructions, and the hottest 295 handlers run from internal RAM.
+- **Faster screen updates:** changes are tracked in 32-pixel spans at every
+  color depth, a new tile writer converts packed pixels straight to the panel,
+  and panel writes bypass the CPU cache shared with the emulator.
+- **Mac clock fixed:** the menu-bar clock now advances; previous versions left
+  it at the boot time.
+- **Unattended benchmarking and profiling:** `tools/speedometer_benchmark.py
+  --suite rating`, the `PERF` sampling profiler, `PEEK` and `PANEL VERIFY`.
+
+52 host tests pass and all five firmware profiles build. Hardware testing used
+a pre-v3 Tab5: eight full Performance Ratings with a 0-mismatch full-screen
+pixel check after each. Waveshare and Rev3 images share the code but were not
+run on hardware for this release. Native QuickDraw acceleration stays disabled.
+See the [release notes](RELEASE_NOTES.md), the
+[performance design guide](EMULATOR_PERFORMANCE.md) and the
+[performance report](PERFORMANCE_REPORT.md).
 
 ### Choose the image for your chip revision
 
@@ -81,12 +86,12 @@ Check the serial boot log or run `esptool --port PORT chip-id`.
 
 | Board / ESP32-P4 silicon | Download filename | PlatformIO environment |
 |---|---|---|
-| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v5.0.bin` | `esp32p4_pioarduino` |
-| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v5.0.bin` | `esp32p4_pioarduino_rev3` |
-| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin` | `waveshare_p4_101` |
-| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin` | `waveshare_p4_101_rev3` |
+| Tab5, pre-v3 engineering sample | `M5Tab-Macintosh-v5.0.1.bin` | `esp32p4_pioarduino` |
+| Tab5, v3.1 or newer | `M5Tab-Macintosh-Rev3-v5.0.1.bin` | `esp32p4_pioarduino_rev3` |
+| Waveshare 10.1, pre-v3 engineering sample | `M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.1.bin` | `waveshare_p4_101` |
+| Waveshare 10.1, v3.1 or newer | `M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.1.bin` | `waveshare_p4_101_rev3` |
 
-The separate `M5Tab-Macintosh-USB-Debug-v5.0.bin` download is the tested
+The separate `M5Tab-Macintosh-USB-Debug-v5.0.1.bin` download is the tested
 **pre-v3 Tab5** configuration using Arduino 3.3.8 / IDF 5.5.4. It is useful for
 serial testing and for the SD-mount issue observed with the older standard Tab5
 SDK on the development unit. The standard profiles remain unchanged because
@@ -124,11 +129,22 @@ Elecrow CrowPanel Advanced 9-inch support (#10) is still under investigation.
 Its panel, audio, SD wiring and 1024×600 scaling need a separate board port;
 these downloads do not target it. See [the issue review](ISSUE_FIXES.md).
 
+## Previous release: v5.0
+
+[v5.0 — Stable](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.0)
+fixed dotted Finder borders by disabling native QuickDraw acceleration, unified
+display publication and dirty tracking across both boards, lowered the Tab5 SD
+clock to 10 MHz after startup CRC failures, and fixed rotation, overlay,
+lifecycle and input issues. All of it remains in v5.0.1; see the
+[display review](DISPLAY_RELIABILITY_REVIEW.md),
+[QuickDraw comparison](QUICKDRAW_REGRESSION.md) and
+[SD startup record](SD_STABILITY.md).
+
 ## Previous release: v4.7.1
 
 [v4.7.1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1)
 added faster CRC-checked serial screenshots, replay-safe input, and complete
-preboot settings control. Those features remain available in v5.0; see
+preboot settings control. Those features remain available in v5.0.1; see
 [AUTOMATION.md](AUTOMATION.md) for commands and protocol details.
 
 ## Previous release: v4.7
@@ -326,16 +342,16 @@ Q950) or `0x0276` (Classic) will boot. The default file path is
 
 ## Overview
 
-This project runs a **Motorola 68040** emulator that can boot real Macintosh ROMs and run genuine classic Mac OS software. Performance is comparable to a **Macintosh Quadra 610** (25 MHz 68040), achieving **24 FPS video** and **2-3 MIPS** CPU speed. The emulation includes:
+This project runs a **Motorola 68040** emulator that can boot real Macintosh ROMs and run genuine classic Mac OS software. Speedometer 4.02 rates v5.0.1 at **0.77 of a Macintosh Quadra 605** overall (CPU 0.80, Graphics 0.50, Math 9.5). The emulation includes:
 
-- **CPU**: Motorola 68040 emulation with FPU (68881) — 2-3 MIPS
+- **CPU**: Motorola 68040 interpreter with FPU (68881), native trap dispatch and hot handlers in internal RAM
 - **RAM**: Configurable from 4MB to 16MB (allocated from ESP32-P4's 32MB PSRAM)
 - **Display**: 640×360 virtual display (2× scaled to 1280×720 physical display), supporting 1/2/4/8-bit color depths at 24 FPS
 - **Storage**: Hard disk and CD-ROM images loaded from SD card
 - **Input**: Capacitive touchscreen, USB keyboard/mouse, and auto-detected official Tab5 Keyboard
 - **Audio**: Classic Mac sound output via ES8388 codec (toggleable in boot GUI)
 - **Networking**: WiFi internet access via NAT router (TCP, UDP, ICMP, DHCP)
-- **Video**: Optimized pipeline with write-time dirty tracking, double-buffered DMA, and tile-based rendering
+- **Video**: Write-time dirty tracking in 32-pixel spans and tile-based rendering straight into the panel framebuffer
 
 ### Closed-loop host testing
 
@@ -351,6 +367,12 @@ preboot settings: use `boot-enter`, `boot-get`, `boot-list`, `boot-set`, and
 `boot-start` to run tests with different disk images, RAM, display, audio,
 and WiFi settings. See
 [`AUTOMATION.md`](AUTOMATION.md) for setup and commands.
+
+`tools/speedometer_benchmark.py --suite rating` runs Speedometer's Performance
+Rating unattended and records the scores. Add `--profile HZ` to sample the
+emulator with the firmware's `PERF` profiler, then run `tools/perf_report.py`
+for a per-function and per-opcode breakdown. `PANEL VERIFY` checks every
+displayed pixel against the guest framebuffer.
 
 ## Hardware
 
@@ -383,25 +405,29 @@ See [boardConfig.md](boardConfig.md) for detailed pin mappings and hardware docu
 
 ### Dual-Core Design
 
-The emulator leverages the ESP32-P4's dual-core RISC-V architecture for optimal performance:
+The emulator uses the ESP32-P4's two RISC-V cores for separate jobs:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        ESP32-P4 (400MHz)                        │
+│                        ESP32-P4 (360 MHz)                       │
 ├────────────────────────────┬────────────────────────────────────┤
 │         CORE 0             │              CORE 1                │
 │    (Video & I/O Core)      │       (CPU Emulation Core)         │
 ├────────────────────────────┼────────────────────────────────────┤
-│  • Video rendering task    │  • 68040 CPU interpreter           │
-│  • Double-buffered DMA     │  • Fast-path memory access         │
-│  • 2×2 pixel scaling       │  • Write-time dirty marking        │
-│  • Input task (60Hz)       │  • Batch instruction execution     │
+│  • Tile renderer           │  • 68040 CPU interpreter           │
+│  • 2×2 scaling, rotation   │  • Inline guest-RAM access         │
+│  • Uncached panel writes   │  • Native A-line trap dispatch     │
+│  • Input task (60Hz)       │  • Write-time dirty spans          │
 │  • USB HID processing      │  • ROM patching                    │
 │  • Audio output (ES8388)   │  • Disk I/O                        │
 │  • Network RX polling      │                                    │
-│  • Event-driven @ 24 FPS   │                                    │
+│  • Serial automation       │                                    │
 └────────────────────────────┴────────────────────────────────────┘
 ```
+
+Both cores share the L1 data cache, L2 cache and PSRAM bandwidth, so display
+work on core 0 slows the emulator on core 1. The display path writes panel
+pixels through an uncached view of PSRAM to limit that interference.
 
 ### Memory Layout
 
@@ -413,75 +439,94 @@ The emulator leverages the ESP32-P4's dual-core RISC-V architecture for optimal 
 ├────────────────────────────┼─────────────────────────────────┤
 │  Mac ROM (~1MB)            │  Q650.ROM or compatible         │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Mac Frame Buffer (230KB)  │  640×360 @ 8-bit indexed color  │
+│  Mac Frame Buffer (230KB)  │  640×360, packed 1/2/4/8-bit    │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Display Buffer (1.8MB)    │  1280×720 @ RGB565              │
+│  Panel Frame Buffer (1.8MB)│  1280×720 RGB565, written       │
+│                            │  through the uncached alias     │
+├────────────────────────────┼─────────────────────────────────┤
+│  Opcode table (256KB)      │  cpufunctbl; PSRAM when no      │
+│  Memory-bank table (256KB) │  256KB internal block is free   │
 ├────────────────────────────┼─────────────────────────────────┤
 │  Free PSRAM                │  Varies based on RAM selection  │
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│                    Internal SRAM (Priority)                  │
+│                    Internal SRAM                             │
 ├──────────────────────────────────────────────────────────────┤
-│  CPU Function Table        │  cpufunctbl - hot path lookup   │
+│  Hot code (IRAM)           │  295 opcode handlers, memory    │
+│                            │  thunks, exception helpers      │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Memory Bank Pointers      │  256KB - memory banking         │
+│  CPU registers & globals   │  gp-relative .sdata             │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Palette (512 bytes)       │  256 RGB565 entries             │
+│  Dirty-span flags (~7KB)   │  1 byte per 32 guest pixels     │
 ├────────────────────────────┼─────────────────────────────────┤
-│  Dirty Tile Bitmap         │  144 bits (write-time tracking) │
-├────────────────────────────┼─────────────────────────────────┤
-│  Tile Render Lock Bitmap   │  144 bits (race prevention)     │
-├────────────────────────────┼─────────────────────────────────┤
-│  Double-Buffered Tile Bufs │  ~28KB (DMA pipelining)         │
+│  Palette                   │  256 RGB565 entries             │
 └──────────────────────────────────────────────────────────────┘
 ```
 
+On the Tab5 about 177 KB of internal SRAM remains free after startup.
+
 ### Video Pipeline
 
-The video system uses a highly optimized pipeline with **write-time dirty tracking** to minimize CPU overhead:
+The video system uses **write-time dirty tracking**, so the renderer never
+compares frames:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    Video Pipeline Architecture                   │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
-│  ┌──────────────┐    marks dirty    ┌─────────────────────────┐ │
-│  │  68040 CPU   │ ─────────────────▶│   Dirty Tile Bitmap     │ │
-│  │  (Core 1)    │                   │   (16×9 = 144 tiles)    │ │
+│  ┌──────────────┐  store, fence,    ┌─────────────────────────┐ │
+│  │  68040 CPU   │  set flag byte    │   Dirty-span flags      │ │
+│  │  (Core 1)    │ ─────────────────▶│   1 byte / 32 pixels    │ │
 │  └──────────────┘                   └─────────────────────────┘ │
 │         │                                      │                │
-│         │ writes                               │ read & clear   │
+│         │ writes                               │ atomic swap    │
 │         ▼                                      ▼                │
 │  ┌──────────────┐                   ┌─────────────────────────┐ │
 │  │ Mac Frame    │                   │    Video Task (Core 0)  │ │
-│  │   Buffer     │ ─────────────────▶│  • Tile snapshot        │ │
-│  │ (640×360)    │   read tiles      │  • Palette lookup       │ │
-│  └──────────────┘                   │  • 2×2 scaling          │ │
+│  │   Buffer     │ ─────────────────▶│  • Spans → 32×40 tiles  │ │
+│  │ (640×360)    │   read tiles      │  • Packed-pixel decode  │ │
+│  └──────────────┘                   │  • 2×2 scale + rotate   │ │
 │                                     └─────────────────────────┘ │
 │                                                │                │
-│                                                │ push tiles     │
+│                                                │ uncached write │
 │                                                ▼                │
 │                                     ┌─────────────────────────┐ │
-│                                     │   MIPI-DSI Display      │ │
-│                                     │      (1280×720)         │ │
+│                                     │   Panel framebuffer     │ │
+│                                     │   → MIPI-DSI (1280×720) │ │
 │                                     └─────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 #### Key Features
 
-1. **Write-Time Dirty Tracking**: When the 68040 CPU writes to the framebuffer, the memory system immediately marks the affected tile(s) as dirty. This eliminates expensive per-frame comparisons.
+1. **Write-time dirty spans**: every guest store to the framebuffer stores its
+   pixels, fences, then sets one flag byte for each 32-pixel span it touched.
+   The span covers 32 pixels at every color depth (4 bytes at 8-bit, 1 byte at
+   1-bit), so black-and-white drawing no longer redraws large areas.
 
-2. **Tile-Based Rendering**: The screen is divided into a 16×9 grid of 40×40 pixel tiles (144 total). Only dirty tiles are re-rendered each frame, typically reducing video CPU time by 60-90%.
+2. **Tile-based rendering**: the screen is a grid of 32×40 tiles (20×9 on the
+   Tab5, 20×10 on Waveshare). The video task swaps out a word of flags at a
+   time and redraws only the affected tiles. A store that lands while a tile is
+   being drawn sets its flag again, so the tile is redrawn next frame.
 
-3. **Double-Buffered DMA**: Render to one buffer while DMA pushes another to the display. Both tile rendering and full-frame streaming use this pipelining for maximum throughput.
+3. **Direct packed-pixel tile writer**: 1/2/4/8-bit guest pixels are decoded
+   and written, scaled 2×2 and rotated, straight into the panel framebuffer
+   using a palette table of pixel pairs. Tiles under a touch overlay use the
+   compositing path.
 
-4. **Per-Tile Render Locks**: Atomic locks prevent race conditions during tile snapshot. If the CPU writes to a tile being rendered, it's automatically re-queued for the next frame—ensuring glitch-free display.
+4. **Uncached panel writes**: tiles are written through PSRAM's non-cacheable
+   alias, so rendering neither evicts the emulator's cache lines nor needs a
+   cache writeback per tile.
 
-5. **Multi-Depth Support**: Supports 1/2/4/8-bit indexed color modes with packed pixel decoding. Mac OS can switch between depths via the Monitors control panel.
+5. **Multi-depth support**: 1/2/4/8-bit indexed color; Mac OS can switch depth
+   in the Monitors control panel.
 
-6. **Event-Driven Refresh at 24 FPS**: Cinema-standard frame rate with task notifications—the video task sleeps until signaled, reducing idle polling overhead.
+6. **Verification**: the `PANEL VERIFY` serial command compares every panel
+   pixel with the guest framebuffer decoded through the live palette.
+
+See [EMULATOR_PERFORMANCE.md](EMULATOR_PERFORMANCE.md) for the design details.
 
 ---
 
@@ -602,7 +647,7 @@ esptool.py --chip esp32p4 \
     --port /dev/ttyACM0 \
     --baud 921600 \
     write_flash \
-    0x0 M5Tab-Macintosh-v5.0.bin
+    0x0 M5Tab-Macintosh-v5.0.1.bin
 ```
 
 **Note**: Replace `/dev/ttyACM0` with your actual port:
@@ -644,30 +689,30 @@ platform requires it). For an isolated build environment:
 python3.13 -m venv .build/release-tools
 .build/release-tools/bin/python -m pip install platformio==6.2.0 esptool==5.4.0
 PATH="$PWD/.build/release-tools/bin:$PATH" PIO="$PWD/.build/release-tools/bin/pio" \
-  ./scripts/build_release.sh v5.0
+  ./scripts/build_release.sh v5.0.1
 ```
 
 For an existing supported toolchain, use the release script:
 
 ```bash
 # Create all four versioned firmware images
-./scripts/build_release.sh v5.0
+./scripts/build_release.sh v5.0.1
 
 # Or build only production-silicon Waveshare firmware
-./scripts/build_release.sh v5.0 waveshare-rev3
+./scripts/build_release.sh v5.0.1 waveshare-rev3
 
 # Output:
-#   release/M5Tab-Macintosh-v5.0.bin
-#   release/M5Tab-Macintosh-Rev3-v5.0.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.bin
-#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.bin
+#   release/M5Tab-Macintosh-v5.0.1.bin
+#   release/M5Tab-Macintosh-Rev3-v5.0.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-v5.0.1.bin
+#   release/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.0.1.bin
 ```
 
 The release binary can be flashed with a single esptool command:
 
 ```bash
 esptool --chip esp32p4 --port /dev/cu.usbmodem* \
-    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v5.0.bin
+    --baud 230400 write-flash 0x0 release/M5Tab-Macintosh-v5.0.1.bin
 ```
 
 ---

@@ -1,5 +1,55 @@
 # M5Tab-Macintosh workbook
 
+## v5.0.1 Performance release — 2026-09-27
+
+Austin asked to raise Speedometer 4.02 Performance Rating CPU and Graphics
+toward 1.0 from v5.0 without stability regressions. Austin then approved release
+as 5.0.1, explicitly accepting that the Waveshare boards would not be
+hardware-tested. Work is on branch `claude/speedometer-perf`
+(`worktrees/speedometer-perf`), based on v5.0 `1468a91`. The control
+checkout's own uncommitted work is untouched.
+
+| | CPU | Graphics | Disk | Math | PR |
+|---|---:|---:|---:|---:|---:|
+| v5.0 | 0.545 | 0.244 | 1.02 | 6.68 | 0.458 |
+| v5.0.1 | 0.803–0.804 | 0.495–0.497 | 1.029–1.033 | 9.43–9.48 | 0.765–0.766 |
+
+The changes are an inline guest-RAM fast path with out-of-line IRAM thunks,
+native Toolbox/OS trap dispatch guarded by a ROM signature check, cheaper
+generated flags, and 295 hot handlers in IRAM. On the display side there are
+32-pixel dirty spans with 32×40 tiles, a packed indexed tile writer and
+uncached scanout writes. The release also fixes the frozen guest clock, which
+costs 0.6% on Math. Documentation:
+[EMULATOR_PERFORMANCE.md](EMULATOR_PERFORMANCE.md) (design and maintenance),
+[PERFORMANCE_REPORT.md](PERFORMANCE_REPORT.md) (measurements and rejected
+experiments) and [AUTOMATION.md](AUTOMATION.md) (`--suite rating`, `PERF`,
+`PEEK`, `PANEL VERIFY`).
+
+Verification: 52 host tests. All five profiles build with
+`.build/release-tools/bin/pio` (PlatformIO Core 6.2.0); Core 6.1.18 cannot
+install the Waveshare/rev3 platform. Eight soak ratings on the final
+performance code each ended with 0/921,600 panel mismatches, with no resets
+or crash markers. Color QuickDraw completed at all depths. Release gate for
+the 5.0.1 debug app (SHA256
+`9dcf67f6bb9fb2648b9bd86bbd7e797051eb0a682461d3364096af8d2beb5d2d`): app-only
+flash, readback match, `Firmware: 5.0.1` banner, settings preserved, Finder
+desktop, one Performance Rating (PR 0.765) and a clean `PANEL VERIFY`. The
+Tab5 runs that image.
+
+Evidence, packaging script and hardware gate are in the control checkout's
+`artifacts/release-v5.0.1/`; per-build experiments are in
+`artifacts/speedometer-perf/`. Publication outcome (commit, tag, asset
+digests) is recorded in `artifacts/release-v5.0.1/release-status.json`.
+To roll back, flash the matching v5.0 image, or the v5.0 debug app
+`artifacts/release-v5.0/debug-components/firmware.bin` at 0x10000.
+
+Risks: Waveshare and Rev3 images are build-validated only. IRAM grew ~46 KB,
+and Tab5 internal SRAM free after init fell from 231 KB to 177 KB. Native
+A-line QuickDraw stays disabled; it is unsafe on Mac OS 8 without
+ROM-internal hooks.
+
+Next: user hardware testing, especially on Waveshare.
+
 ## v5.0 Stable release — 2026-09-26
 
 Austin approved the corrected Tab5 display and explicitly requested publication
