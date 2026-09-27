@@ -507,3 +507,33 @@ this candidate. Single-buffer tearing, hardware compatibility and performance
 remain to be tested. Next: Austin flashes the matching board/silicon profile
 and follows the hardware checklist, then integrates with performance work
 if the result is accepted.
+
+
+## Tab5 flash and dotted-border A/B — 2026-09-26
+
+Austin explicitly authorized flashing the connected Tab5, then reported dotted
+Finder borders around the scrollbars. The connected device is ESP32-P4 rev1.3.
+The full existing 6 MiB application partition was backed up, partition layout
+verified, and the 82e5266 pre-v3 debug app flashed at 0x10000. Full readback
+SHA256 matched 951e58e01d66d65dea449db1993101779d7ca997a8abea3c985a35f4b470a287.
+SD mounted, the emulator initialized and saved settings were unchanged.
+
+Serial capture confirmed the border problem already exists in guest pixels.
+A second build changed only CPU_NATIVE_QD_ACCEL from 1 to 0. It was flashed and
+verified by esptool, booted the same disk/settings, and restored solid Finder
+borders. The matched lower border changed from 160 black/160 white pixels to
+320 black pixels. Native counters were all zero in the comparison. The enabled
+run had shape and copy calls but no native lines; the exact faulty primitive
+has not been isolated.
+
+Current hardware app SHA256:
+d79cac3ca0745b242d60d363701fc7e3ab1cb54af56191f6a762a51d550aee6d.
+The branch now defaults native QuickDraw off on every profile, preserving the
+display pipeline cleanup. This prioritizes guest drawing correctness and may
+reduce graphics throughput; no new speed claim is made. All 46 host tests
+passed after the flag change. See QUICKDRAW_REGRESSION.md for the final build
+matrix, source/evidence mapping and rollback command. Evidence is retained
+under artifacts/display-reliability-20260926/{hardware-flash,quickdraw-regression}
+in the control checkout. Bootloader/partition table/NVS were not reflashed.
+No push or published release. Next: Austin checks physical display behavior;
+re-enable native drawing only after differential guest-pixel validation.

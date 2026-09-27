@@ -6,6 +6,13 @@ reviewing `v3.4.2..v4.7.1` (12 commits, 86 changed files). It is based on
 `codex/display-reliability`. The embedded version remains 4.7.1; this is a
 hardware-test candidate, not a published release.
 
+**Hardware follow-up:** Austin authorized flashing, then reported dotted Finder
+borders. The same scene became solid when native QuickDraw was disabled with
+the display pipeline unchanged. `CPU_NATIVE_QD_ACCEL` is now 0 by default in
+all profiles. [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md) records the A/B
+evidence. This supersedes the initial no-hardware-test status below; the
+earlier verification section documents the original 82e5266 candidate.
+
 The control checkout at `/Users/austinmcchord/Development/M5Tab-Macintosh`
 already contained uncommitted performance work. It was preserved. This work
 uses the attached checkout at

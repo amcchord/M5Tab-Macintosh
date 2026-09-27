@@ -1,6 +1,6 @@
 # M5Tab-Macintosh workbook
 
-## Display reliability candidate — 2026-09-26
+## Display reliability and QuickDraw regression — 2026-09-26
 
 Active work is on local branch `codex/display-reliability`, based on v4.7.1,
 in the attached checkout
@@ -22,10 +22,19 @@ in this checkout's ignored `artifacts/display-reliability/`. Candidate images
 are retained under the control checkout's
 `artifacts/display-reliability-20260926/`, with source SHA and checksums.
 
-Next action: Austin flashes the matching candidate and performs the checklist.
-No hardware was accessed or flashed in this task. Single-buffer optical
-tearing and performance still need measurement. The device-state statements
-below are historical v4.7.1 evidence, not validation of this candidate.
+Austin subsequently authorized flashing the connected Tab5. The 82e5266
+pre-v3 debug application was flashed and read back with an exact SHA256 match;
+SD mounted, the emulator started, and existing settings were preserved.
+Austin then reported dotted Finder borders. An A/B firmware comparison with
+only `CPU_NATIVE_QD_ACCEL=0` eliminated them in the guest screenshot.
+
+Native QuickDraw is now disabled by default in every firmware profile. The
+Tab5 is running the matching no-acceleration build; [QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md)
+records the comparison, image hashes and remaining limits. The previous app
+partition is backed up under the artifact package's `hardware-flash/` directory.
+Next: Austin continues physical display testing. Single-buffer optical tearing
+and the performance cost of disabling QuickDraw still need measurement. The
+device-state statements below are historical v4.7.1 evidence.
 
 ## v4.7.1 release — 2026-09-26
 

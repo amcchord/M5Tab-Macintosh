@@ -1,5 +1,11 @@
 # M5Tab Macintosh performance optimization report
 
+The results below are historical measurements with native QuickDraw enabled.
+The current development default disables that acceleration after a hardware
+A/B test isolated a Finder border regression. See
+[QUICKDRAW_REGRESSION.md](QUICKDRAW_REGRESSION.md). These graphics scores do
+not describe the corrected default, whose throughput has not been measured.
+
 ## Result
 
 The optimization target was met in Speedometer 4.02's headline Performance
