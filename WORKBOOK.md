@@ -13,25 +13,33 @@ startup banner identifies version 5.0. See RELEASE_NOTES.md for board images,
 validation, limits and rollback. Publication evidence and packaged downloads
 are retained under the control checkout's `artifacts/release-v5.0/`.
 
-Final-source validation passed 46 host tests (8.826 seconds), the debug build,
-and all four standard profiles. Standard merged images match their components.
-The 5.0 debug application was flashed and fully read back with matching SHA256
-`485a9e3096f5e9a83754f4b957570ff83197e2305ac57bc99e6980601d6dc4b8`.
+Final validation passed 46 host tests (7.126 seconds), the debug build,
+and the standard board/silicon build matrix. Tab5 SD SPI now runs at 10 MHz
+instead of 25 MHz following intermittent CRC/status failures during startup.
+The final debug app is byte-identical to the tested diagnostic, SHA256
+`cfbc1d1592df1d49463434525a132d99592d71c19e56f410e9ab9ad5d93ee213`.
+Application readback matched, and original settings were preserved.
 
-**Publication is pending hardware validation.** Serial startup and settings
-checks passed, but visual inspection caught a guest illegal-instruction dialog
-after sustained SD CRC/status errors. A software restart then showed a damaged
-System-file message. The cause and whether the disk image is damaged are not
-yet established. Austin has been asked to fully power-cycle the Tab. No disk
-image has been replaced by host tools. The final application remains installed;
-the original application backup remains available under
+The earlier 25 MHz candidate sometimes displayed a guest illegal-instruction
+or damaged-System-file dialog. A cold start did not consistently clear it;
+Austin reported that another reboot got past it. The 10 MHz comparison then
+completed three starts without errors in captured SD logs. Finder was visually
+verified on the first and third starts; the second reached the normal
+improper-shutdown notice caused by the test reset. See SD_STABILITY.md for
+scope, evidence and limits. The original disk image was retained.
+
+Release PR: https://github.com/amcchord/M5Tab-Macintosh/pull/21.
+Next release operation: publish tag v5.0 as **5.0 - Stable** after validating
+all packaged component hashes. Exact source/release commits and publication
+outcome are retained in `artifacts/release-v5.0/release-status.json` and the
+release's BUILD-MANIFEST.json. The original application backup remains under
 `artifacts/display-reliability-20260926/hardware-flash/`.
 
-Next action: inspect the guest desktop after the cold start, resolve any
-remaining failure, then finish the release PR and publish v5.0. Packaging
-requires explicit visual verification; the machine-readable current state is
-`artifacts/release-v5.0/release-status.json`. Exact source/release commits,
-component hashes and publication outcome will be retained with that evidence.
+PR #16 was reviewed separately. Its multi-block transfers affect preboot USB
+Disk copying, not the emulator's SD file access. It remains unmerged; its
+invalid derived-reference filesystem accessor should be replaced before
+integration. Review evidence and a compiling accessor alternative are in
+`artifacts/release-v5.0/pr16-review/`.
 
 
 ## Display reliability and QuickDraw regression — 2026-09-26
@@ -40,7 +48,7 @@ Active work is on local branch `codex/display-reliability`, based on v4.7.1,
 in the attached checkout
 `<Codex managed worktree>/M5Tab-Macintosh`.
 The original control checkout's uncommitted performance work is preserved;
-these changes have not been integrated with it or pushed.
+the release branch is separate and is published through PR #21.
 
 [DISPLAY_RELIABILITY_REVIEW.md](DISPLAY_RELIABILITY_REVIEW.md) records the
 v3.4.2–v4.7.1 audit, fixed defects, display ownership contract, verification

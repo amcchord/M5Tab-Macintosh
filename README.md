@@ -57,6 +57,9 @@ This release focuses on display correctness and reliability.
 - **Reliable screen updates:** complete dirty-range tracking, coherent palette
   and mode changes, retained updates after publication failures, and a shared
   panel framebuffer path for both boards.
+- **Conservative Tab5 SD access:** SPI runs at 10 MHz after intermittent
+  startup CRC failures at 25 MHz; the same card passed repeated startup checks.
+  Disk throughput may be lower.
 - **Consistent rotation and overlays:** boot UI and emulator tiles use the same
   rotation; keyboard/game overlays use a stable snapshot for each frame batch.
 - **Safer lifecycle and input:** renderer shutdown waits for completion, serial

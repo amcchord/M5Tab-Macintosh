@@ -564,3 +564,33 @@ and `release-status.json`. Packaging now requires an explicit verified guest
 desktop result. Stable publication is pending this hardware check. Next:
 inspect after cold start, resolve any remaining issue, then merge/publish
 and record exact source/tag/asset identity in the release manifest.
+
+
+## Tab5 SD mitigation and PR #16 review — 2026-09-26
+
+The user power-cycled the Tab; startup still reported a damaged System file.
+Austin then reported that another reboot got past it. An assistant BOOT ENTER
+interrupted that successful start; subsequent tests were coordinated with
+Austin, who explicitly approved flashing and running the SD diagnostic.
+
+Changed only Tab5 SD SPI from 25 MHz to 10 MHz in the diagnostic. Full app
+readback matched, original settings and disk selection were preserved, and
+three starts avoided the earlier SD errors. Finder was visually verified on
+starts one and three; start two reached the normal improper-shutdown notice.
+The release retains the 10 MHz setting as a conservative mitigation. Exact
+transport cause and throughput impact remain unmeasured. SD_STABILITY.md
+records the evidence and limits. The hardware-tested app and final debug
+build both hash to cfbc1d1592df1d49463434525a132d99592d71c19e56f410e9ab9ad5d93ee213.
+All 46 host tests passed in 7.126 seconds; the final firmware matrix and
+component checks are retained in artifacts/display-reliability/v5-sd-*.
+
+Reviewed PR #16 at 54b0f9a. Its multi-block transfers improve only USB Disk
+mode, not Mac OS disk access. Found undefined behavior in the derived-reference
+cast used to expose the protected drive number. Both the PR unit and a
+pointer-to-member replacement compile with the real Tab5 debug flags. Saved
+review/patch under artifacts/release-v5.0/pr16-review; no external review
+comment, merge, or contributor-branch change was made.
+
+Next: merge PR #21 and publish the authorized v5.0 stable release with the
+tested SD clock. The release manifest and local release-status.json retain
+exact commit, tag, asset hashes and publication outcome.

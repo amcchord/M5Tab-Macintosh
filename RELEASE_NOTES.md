@@ -25,12 +25,17 @@ on M5Stack Tab5 and Waveshare ESP32-P4 10.1 boards.
 - **Input fixes.** Mouse fields stay within their report IDs; wrong-ID and
   truncated reports are ignored. Shared physical/automation key ownership and
   event ordering are serialized.
+- **Conservative Tab5 SD clock.** SPI is reduced from 25 MHz to 10 MHz after
+  intermittent SD CRC/status errors during guest startup. Three starts with
+  the slower clock avoided the observed errors on the development Tab5. This
+  may reduce disk throughput; Waveshare SDMMC settings are unchanged.
 - **Version identification.** The serial startup banner identifies firmware
   version 5.0. The existing serial automation protocol and preboot controls remain.
 
 See the [display review](DISPLAY_RELIABILITY_REVIEW.md) and
 [QuickDraw regression record](QUICKDRAW_REGRESSION.md) for implementation and
-comparison details. Board-specific SDK pins are unchanged.
+comparison details. The [SD startup record](SD_STABILITY.md) documents the
+clock comparison and its limits. Board-specific SDK pins are unchanged.
 
 ## Downloads
 
@@ -69,7 +74,8 @@ production Rev3 hardware.
 - Hardware checks on a pre-v3 ESP32-P4 revision 1.3 Tab5: application flashing,
   readback verification, SD mounting, saved-setting preservation, emulator boot,
   serial screenshots and the Finder border comparison. The user confirmed the
-  corrected display before requesting the stable release.
+  corrected display before requesting the stable release. The final debug app
+  also passed the SD-clock comparison and retained the original disk/settings.
 - `BUILD-MANIFEST.json` records exact source commits, component hashes and the
   hardware-tested application. `SHA256SUMS` covers downloadable assets.
 
@@ -83,7 +89,8 @@ must pass differential checks against guest rendering before being re-enabled.
 Waveshare and production-silicon targets are build-validated, not newly tested
 on physical hardware in this pass. Broader application coverage, long-duration
 soak testing and the performance cost of the conservative drawing path remain
-follow-up work.
+follow-up work. The SD clock change is a mitigation from a limited hardware
+sample; the exact transport failure cause has not been isolated.
 
 The prior [v4.7.1 release](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v4.7.1)
 remains available for rollback with a matching board/silicon image. Preserve
