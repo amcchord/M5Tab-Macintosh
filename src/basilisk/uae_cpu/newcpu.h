@@ -170,7 +170,7 @@ static __inline__ uae_u32 get_ilong_prefetch (uae_s32 o)
 }
 #endif
 
-static __inline__ void fill_prefetch_0 (void)
+static ALWAYS_INLINE void fill_prefetch_0 (void)
 {
 #if USE_PREFETCH_BUFFER
     uae_u32 r;
@@ -196,7 +196,7 @@ static __inline__ void fill_prefetch_2 (void)
 #define fill_prefetch_2 fill_prefetch_0
 #endif
 
-static __inline__ uaecptr m68k_getpc (void)
+static ALWAYS_INLINE uaecptr m68k_getpc (void)
 {
 #if REAL_ADDRESSING || DIRECT_ADDRESSING
 	return get_virtual_address(regs.pc_p);
@@ -205,7 +205,7 @@ static __inline__ uaecptr m68k_getpc (void)
 #endif
 }
 
-static __inline__ void m68k_setpc (uaecptr newpc)
+static ALWAYS_INLINE void m68k_setpc (uaecptr newpc)
 {
 #if ENABLE_MON
 	uae_u32 previous_pc = m68k_getpc();
@@ -214,7 +214,17 @@ static __inline__ void m68k_setpc (uaecptr newpc)
 #if REAL_ADDRESSING || DIRECT_ADDRESSING
 	regs.pc_p = get_real_address(newpc);
 #else
-	regs.pc_p = regs.pc_oldp = get_real_address(newpc);
+	// Code runs from RAM or ROM; resolve those without the bank table's
+	// indirect translation call (the same arithmetic as ram/rom_xlate).
+	uae_u8 *host;
+	if (likely(newpc < mem_ram_size())) {
+		host = mem_ram_base() + newpc;
+	} else if (newpc - ROMBaseMac < ROMSize) {
+		host = ROMBaseHost + (newpc - ROMBaseMac);
+	} else {
+		host = get_real_address(newpc);
+	}
+	regs.pc_p = regs.pc_oldp = host;
 	regs.pc = newpc;
 #endif
 
@@ -228,7 +238,7 @@ static __inline__ void m68k_setpc (uaecptr newpc)
 #endif // end of #if ENABLE_MON
 }
 
-static __inline__ void m68k_incpc (uae_s32 delta)
+static ALWAYS_INLINE void m68k_incpc (uae_s32 delta)
 {
 #if ENABLE_MON
 	uae_u32 previous_pc = m68k_getpc();
@@ -247,21 +257,21 @@ static __inline__ void m68k_incpc (uae_s32 delta)
 
 /* These are only used by the 68020/68881 code, and therefore don't
  * need to handle prefetch.  */
-static __inline__ uae_u32 next_ibyte (void)
+static ALWAYS_INLINE uae_u32 next_ibyte (void)
 {
     uae_u32 r = get_ibyte (0);
     m68k_incpc (2);
     return r;
 }
 
-static __inline__ uae_u32 next_iword (void)
+static ALWAYS_INLINE uae_u32 next_iword (void)
 {
     uae_u32 r = get_iword (0);
     m68k_incpc (2);
     return r;
 }
 
-static __inline__ uae_u32 next_ilong (void)
+static ALWAYS_INLINE uae_u32 next_ilong (void)
 {
     uae_u32 r = get_ilong (0);
     m68k_incpc (4);
@@ -272,20 +282,20 @@ static __inline__ uae_u32 next_ilong (void)
 #define m68k_setpc_bcc  m68k_setpc
 #define m68k_setpc_rte  m68k_setpc
 
-static __inline__ void m68k_do_rts(void)
+static ALWAYS_INLINE void m68k_do_rts(void)
 {
 	    m68k_setpc(get_long(m68k_areg(regs, 7)));
 	        m68k_areg(regs, 7) += 4;
 }
  
-static __inline__ void m68k_do_bsr(uaecptr oldpc, uae_s32 offset)
+static ALWAYS_INLINE void m68k_do_bsr(uaecptr oldpc, uae_s32 offset)
 {
 	    m68k_areg(regs, 7) -= 4;
 	        put_long(m68k_areg(regs, 7), oldpc);
 		    m68k_incpc(offset);
 }
  
-static __inline__ void m68k_do_jsr(uaecptr oldpc, uaecptr dest)
+static ALWAYS_INLINE void m68k_do_jsr(uaecptr oldpc, uaecptr dest)
 {
 	    m68k_areg(regs, 7) -= 4;
 	        put_long(m68k_areg(regs, 7), oldpc);
@@ -301,7 +311,21 @@ static __inline__ void m68k_setstopped (int stop)
     SPCFLAGS_SET( SPCFLAG_STOP );
 }
 
-extern uae_u32 get_disp_ea_020 (uae_u32 base, uae_u32 dp);
+extern uae_u32 get_disp_ea_020_full (uae_u32 base, uae_u32 dp);
+// 68020 indexed addressing: the brief extension word (d8,An,Xn*scale) is by
+// far the common case and is resolved inline; full extension words (memory
+// indirection, base/outer displacements) take the out-of-line path.
+static ALWAYS_INLINE uae_u32 get_disp_ea_020 (uae_u32 base, uae_u32 dp)
+{
+	if (likely((dp & 0x100) == 0)) {
+		uae_s32 regd = regs.regs[(dp >> 12) & 15];
+		if ((dp & 0x800) == 0)
+			regd = (uae_s32)(uae_s16)regd;
+		regd <<= (dp >> 9) & 3;
+		return base + (uae_s32)((uae_s8)dp) + regd;
+	}
+	return get_disp_ea_020_full(base, dp);
+}
 extern uae_u32 get_disp_ea_000 (uae_u32 base, uae_u32 dp);
 
 extern uae_s32 ShowEA (int reg, amodes mode, wordsizes size, char *buf);

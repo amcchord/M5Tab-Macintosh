@@ -1050,7 +1050,7 @@ extern struct flag_struct regflags;
 
 #define COPY_CARRY (SET_XFLG (GET_CFLG))
 
-static __inline__ int cctrue(const int cc)
+static ALWAYS_INLINE int cctrue(const int cc)
 {
     switch(cc){
      case 0: return 1;                       /* T */

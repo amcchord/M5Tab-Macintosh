@@ -23,6 +23,7 @@
 #include "boot_gui.h"
 #include "input.h"
 #include "quickdraw_accel.h"
+#include "perf_sampler.h"
 #include "video.h"
 
 #include "board_config.h"
@@ -964,6 +965,101 @@ static void processLegacyCommand(char *command)
     if (strcmp(command, "RELEASE_ALL") == 0) {
         InputAutomationReleaseAll();
         protocolReply("@B2 OK RELEASE_ALL\n");
+        return;
+    }
+    unsigned long perf_hz = 0, perf_capacity = 0, perf_offset = 0, perf_core = 1;
+    if (sscanf(command, "PERF START %lu %lu %lu", &perf_hz, &perf_capacity, &perf_core) >= 2) {
+        char error[48] = {};
+        if (PerfSamplerStart((uint32_t)perf_hz, (uint32_t)perf_capacity, (int)perf_core,
+                             error, sizeof(error))) {
+            protocolReply("@B2 OK PERF START\n");
+        } else {
+            protocolReply("@B2 ERR PERF %s\n", error);
+        }
+        return;
+    }
+    if (strcmp(command, "PERF STOP") == 0) {
+        PerfSamplerStop();
+        protocolReply("@B2 OK PERF STOP\n");
+        return;
+    }
+    if (strcmp(command, "PANEL VERIFY") == 0) {
+        uint32 checked = 0, mismatched = 0;
+        int first_x = -1, first_y = -1;
+        if (!VideoVerifyPanel(&checked, &mismatched, &first_x, &first_y)) {
+            protocolReply("@B2 ERR PANEL unavailable\n");
+        } else {
+            protocolReply("@B2 OK PANEL checked=%lu mismatched=%lu first=%d,%d\n",
+                          (unsigned long)checked, (unsigned long)mismatched, first_x, first_y);
+        }
+        return;
+    }
+    if (strcmp(command, "PERF FREE") == 0) {
+        PerfSamplerRelease();
+        protocolReply("@B2 OK PERF FREE\n");
+        return;
+    }
+    if (strcmp(command, "PERF STATE") == 0) {
+        PerfSamplerState state;
+        PerfSamplerReadState(&state);
+        char response[640];
+        int used = snprintf(response, sizeof(response),
+                            "@B2 OK PERF STATE running=%d hz=%lu capacity=%lu count=%lu dropped=%lu",
+                            state.running ? 1 : 0, (unsigned long)state.hz,
+                            (unsigned long)state.capacity, (unsigned long)state.count,
+                            (unsigned long)state.dropped);
+        for (int i = 0; i < PERF_COUNTER_COUNT && used > 0 && used < (int)sizeof(response); ++i) {
+            used += snprintf(response + used, sizeof(response) - (size_t)used, " %s=%llu",
+                             PerfSamplerCounterName(i), (unsigned long long)state.counters[i]);
+        }
+        protocolReply("@B2 %s\n", response + 4);
+        return;
+    }
+    if (sscanf(command, "PERF READ %lu", &perf_offset) == 1) {
+        static const char hex[] = "0123456789ABCDEF";
+        PerfSample samples[24];
+        const uint32_t n = PerfSamplerRead((uint32_t)perf_offset, samples, 24);
+        char response[900];
+        int used = snprintf(response, sizeof(response), "@B2 OK PERF READ %lu %lu ",
+                            perf_offset, (unsigned long)n);
+        const uint8_t *bytes = (const uint8_t *)samples;
+        for (size_t i = 0; i < n * sizeof(PerfSample) && used + 3 < (int)sizeof(response); ++i) {
+            response[used++] = hex[bytes[i] >> 4];
+            response[used++] = hex[bytes[i] & 0x0f];
+        }
+        response[used] = '\0';
+        protocolReply("@B2 %s\n", response + 4);
+        return;
+    }
+    unsigned long peek_address = 0, peek_length = 0;
+    if (sscanf(command, "PEEK %lx %lu", &peek_address, &peek_length) == 2) {
+        // Read-only guest memory inspection for diagnostics (RAM/ROM only).
+        extern uint32 RAMSize, ROMBaseMac, ROMSize;
+        extern uint8 *RAMBaseHost, *ROMBaseHost;
+        static const char hex[] = "0123456789ABCDEF";
+        if (peek_length == 0 || peek_length > 256) {
+            protocolReply("@B2 ERR PEEK length\n");
+            return;
+        }
+        const uint8 *host = NULL;
+        if (peek_address < RAMSize && peek_length <= RAMSize - peek_address) {
+            host = RAMBaseHost + peek_address;
+        } else if (peek_address - ROMBaseMac < ROMSize &&
+                   peek_length <= ROMSize - (peek_address - ROMBaseMac)) {
+            host = ROMBaseHost + (peek_address - ROMBaseMac);
+        }
+        if (!host) {
+            protocolReply("@B2 ERR PEEK range\n");
+            return;
+        }
+        char response[700];
+        int used = snprintf(response, sizeof(response), "@B2 OK PEEK %08lX ", peek_address);
+        for (unsigned long i = 0; i < peek_length && used + 3 < (int)sizeof(response); ++i) {
+            response[used++] = hex[host[i] >> 4];
+            response[used++] = hex[host[i] & 0x0f];
+        }
+        response[used] = '\0';
+        protocolReply("@B2 %s\n", response + 4);
         return;
     }
     if (strcmp(command, "TRAPS RESET") == 0) {

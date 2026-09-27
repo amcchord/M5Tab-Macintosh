@@ -83,6 +83,192 @@ void byteput (uaecptr addr, uae_u32 b)
 }
 #endif
 
+#ifndef NO_INLINE_MEMORY_ACCESS
+#ifdef ARDUINO
+#define MEM_SLOW_ATTR IRAM_ATTR
+#else
+#define MEM_SLOW_ATTR
+#endif
+
+// Out-of-line halves of the inline RAM fast paths in memory.h. ROM data is
+// read directly; frame-buffer writes in the direct layout publish a dirty
+// range after storing, exactly as the frame bank handlers do.
+extern "C" {
+
+MEM_SLOW_ATTR uae_u32 REGPARAM2 mem_slow_lget(uaecptr addr)
+{
+    if (addr - ROMBaseMac < ROMSize) {
+        return do_get_mem_long((uae_u32 *)(ROMBaseHost + (addr - ROMBaseMac)));
+    }
+    return call_mem_get_func(get_mem_bank(addr).lget, addr);
+}
+
+MEM_SLOW_ATTR uae_u32 REGPARAM2 mem_slow_wget(uaecptr addr)
+{
+    if (addr - ROMBaseMac < ROMSize) {
+        return do_get_mem_word((uae_u16 *)(ROMBaseHost + (addr - ROMBaseMac)));
+    }
+    return call_mem_get_func(get_mem_bank(addr).wget, addr);
+}
+
+MEM_SLOW_ATTR uae_u32 REGPARAM2 mem_slow_bget(uaecptr addr)
+{
+    if (addr - ROMBaseMac < ROMSize) {
+        return *(uae_u8 *)(ROMBaseHost + (addr - ROMBaseMac));
+    }
+    return call_mem_get_func(get_mem_bank(addr).bget, addr);
+}
+
+MEM_SLOW_ATTR void REGPARAM2 mem_slow_lput(uaecptr addr, uae_u32 l)
+{
+    if (MacFrameLayout == FLAYOUT_DIRECT && addr - BASILISK_FRAME_BASE_MAC < MacFrameSize) {
+        const uint32 offset = addr - BASILISK_FRAME_BASE_MAC;
+        do_put_mem_long((uae_u32 *)(MacFrameBaseHost + offset), l);
+        VideoMarkDirtyRange(offset, 4);
+        return;
+    }
+    call_mem_put_func(get_mem_bank(addr).lput, addr, l);
+}
+
+MEM_SLOW_ATTR void REGPARAM2 mem_slow_wput(uaecptr addr, uae_u32 w)
+{
+    if (MacFrameLayout == FLAYOUT_DIRECT && addr - BASILISK_FRAME_BASE_MAC < MacFrameSize) {
+        const uint32 offset = addr - BASILISK_FRAME_BASE_MAC;
+        do_put_mem_word((uae_u16 *)(MacFrameBaseHost + offset), w);
+        VideoMarkDirtyRange(offset, 2);
+        return;
+    }
+    call_mem_put_func(get_mem_bank(addr).wput, addr, w);
+}
+
+MEM_SLOW_ATTR void REGPARAM2 mem_slow_bput(uaecptr addr, uae_u32 b)
+{
+    if (MacFrameLayout == FLAYOUT_DIRECT && addr - BASILISK_FRAME_BASE_MAC < MacFrameSize) {
+        const uint32 offset = addr - BASILISK_FRAME_BASE_MAC;
+        *(uae_u8 *)(MacFrameBaseHost + offset) = b;
+        VideoMarkDirtyOffset(offset);
+        return;
+    }
+    call_mem_put_func(get_mem_bank(addr).bput, addr, b);
+}
+
+#if defined(__riscv) && !defined(MEM_SLOW_DIRECT_CALLS)
+// Register-preserving entry points for the inline fast paths in memory.h.
+// Entered with `jalr t0`: a0 (and a1 for stores) carry arguments, t0 is the
+// return address. Everything else a C call may clobber, except a0 for loads
+// and the FP temporaries the call sites declare, is preserved.
+//
+// ROM loads and direct-layout frame-buffer loads/stores are the common slow
+// cases (QuickDraw tables and screen drawing), so the thunks finish them with
+// four scratch registers before falling back to a full save and C call. A
+// frame-buffer store publishes its pixels, fences, then sets the damage flag
+// for each span it touched (see video_dirty_chunks).
+#define MEM_THUNK_FULL_SAVE \
+    "addi sp, sp, -64\n" \
+    "sw ra, 0(sp)\n  sw t0, 4(sp)\n  sw t1, 8(sp)\n  sw t2, 12(sp)\n" \
+    "sw a0, 16(sp)\n sw a1, 20(sp)\n sw a2, 24(sp)\n sw a3, 28(sp)\n" \
+    "sw a4, 32(sp)\n sw a5, 36(sp)\n sw a6, 40(sp)\n sw a7, 44(sp)\n" \
+    "sw t3, 48(sp)\n sw t4, 52(sp)\n sw t5, 56(sp)\n sw t6, 60(sp)\n"
+#define MEM_THUNK_FULL_RESTORE \
+    "lw ra, 0(sp)\n  lw t0, 4(sp)\n  lw t1, 8(sp)\n  lw t2, 12(sp)\n" \
+    "lw a1, 20(sp)\n lw a2, 24(sp)\n lw a3, 28(sp)\n" \
+    "lw a4, 32(sp)\n lw a5, 36(sp)\n lw a6, 40(sp)\n lw a7, 44(sp)\n" \
+    "lw t3, 48(sp)\n lw t4, 52(sp)\n lw t5, 56(sp)\n lw t6, 60(sp)\n" \
+    "addi sp, sp, 64\n"
+#define MEM_THUNK_SCRATCH_SAVE \
+    "addi sp, sp, -16\n sw t1, 0(sp)\n sw t2, 4(sp)\n sw t3, 8(sp)\n sw t4, 12(sp)\n"
+#define MEM_THUNK_SCRATCH_RESTORE \
+    "lw t1, 0(sp)\n lw t2, 4(sp)\n lw t3, 8(sp)\n lw t4, 12(sp)\n addi sp, sp, 16\n"
+
+// t1 = a0 - base; branch to `miss` unless [t1, t1 + extra] lies inside size.
+#define MEM_THUNK_RANGE(base_sym, size_sym, extra, miss) \
+    "lui t1, %hi(" base_sym ")\n lw t1, %lo(" base_sym ")(t1)\n sub t1, a0, t1\n" \
+    "lui t2, %hi(" size_sym ")\n lw t2, %lo(" size_sym ")(t2)\n" \
+    "bgeu t1, t2, " miss "\n addi t3, t1, " #extra "\n bgeu t3, t2, " miss "\n"
+// Same for the direct-layout frame buffer at 0xa0000000.
+#define MEM_THUNK_FRAME_RANGE(extra, miss) \
+    "lui t1, %hi(MacFrameLayout)\n lw t1, %lo(MacFrameLayout)(t1)\n" \
+    "addi t1, t1, -1\n bnez t1, " miss "\n" /* FLAYOUT_DIRECT == 1 */ \
+    "lui t1, 0xa0000\n sub t1, a0, t1\n" \
+    "lui t2, %hi(MacFrameSize)\n lw t2, %lo(MacFrameSize)(t2)\n" \
+    "bgeu t1, t2, " miss "\n addi t3, t1, " #extra "\n bgeu t3, t2, " miss "\n"
+
+// Loads: t2 = host base, t1 = offset. ROM first, then the frame buffer.
+#define MEM_GET_THUNK(name, target, extra, load_be) \
+MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
+{ \
+    __asm__ volatile( \
+        MEM_THUNK_SCRATCH_SAVE \
+        MEM_THUNK_RANGE("ROMBaseMac", "ROMSize", extra, "2f") \
+        "lui t2, %hi(ROMBaseHost)\n lw t2, %lo(ROMBaseHost)(t2)\n j 5f\n" \
+        "2:\n" \
+        MEM_THUNK_FRAME_RANGE(extra, "9f") \
+        "lui t2, %hi(MacFrameBaseHost)\n lw t2, %lo(MacFrameBaseHost)(t2)\n" \
+        "5:\n add t2, t2, t1\n" \
+        load_be \
+        MEM_THUNK_SCRATCH_RESTORE \
+        "jr t0\n" \
+        "9:\n" \
+        MEM_THUNK_SCRATCH_RESTORE \
+        MEM_THUNK_FULL_SAVE \
+        "call " #target "\n" \
+        MEM_THUNK_FULL_RESTORE \
+        "jr t0\n"); \
+}
+
+// Stores: frame buffer only (ROM writes go to the bank handler).
+#define MEM_PUT_THUNK(name, target, extra, store_be) \
+MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
+{ \
+    __asm__ volatile( \
+        MEM_THUNK_SCRATCH_SAVE \
+        MEM_THUNK_FRAME_RANGE(extra, "9f") \
+        "lui t2, %hi(MacFrameBaseHost)\n lw t2, %lo(MacFrameBaseHost)(t2)\n" \
+        "add t2, t2, t1\n" \
+        store_be \
+        "fence w, w\n" \
+        "lui t4, %hi(video_dirty_limit)\n lw t4, %lo(video_dirty_limit)(t4)\n" \
+        "addi t3, t1, " #extra "\n bgeu t3, t4, 8f\n" /* below the displayed rows */ \
+        "lui t4, %hi(video_dirty_shift)\n lw t4, %lo(video_dirty_shift)(t4)\n" \
+        "lui t2, %hi(video_dirty_chunks)\n addi t2, t2, %lo(video_dirty_chunks)\n" \
+        "srl t3, t3, t4\n add t3, t2, t3\n" \
+        "srl t1, t1, t4\n add t1, t2, t1\n" \
+        "li t4, 1\n sb t4, 0(t1)\n sb t4, 0(t3)\n" \
+        "8:\n" \
+        MEM_THUNK_SCRATCH_RESTORE \
+        "jr t0\n" \
+        "9:\n" \
+        MEM_THUNK_SCRATCH_RESTORE \
+        MEM_THUNK_FULL_SAVE \
+        "call " #target "\n" \
+        "lw a0, 16(sp)\n" \
+        MEM_THUNK_FULL_RESTORE \
+        "jr t0\n"); \
+}
+
+MEM_GET_THUNK(mem_slow_lget_thunk, mem_slow_lget, 3,
+    "lbu a0, 0(t2)\n slli a0, a0, 24\n"
+    "lbu t3, 1(t2)\n slli t3, t3, 16\n or a0, a0, t3\n"
+    "lbu t3, 2(t2)\n slli t3, t3, 8\n or a0, a0, t3\n"
+    "lbu t3, 3(t2)\n or a0, a0, t3\n")
+MEM_GET_THUNK(mem_slow_wget_thunk, mem_slow_wget, 1,
+    "lbu a0, 0(t2)\n slli a0, a0, 8\n lbu t3, 1(t2)\n or a0, a0, t3\n")
+MEM_GET_THUNK(mem_slow_bget_thunk, mem_slow_bget, 0,
+    "lbu a0, 0(t2)\n")
+MEM_PUT_THUNK(mem_slow_lput_thunk, mem_slow_lput, 3,
+    "srli t3, a1, 24\n sb t3, 0(t2)\n srli t3, a1, 16\n sb t3, 1(t2)\n"
+    "srli t3, a1, 8\n sb t3, 2(t2)\n sb a1, 3(t2)\n")
+MEM_PUT_THUNK(mem_slow_wput_thunk, mem_slow_wput, 1,
+    "srli t3, a1, 8\n sb t3, 0(t2)\n sb a1, 1(t2)\n")
+MEM_PUT_THUNK(mem_slow_bput_thunk, mem_slow_bput, 0,
+    "sb a1, 0(t2)\n")
+#undef MEM_GET_THUNK
+#undef MEM_PUT_THUNK
+#endif
+
+}  // extern "C"
+#endif
+
 /* A dummy bank that only contains zeros */
 
 static uae_u32 REGPARAM2 dummy_lget (uaecptr) REGPARAM;

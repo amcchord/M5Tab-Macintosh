@@ -659,6 +659,29 @@ static void genflags_normal (flagtypes type, wordsizes size, char *value, char *
 	break;
     }
 
+    /* ADD/SUB/CMP flags are computed on the operands and result shifted to
+     * the top of a 32-bit word: N, Z, C and V then fall out of plain 32-bit
+     * compares and one sign test, with no per-operand sign extension.
+     * test/test_cpu_flags.cpp checks these against the classic formulas. */
+    if (type == flag_add || type == flag_sub || type == flag_cmp) {
+	const int shift = size == sz_byte ? 24 : size == sz_word ? 16 : 0;
+	start_brace ();
+	printf ("\tuae_u32 fs = (uae_u32)(%s) << %d, fd = (uae_u32)(%s) << %d, fr = (uae_u32)(%s) << %d;\n",
+		src, shift, dst, shift, value, shift);
+	printf ("\tSET_ZFLG (fr == 0);\n");
+	if (type == flag_add) {
+	    printf ("\tSET_VFLG (((fs ^ fr) & (fd ^ fr)) >> 31);\n");
+	    printf ("\tSET_CFLG (fr < fd);\n");
+	} else {
+	    printf ("\tSET_VFLG (((fs ^ fd) & (fr ^ fd)) >> 31);\n");
+	    printf ("\tSET_CFLG (fs > fd);\n");
+	}
+	if (type != flag_cmp)
+	    duplicate_carry ();
+	printf ("\tSET_NFLG (fr >> 31);\n");
+	return;
+    }
+
     switch (type) {
      case flag_logical_noclobber:
      case flag_logical:
@@ -666,11 +689,8 @@ static void genflags_normal (flagtypes type, wordsizes size, char *value, char *
      case flag_zn:
 	break;
 
-     case flag_add:
-     case flag_sub:
      case flag_addx:
      case flag_subx:
-     case flag_cmp:
      case flag_av:
      case flag_sv:
 	start_brace ();
@@ -682,14 +702,15 @@ static void genflags_normal (flagtypes type, wordsizes size, char *value, char *
 
     switch (type) {
      case flag_logical:
-	printf ("\tCLEAR_CZNV;\n");
-	printf ("\tSET_ZFLG (%s == 0);\n", vstr);
-	printf ("\tSET_NFLG (%s < 0);\n", vstr);
+     case flag_logical_noclobber: {
+	/* Z and N from the value shifted to the top of a 32-bit word. */
+	const int shift = size == sz_byte ? 24 : size == sz_word ? 16 : 0;
+	if (type == flag_logical)
+	    printf ("\tCLEAR_CZNV;\n");
+	printf ("\tSET_ZFLG (((uae_u32)(%s) << %d) == 0);\n", value, shift);
+	printf ("\tSET_NFLG (((uae_u32)(%s) << %d) >> 31);\n", value, shift);
 	break;
-     case flag_logical_noclobber:
-	printf ("\tSET_ZFLG (%s == 0);\n", vstr);
-	printf ("\tSET_NFLG (%s < 0);\n", vstr);
-	break;
+     }
      case flag_av:
 	printf ("\tSET_VFLG ((flgs ^ flgn) & (flgo ^ flgn));\n");
 	break;

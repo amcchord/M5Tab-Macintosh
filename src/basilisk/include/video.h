@@ -292,12 +292,21 @@ extern void VideoFlushDirtyTiles(void);
  * used by the host-automation bridge so tests see Mac coordinates and pixels,
  * independent of panel scaling or rotation.
  */
+// Diagnostic comparison of the physical panel against the guest frame buffer.
+extern bool VideoVerifyPanel(uint32 *checked, uint32 *mismatched, int *first_x, int *first_y);
 extern bool VideoCaptureFrame(uint8 *pixels, uint32 pixel_capacity,
                               uint16 *palette, uint16 *width, uint16 *height);
 
 // Write-time dirty tracking for framebuffer - called from memory.cpp on writes
 // These mark tiles dirty immediately when CPU writes to framebuffer, avoiding
 // expensive per-frame comparison
+// Frame-buffer damage flags (video_esp32.cpp): one byte per span of
+// 2^video_dirty_shift bytes below video_dirty_limit. memory.cpp sets them
+// directly for guest stores after publishing the pixels.
+extern uint32 video_dirty_chunks[];
+extern uint32 video_dirty_shift;
+extern uint32 video_dirty_limit;
+
 extern void VideoMarkDirtyOffset(uint32 offset);     // Mark single byte dirty
 extern void VideoMarkDirtyRange(uint32 offset, uint32 size);  // Mark range dirty
 

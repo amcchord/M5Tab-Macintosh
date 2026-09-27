@@ -5,6 +5,7 @@ using esp_err_t = int;
 #define ESP_OK 0
 #define ESP_CACHE_MSYNC_FLAG_DIR_C2M 1
 #define ESP_CACHE_MSYNC_FLAG_UNALIGNED 2
+#define ESP_CACHE_MSYNC_FLAG_INVALIDATE 4
 inline int cache_result = ESP_OK, cache_calls = 0;
 inline void *cache_address = nullptr;
 inline size_t cache_size = 0;

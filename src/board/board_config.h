@@ -33,10 +33,11 @@
 #define BOARD_MAC_SCREEN_HEIGHT     360
 #define BOARD_PIXEL_SCALE           2
 
-/* Tile grid used by video_esp32.cpp for dirty tracking */
-#define BOARD_TILE_WIDTH            40
+/* Tile grid used by video_esp32.cpp for dirty tracking. 32 pixels wide so
+ * each 32-byte damage span of an 8-bit frame buffer maps to exactly one tile. */
+#define BOARD_TILE_WIDTH            32
 #define BOARD_TILE_HEIGHT           40
-#define BOARD_TILES_X               (BOARD_MAC_SCREEN_WIDTH  / BOARD_TILE_WIDTH)  /* 16 */
+#define BOARD_TILES_X               (BOARD_MAC_SCREEN_WIDTH  / BOARD_TILE_WIDTH)  /* 20 */
 #define BOARD_TILES_Y               (BOARD_MAC_SCREEN_HEIGHT / BOARD_TILE_HEIGHT) /* 9  */
 
 /* SD card on SPI (Tab5 layout documented in boardConfig.md).
@@ -75,10 +76,10 @@
 #define BOARD_MAC_SCREEN_HEIGHT     400
 #define BOARD_PIXEL_SCALE           2
 
-/* Tile grid - 16x10 = 160 tiles (vs Tab5's 144) */
-#define BOARD_TILE_WIDTH            40
+/* Tile grid - 20x10 = 200 tiles (see the Tab5 note on tile width) */
+#define BOARD_TILE_WIDTH            32
 #define BOARD_TILE_HEIGHT           40
-#define BOARD_TILES_X               (BOARD_MAC_SCREEN_WIDTH  / BOARD_TILE_WIDTH)  /* 16 */
+#define BOARD_TILES_X               (BOARD_MAC_SCREEN_WIDTH  / BOARD_TILE_WIDTH)  /* 20 */
 #define BOARD_TILES_Y               (BOARD_MAC_SCREEN_HEIGHT / BOARD_TILE_HEIGHT) /* 10 */
 
 /* SD card - mounted by the Waveshare BSP at /sd (CONFIG_BSP_SD_MOUNT_POINT).

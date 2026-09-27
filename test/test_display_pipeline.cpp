@@ -9,6 +9,11 @@
 #define VIDEO_HOST_TEST
 #include "../src/basilisk/video_esp32.cpp"
 
+// Guest stores record 32-pixel spans: one tile at every depth.
+static constexpr int kSpanTiles = 1;
+static int collect() { return collectWriteDirtyTiles(current_bytes_per_row, current_pixels_per_byte, video_dirty_shift); }
+
+
 static std::mt19937 rng(582913);
 
 static void test_ranges()
@@ -56,6 +61,43 @@ static void test_rotation()
     }
 }
 
+// The fused indexed path must equal unpacking and pixel doubling followed by
+// writePanelTile, at every packed depth and source alignment.
+static void test_indexed_rotation()
+{
+    std::vector<uint32_t> pairs(256);
+    std::vector<uint16> palette(256);
+    for (int i = 0; i < 256; ++i) { palette[i] = rng(); pairs[i] = palette[i] * 0x00010001u; }
+    for (int bits : {1, 2, 4, 8}) for (int pw : {720, 800}) for (bool flip : {false, true}) {
+        std::vector<uint16> actual(pw * 1280, 0xdead), expected = actual;
+        for (int trial = 0; trial < 60; ++trial) {
+            const int sw = 1 + rng() % 70, sh = 1 + rng() % 50, first = rng() % 40;
+            const int stride = ((first + sw) * bits + 7) / 8 + rng() % 5;
+            const int w = sw * 2, h = sh * 2;
+            const int x = rng() % (1281 - w), y = 2 * (rng() % ((pw - h) / 2 + 1));
+            std::vector<uint8> src(stride * sh);
+            for (auto &v : src) v = rng();
+            std::vector<uint16> doubled(w * h);
+            for (int r = 0; r < h; ++r) for (int c = 0; c < w; ++c) {
+                const int bit = (first + c / 2) * bits;
+                const int index = (src[(r / 2) * stride + bit / 8] >> (8 - bits - bit % 8)) & ((1 << bits) - 1);
+                doubled[r * w + c] = palette[index];
+            }
+            assert(writePanelTile(expected.data(), pw, 1280, flip, x, y, w, h, doubled.data()));
+            assert(writePanelIndexedTile2x(actual.data(), pw, 1280, flip, x, y, w, h,
+                                           src.data(), stride, bits, first, pairs.data()));
+            assert(actual == expected);
+        }
+        assert(!writePanelIndexedTile2x(actual.data(), pw, 1280, flip, 1270, 0, 80, 80,
+                                        nullptr, 40, bits, 0, pairs.data()));
+        assert(!writePanelIndexedTile2x(actual.data(), pw, 1280, flip, 0, 1, 80, 80,
+                                        (const uint8 *)actual.data(), 40, bits, 0, pairs.data()));
+        assert(!writePanelIndexedTile2x(actual.data(), pw, 1280, flip, 0, 0, 80, 80,
+                                        (const uint8 *)actual.data(), 40, 3, 0, pairs.data()));
+        assert(actual == expected);
+    }
+}
+
 static void assert_panel(const std::vector<uint16> &panel, const std::vector<uint8> &guest,
                          video_depth depth, bool flip)
 {
@@ -93,7 +135,7 @@ static void test_pipeline()
     assert(cache_calls == before + 4);
 
     mac_frame_buffer = guest.data(); frame_buffer_size = guest.size();
-    initTileLuts(); preserve_splash_until_first_write = false;
+    preserve_splash_until_first_write = false;
     uint16 local_palette[256] = {};
     for (bool flip : {false, true}) for (auto depth : {VDEPTH_8BIT, VDEPTH_1BIT, VDEPTH_2BIT, VDEPTH_4BIT}) {
         gfx.setFlip180(flip);
@@ -102,7 +144,7 @@ static void test_pipeline()
         assert(palette_changed);
         renderPendingFrame(local_palette);
         assert_panel(panel, guest, depth, flip);
-        assert(collectWriteDirtyTiles() == 0);
+        assert(collect() == 0);
         // A long partial write crosses many tiles and several tile rows.
         std::fill(guest.begin() + 39, guest.begin() + 16000, 0);
         VideoMarkDirtyRange(39, 16000 - 39);
@@ -117,26 +159,26 @@ static void test_pipeline()
         assert_panel(panel, guest, depth, flip);
     }
     VideoMarkTilesDirtyRect(INT32_MAX, INT32_MAX, INT32_MAX, INT32_MAX);
-    assert(collectWriteDirtyTiles() == 0);
+    assert(collect() == 0);
     VideoMarkTilesDirtyRect(-10, -10, 11, 11);
-    assert(collectWriteDirtyTiles() == 1);
+    assert(collect() == 1);
     initDefaultPalette(VDEPTH_8BIT); renderPendingFrame(local_palette);
     // A failed batch must retain old damage and merge the next write.
     guest[0] ^= 0xff; VideoMarkDirtyOffset(0);
     cache_result = -1; renderPendingFrame(local_palette);
-    assert(collectWriteDirtyTiles() == 1);
+    assert(collect() == kSpanTiles);
     guest[80] ^= 0xff; VideoMarkDirtyOffset(80);
     cache_result = ESP_OK; renderPendingFrame(local_palette);
-    assert(collectWriteDirtyTiles() == 0);
+    assert(collect() == 0);
     assert_panel(panel, guest, VDEPTH_8BIT, true);
     // Writes to the same tile after collection cannot be collapsed away.
-    VideoMarkDirtyOffset(0); assert(collectWriteDirtyTiles() == 1);
+    VideoMarkDirtyOffset(0); assert(collect() == kSpanTiles);
     renderPendingFrame(local_palette);
-    VideoMarkDirtyOffset(0); assert(collectWriteDirtyTiles() == 1);
+    VideoMarkDirtyOffset(0); assert(collect() == kSpanTiles);
     // A write during publication remains pending for the next batch.
     cache_hook = [&] { guest[0] ^= 0xff; VideoMarkDirtyOffset(0); };
     renderPendingFrame(local_palette);
-    assert(collectWriteDirtyTiles() == 1);
+    assert(collect() == kSpanTiles);
     renderPendingFrame(local_palette);
     assert_panel(panel, guest, VDEPTH_8BIT, true);
 
@@ -188,6 +230,6 @@ static void test_lifecycle()
 
 int main()
 {
-    test_ranges(); test_rotation(); test_pipeline(); test_lifecycle();
+    test_ranges(); test_rotation(); test_indexed_rotation(); test_pipeline(); test_lifecycle();
     puts("PASS: randomized damage, panel rotation, production tile/palette pipeline, retries, splash and lifecycle");
 }

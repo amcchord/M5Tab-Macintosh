@@ -312,3 +312,50 @@ set an absolute one-test configuration. Run artifacts, screenshots, and JSON
 profiles are written below `artifacts/performance-runs/`. The full-suite runner
 does not accept the live subtotal window as a final score; it waits for the
 explicit tests-complete dialog first.
+
+The `rating` suite runs **Tests > Performance Rating** (Command-R), the usual
+headline measurement. It selects the named tests and iteration counts in the
+PR dialog, accepts the Disk drive prompt, and records every visible score:
+
+```sh
+python3 tools/speedometer_benchmark.py --no-reset --suite rating --label pr
+python3 tools/speedometer_benchmark.py --no-reset --suite rating \
+  --tests graphics --label graphics-only
+python3 tools/speedometer_benchmark.py --no-reset --suite rating \
+  --tests cpu --iterations 5 --profile 3000 --label cpu-profile
+python3 tools/perf_report.py artifacts/performance-runs/<run> \
+  .pio/build/esp32p4_pioarduino_debug/firmware.elf
+```
+
+Speedometer's launch splash is artwork that OCR cannot read, while the
+disabled menu bar behind it still reads as the application menus. The runner
+recognises the splash from pixels (grey menu titles plus a dark picture) and
+clicks through it. It opens the desktop alias at the position of its OCR label
+("Speedometer…"), because Finder rearranges desktop icons, and falls back to
+(590, 222) when the label is unreadable. Single-test runs repeat within about
+1%; compare builds with three runs each. Math-only runs repeat within 0.2%,
+but full ratings on one build ranged from 9.30 to 9.68 on Math, so compare Math
+only within one procedure.
+
+`--profile HZ` samples one core with the firmware's diagnostic PERF sampler
+while the tests run (`--profile-core 0` for the display/automation core) and
+saves `perf.json` (cycles, retired instructions, 68k instruction count,
+L1/L2 cache counters for both cores) and `perf-samples.bin` (host PC and
+return address, 68k PC and opcode per sample). `tools/perf_report.py` needs
+the exact firmware ELF that was running. The cache "miss" registers advance
+per stall cycle rather than per line fill; read them as stall proxies.
+
+Diagnostic commands (all read-only for the guest):
+
+| Command | Reply |
+|---|---|
+| `PERF START hz capacity [core]` / `PERF STOP` / `PERF FREE` | Start/stop the sampler; free its PSRAM buffer |
+| `PERF STATE` | Counters for the last window and sample count |
+| `PERF READ offset` | Up to 24 raw samples as hex |
+| `PEEK hexaddr length` | Up to 256 bytes of guest RAM or ROM as hex |
+| `PANEL VERIFY` | Compares every physical panel pixel with the guest frame buffer's palette color |
+
+`PANEL VERIFY` reads the panel through the display's scanout view, so it
+checks what is actually shown, including scaling and rotation. Run it on a
+settled screen with the touch overlay hidden; pixels the guest changes during
+the scan count as mismatches.

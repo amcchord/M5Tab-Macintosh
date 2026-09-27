@@ -1351,6 +1351,13 @@ static void composite_key(uint16_t *buf, int tile_x, int tile_y, int tw, int th,
     }
 }
 
+bool TouchOverlay_TileCovered(int tile_x, int tile_y, int tile_w, int tile_h)
+{
+    return s_frame.mode != TOUCH_OVERLAY_NONE &&
+           tile_x + tile_w > s_frame.x && tile_y + tile_h > s_frame.y &&
+           tile_x < s_frame.x + s_frame.w && tile_y < s_frame.y + s_frame.h;
+}
+
 void TouchOverlay_CompositeTile(int tile_x, int tile_y,
                                 int tile_w, int tile_h,
                                 uint16_t *pixels)

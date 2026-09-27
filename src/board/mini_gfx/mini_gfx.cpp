@@ -28,6 +28,19 @@
 
 #include "esp_log.h"
 #include "esp_cache.h"
+#if defined(ESP_PLATFORM)
+#include "esp_memory_utils.h"
+#include "soc/ext_mem_defs.h"
+#endif
+
+static uint16_t *nonCacheableAlias(uint16_t *fb)
+{
+#if defined(ESP_PLATFORM) && defined(SOC_NON_CACHEABLE_OFFSET)
+    if (esp_ptr_external_ram(fb))
+        return reinterpret_cast<uint16_t *>(reinterpret_cast<uintptr_t>(fb) + SOC_NON_CACHEABLE_OFFSET);
+#endif
+    return fb;
+}
 
 static const char *TAG = "mini_gfx";
 
@@ -47,6 +60,7 @@ bool MiniGfx::beginExternalFb(void *external_fb,
     _pw = panel_w;
     _ph = panel_h;
     _fb = static_cast<uint16_t *>(external_fb);
+    _scanout = nonCacheableAlias(_fb);
     /* Start from a known state so early reads see a clean canvas. */
     const size_t n = static_cast<size_t>(_pw) * static_cast<size_t>(_ph);
     for (size_t i = 0; i < n; ++i) _fb[i] = 0;
@@ -308,7 +322,8 @@ bool MiniGfx::flushRows(int first, int last)
     if (!_fb || first < 0 || last <= first || last > _ph) return false;
     const esp_err_t err = esp_cache_msync(_fb + first * _pw,
         (last - first) * _pw * sizeof(uint16_t),
-        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_INVALIDATE |
+        ESP_CACHE_MSYNC_FLAG_UNALIGNED);
     if (err != ESP_OK) ESP_LOGE(TAG, "panel cache sync failed: %s", esp_err_to_name(err));
     return err == ESP_OK;
 }

@@ -39,8 +39,23 @@ extern "C" bool BoardDisplay_BeginTiles(void)
 extern "C" bool BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t *pixels)
 {
     const bool flip = s_gfx.flip180();
-    if (!writePanelTile(s_gfx.portraitFb(), s_gfx.panelW(), s_gfx.panelH(),
+    if (!writePanelTile(s_gfx.scanoutFb(), s_gfx.panelW(), s_gfx.panelH(),
                          flip, x, y, w, h, pixels)) return false;
+    const int first = flip ? s_gfx.panelH() - x - w : x;
+    const int last = first + w;
+    if (first < s_first_row) s_first_row = first;
+    if (last > s_last_row) s_last_row = last;
+    return true;
+}
+
+extern "C" bool BoardDisplay_PushIndexedTile(int x, int y, int w, int h, const uint8_t *src,
+                                             uint32_t stride, int bits, int first_pixel,
+                                             const uint32_t *pairs)
+{
+    const bool flip = s_gfx.flip180();
+    if (!writePanelIndexedTile2x(s_gfx.scanoutFb(), s_gfx.panelW(), s_gfx.panelH(),
+                                 flip, x, y, w, h, src, stride, bits, first_pixel, pairs))
+        return false;
     const int first = flip ? s_gfx.panelH() - x - w : x;
     const int last = first + w;
     if (first < s_first_row) s_first_row = first;
@@ -50,7 +65,10 @@ extern "C" bool BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t
 
 extern "C" bool BoardDisplay_EndTiles(void)
 {
-    const bool ok = s_first_row >= s_last_row || s_gfx.flushRows(s_first_row, s_last_row);
+    // Tiles are written through the non-cacheable scanout view when one
+    // exists; only a cached view needs its rows written back.
+    const bool ok = s_first_row >= s_last_row || !s_gfx.scanoutIsCached() ||
+                    s_gfx.flushRows(s_first_row, s_last_row);
     xSemaphoreGive(s_surface_mutex);
     return ok;
 }

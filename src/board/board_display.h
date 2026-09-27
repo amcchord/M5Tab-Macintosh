@@ -16,12 +16,19 @@ extern "C" {
 bool BoardDisplay_Init(void);
 int  BoardDisplay_Width(void);
 int  BoardDisplay_Height(void);
-// Begin/End serialize a batch; PushTile copies synchronously. End publishes
-// CPU cache lines to scanout. End must follow a successful Begin. On any
-// failure the caller retains its dirty tiles and retries the batch.
+// Begin/End serialize a batch; PushTile copies synchronously, through the
+// panel's non-cacheable view when available. End publishes any cached lines
+// to scanout. End must follow a successful Begin. On any failure the caller
+// retains its dirty tiles and retries the batch.
 bool BoardDisplay_BeginTiles(void);
 bool BoardDisplay_EndTiles(void);
 bool BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t *pixels);
+// Pixel-doubled indexed variant: renders w/2 x h/2 source pixels of `bits`
+// depth starting at column `first_pixel` of `src` (rows `stride` bytes apart)
+// through `pairs` (RGB565 in both halfwords).
+bool BoardDisplay_PushIndexedTile(int x, int y, int w, int h, const uint8_t *src,
+                                  uint32_t stride, int bits, int first_pixel,
+                                  const uint32_t *pairs);
 void BoardDisplay_SetBacklight(int percent);
 
 /**
