@@ -27,6 +27,9 @@
  *      pixel's 2x2 block).
  */
 
+#ifdef OVERLAY_HOST_TEST
+#include "overlay_test_stubs.h"
+#else
 #include "touch_overlay.h"
 
 /* sysdeps.h must come before adb.h to provide the short integer typedefs
@@ -39,6 +42,9 @@
 #include "chicago_font_data.h"
 
 #include <Arduino.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -175,6 +181,29 @@ static int              s_overlay_bbox_x = 0;
 static int              s_overlay_bbox_y = 0;
 static int              s_overlay_bbox_w = 0;
 static int              s_overlay_bbox_h = 0;
+
+// Input state has one owner at a time. Rendering reads a separate published
+// snapshot, so switching layouts or highlighting keys cannot change a batch
+// halfway through compositing. The spinlock covers copies only, never pixels,
+// ADB calls, serial output, or blocking operations.
+struct OverlayRenderState {
+    TouchOverlayMode mode;
+    int x, y, w, h, count;
+    OverlayKey keys[OVERLAY_MAX_KEYS];
+};
+static SemaphoreHandle_t s_input_mutex = nullptr;
+static portMUX_TYPE s_render_lock = portMUX_INITIALIZER_UNLOCKED;
+static OverlayRenderState s_published = {}, s_frame = {};
+static int s_damage_x = 0, s_damage_y = 0, s_damage_w = 0, s_damage_h = 0;
+static void publish_overlay_state();
+
+struct OverlayInputGuard {
+    OverlayInputGuard() { xSemaphoreTake(s_input_mutex, portMAX_DELAY); }
+    ~OverlayInputGuard() {
+        publish_overlay_state();
+        xSemaphoreGive(s_input_mutex);
+    }
+};
 
 /* ----- Slot tracking ----- */
 struct OverlaySlot {
@@ -422,17 +451,50 @@ static void rebuild_overlay_bbox(void)
 
 extern "C" void VideoMarkTilesDirtyRect(int px, int py, int pw, int ph);
 
+static void queue_overlay_damage(int x, int y, int w, int h)
+{
+    if (w <= 0 || h <= 0) return;
+    if (s_damage_w == 0) {
+        s_damage_x = x; s_damage_y = y; s_damage_w = w; s_damage_h = h;
+        return;
+    }
+    const int x0 = x < s_damage_x ? x : s_damage_x;
+    const int y0 = y < s_damage_y ? y : s_damage_y;
+    const int x1 = x + w > s_damage_x + s_damage_w ? x + w : s_damage_x + s_damage_w;
+    const int y1 = y + h > s_damage_y + s_damage_h ? y + h : s_damage_y + s_damage_h;
+    s_damage_x = x0; s_damage_y = y0; s_damage_w = x1 - x0; s_damage_h = y1 - y0;
+}
+
+static void publish_overlay_state()
+{
+    int count = 0;
+    const OverlayKey *layout = active_layout(&count);
+    portENTER_CRITICAL(&s_render_lock);
+    s_published.mode = s_mode;
+    s_published.x = s_overlay_bbox_x; s_published.y = s_overlay_bbox_y;
+    s_published.w = s_overlay_bbox_w; s_published.h = s_overlay_bbox_h;
+    s_published.count = count;
+    if (count) memcpy(s_published.keys, layout, count * sizeof(OverlayKey));
+    portEXIT_CRITICAL(&s_render_lock);
+    // Publish state BEFORE damage. The renderer collects damage BEFORE taking
+    // its snapshot. Reversing either order can strand a stale overlay tile.
+    if (s_damage_w > 0) {
+        VideoMarkTilesDirtyRect(s_damage_x, s_damage_y, s_damage_w, s_damage_h);
+        s_damage_w = s_damage_h = 0;
+    }
+}
+
 static void mark_overlay_dirty(void)
 {
     if (s_overlay_bbox_w <= 0 || s_overlay_bbox_h <= 0) return;
-    VideoMarkTilesDirtyRect(s_overlay_bbox_x, s_overlay_bbox_y,
+    queue_overlay_damage(s_overlay_bbox_x, s_overlay_bbox_y,
                             s_overlay_bbox_w, s_overlay_bbox_h);
 }
 
 static void mark_key_dirty(const OverlayKey *k)
 {
     if (!k || k->w <= 0 || k->h <= 0) return;
-    VideoMarkTilesDirtyRect(k->x, k->y, k->w, k->h);
+    queue_overlay_damage(k->x, k->y, k->w, k->h);
 }
 
 /* ============================================================================
@@ -558,9 +620,7 @@ static void toggle_mode(TouchOverlayMode target)
     if (s_mode == target) {
         /* Same-mode retap hides the overlay. */
         release_all_keys();
-        TouchOverlayMode old_mode = s_mode;
         s_mode = TOUCH_OVERLAY_NONE;
-        (void)old_mode;
         mark_overlay_dirty();
         s_overlay_bbox_x = s_overlay_bbox_y = 0;
         s_overlay_bbox_w = s_overlay_bbox_h = 0;
@@ -580,7 +640,7 @@ static void toggle_mode(TouchOverlayMode target)
     /* Dirty both old and new regions so the previously-painted overlay
      * pixels get overwritten with fresh Mac content. */
     if (old_bw > 0 && old_bh > 0) {
-        VideoMarkTilesDirtyRect(old_bx, old_by, old_bw, old_bh);
+        queue_overlay_damage(old_bx, old_by, old_bw, old_bh);
     }
     mark_overlay_dirty();
 
@@ -806,7 +866,7 @@ static void handle_slot_down(int slot_i, int px, int py, int hw_id, uint32_t now
      *   overlay visible && touch inside a key rect -> key
      *   otherwise                                  -> mouse (one active at a time)
      */
-    if (TouchOverlay_IsVisible()) {
+    if (s_mode != TOUCH_OVERLAY_NONE) {
         int ki = hit_test_key(px, py);
         if (ki >= 0) {
             s->key_index = ki;
@@ -900,6 +960,8 @@ static void cancel_all_slots_for_gesture(void)
 
 void TouchOverlay_Update(const BoardTouchMulti *multi)
 {
+    if (!s_input_mutex) return;
+    OverlayInputGuard guard;
     if (!s_touch_enabled) {
         /* If touch was disabled mid-gesture, make sure we clean up. */
         for (int i = 0; i < SLOT_CAPACITY; ++i) {
@@ -1024,6 +1086,9 @@ void TouchOverlay_Update(const BoardTouchMulti *multi)
 
 void TouchOverlay_Init(int display_w, int display_h, int mac_w, int mac_h)
 {
+    if (!s_input_mutex) s_input_mutex = xSemaphoreCreateMutex();
+    if (!s_input_mutex) return;
+    OverlayInputGuard guard;
     s_disp_w = display_w;
     s_disp_h = display_h;
     s_mac_w  = mac_w;
@@ -1053,16 +1118,21 @@ void TouchOverlay_Init(int display_w, int display_h, int mac_w, int mac_h)
 
 void TouchOverlay_Shutdown(void)
 {
+    if (!s_input_mutex) return;
+    OverlayInputGuard guard;
     release_all_keys();
     mouse_cancel();
     for (int i = 0; i < SLOT_CAPACITY; ++i) {
         s_slots[i].active = false;
     }
     s_mode = TOUCH_OVERLAY_NONE;
+    mark_overlay_dirty();
 }
 
 void TouchOverlay_SetTouchEnabled(bool enabled)
 {
+    if (!s_input_mutex) return;
+    OverlayInputGuard guard;
     if (enabled == s_touch_enabled) return;
     s_touch_enabled = enabled;
     if (!enabled) {
@@ -1076,9 +1146,22 @@ void TouchOverlay_SetTouchEnabled(bool enabled)
     }
 }
 
-TouchOverlayMode TouchOverlay_GetMode(void) { return s_mode; }
+TouchOverlayMode TouchOverlay_GetMode(void)
+{
+    portENTER_CRITICAL(&s_render_lock);
+    const TouchOverlayMode mode = s_published.mode;
+    portEXIT_CRITICAL(&s_render_lock);
+    return mode;
+}
 
-bool TouchOverlay_IsVisible(void) { return s_mode != TOUCH_OVERLAY_NONE; }
+bool TouchOverlay_IsVisible(void) { return TouchOverlay_GetMode() != TOUCH_OVERLAY_NONE; }
+
+void TouchOverlay_BeginFrame(void)
+{
+    portENTER_CRITICAL(&s_render_lock);
+    s_frame = s_published;
+    portEXIT_CRITICAL(&s_render_lock);
+}
 
 /* ============================================================================
  * Stipple compositor
@@ -1272,23 +1355,22 @@ void TouchOverlay_CompositeTile(int tile_x, int tile_y,
                                 int tile_w, int tile_h,
                                 uint16_t *pixels)
 {
-    if (s_mode == TOUCH_OVERLAY_NONE) return;
+    if (s_frame.mode == TOUCH_OVERLAY_NONE) return;
     if (!pixels || tile_w <= 0 || tile_h <= 0) return;
 
     /* Early-out when the tile doesn't intersect the overlay bbox. */
-    if (tile_x + tile_w <= s_overlay_bbox_x
-        || tile_y + tile_h <= s_overlay_bbox_y
-        || tile_x >= s_overlay_bbox_x + s_overlay_bbox_w
-        || tile_y >= s_overlay_bbox_y + s_overlay_bbox_h) {
+    if (tile_x + tile_w <= s_frame.x
+        || tile_y + tile_h <= s_frame.y
+        || tile_x >= s_frame.x + s_frame.w
+        || tile_y >= s_frame.y + s_frame.h) {
         return;
     }
 
-    int count = 0;
-    OverlayKey *layout = active_layout(&count);
-    if (!layout) return;
+    const int count = s_frame.count;
+    const OverlayKey *layout = s_frame.keys;
 
     for (int i = 0; i < count; ++i) {
-        OverlayKey *k = &layout[i];
+        const OverlayKey *k = &layout[i];
         if (k->x + k->w <= tile_x
             || k->y + k->h <= tile_y
             || k->x >= tile_x + tile_w

@@ -477,3 +477,33 @@ The final commit from this round keeps only:
 None of which actually move the benchmark. Real gains from here will
 require either newer ESP32-P4 silicon (rev 3.01+) or per-opcode work
 inside `m68k_do_execute`.
+
+
+## Display reliability audit — 2026-09-26
+
+Scope: review v3.4.2 through v4.7.1 and repair display/input correctness.
+Candidate branch: `codex/display-reliability`, based on v4.7.1 / `11f4d60`.
+Worktree: `/Users/austinmcchord/.codex/worktrees/display-reliability/M5Tab-Macintosh`.
+The control checkout's uncommitted performance branch was preserved and has
+not been integrated. This pass is not a new performance benchmark.
+
+Implemented shared direct panel publication, complete atomic damage tracking,
+coherent palette/mode and overlay snapshots, publication retry, bounded splash
+handoff, renderer shutdown handshake and capture lifetime protection. Removed
+duplicate asynchronous DMA paths and unused buffers. Added conservative
+QuickDraw fallbacks, report-ID-aware mouse decoding and serialized key claims.
+See `DISPLAY_RELIABILITY_REVIEW.md` for findings and the ownership contract.
+
+Verification after code freeze: 46 host tests passed in 7.038 seconds,
+including six ASan/UBSan native targets; all five PlatformIO environments
+passed in 206.077 seconds. `git diff --check` passed. Test/build logs are in
+ignored `artifacts/display-reliability/` in this checkout; candidate images,
+SHA256 manifest and the review are in the control checkout's ignored
+`artifacts/display-reliability-20260926/`.
+
+No flashing, device interaction, push or published release. The firmware
+still reports version 4.7.1; artifact names and the saved source SHA identify
+this candidate. Single-buffer tearing, hardware compatibility and performance
+remain to be tested. Next: Austin flashes the matching board/silicon profile
+and follows the hardware checklist, then integrates with performance work
+if the result is accepted.

@@ -1,13 +1,7 @@
-/*
- * board_display.h - display bring-up + framebuffer push + drawing surface
- *
- * The drawing surface for boot_gui.cpp / main.cpp is exposed as a C++
- * reference from BoardDisplay_Gfx(). Both boards use the same MiniGfx
- * software RGB565 canvas, flushed to the panel via
- * esp_lcd_panel_draw_bitmap.
- *
- * The video pipeline (video_esp32.cpp) does NOT go through BoardDisplay_Gfx.
- * It pushes RGB565 tiles directly via BoardDisplay_PushTile().
+/* Display HAL: board-specific panel setup, shared RGB565 surface and cache
+ * publication. Boot UI owns MiniGfx until it hands off to the video task.
+ * The video task converts guest pixels, composites overlays, then pushes
+ * landscape tiles into that same panel-owned surface. No asynchronous copies.
  */
 #pragma once
 
@@ -22,21 +16,12 @@ extern "C" {
 bool BoardDisplay_Init(void);
 int  BoardDisplay_Width(void);
 int  BoardDisplay_Height(void);
-void BoardDisplay_BeginTiles(void);
-void BoardDisplay_EndTiles(void);
-void BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t *pixels);
-void BoardDisplay_WaitPush(void);
-void BoardDisplay_PushFullFrame(const uint16_t *pixels);
-
-/**
- * @brief Paint the full display with a single RGB565 color.
- *
- *  Used by the video subsystem to blank the screen on init. The HAL
- *  picks whatever scratch buffer or fill primitive is cheapest on the
- *  current board. Does not require a prior BeginTiles/EndTiles pair.
- */
-void BoardDisplay_ClearScreen(uint16_t color);
-void BoardDisplay_FillRect(int x, int y, int w, int h, uint16_t color);
+// Begin/End serialize a batch; PushTile copies synchronously. End publishes
+// CPU cache lines to scanout. End must follow a successful Begin. On any
+// failure the caller retains its dirty tiles and retries the batch.
+bool BoardDisplay_BeginTiles(void);
+bool BoardDisplay_EndTiles(void);
+bool BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t *pixels);
 void BoardDisplay_SetBacklight(int percent);
 
 /**
@@ -58,8 +43,8 @@ void BoardDisplay_SetFlip180(bool flip);
 
 /**
  * @brief Flush the software drawing surface to the physical panel. On
- *        both boards this copies the MiniGfx PSRAM framebuffer to the
- *        MIPI-DSI back buffer via esp_lcd_panel_draw_bitmap.
+ *        both boards MiniGfx shares the panel framebuffer; this publishes
+ *        CPU cache lines for continuous DSI scanout.
  */
 void BoardDisplay_Present(void);
 
@@ -67,8 +52,7 @@ void BoardDisplay_Present(void);
 } /* extern "C" */
 
 /* Typed C++ accessor - returns the per-board drawing surface. Both
- * supported boards now use the MiniGfx software framebuffer backed by
- * esp_lcd_panel_draw_bitmap, so the surface type is uniform across
+ * supported boards use MiniGfx on the panel-owned framebuffer, uniform across
  * boards and callers don't need board-specific drawing code. */
 
 #if defined(BOARD_M5STACK_TAB5) || defined(BOARD_WAVESHARE_P4_101)

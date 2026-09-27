@@ -27,51 +27,19 @@
 #include <stdlib.h>
 
 #include "esp_log.h"
-#include "esp_heap_caps.h"
-#include "esp_lcd_panel_ops.h"
+#include "esp_cache.h"
 
 static const char *TAG = "mini_gfx";
 
 MiniGfx::MiniGfx() = default;
 
-bool MiniGfx::beginSansPanel(int logical_w, int logical_h, int panel_w, int panel_h)
-{
-    _lw = logical_w;
-    _lh = logical_h;
-    _pw = panel_w;
-    _ph = panel_h;
-
-    if (_fb == nullptr) {
-        size_t bytes = static_cast<size_t>(_pw) * static_cast<size_t>(_ph) * 2u;
-        _fb = static_cast<uint16_t *>(heap_caps_aligned_alloc(
-            64, bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        if (!_fb) {
-            ESP_LOGE(TAG, "failed to allocate %u byte framebuffer", (unsigned)bytes);
-            return false;
-        }
-        memset(_fb, 0, bytes);
-        _fb_owned = true;
-    }
-    return true;
-}
-
-bool MiniGfx::begin(void *panel_handle,
-                    int logical_w, int logical_h,
-                    int panel_w,   int panel_h)
-{
-    if (!beginSansPanel(logical_w, logical_h, panel_w, panel_h)) {
-        return false;
-    }
-    _panel = panel_handle;
-    return true;
-}
-
-bool MiniGfx::beginExternalFb(void *panel_handle, void *external_fb,
+bool MiniGfx::beginExternalFb(void *external_fb,
                               int logical_w, int logical_h,
                               int panel_w,   int panel_h)
 {
-    if (!external_fb) {
-        ESP_LOGE(TAG, "beginExternalFb: external_fb is null");
+    if (!external_fb || logical_w != panel_h || logical_h != panel_w ||
+        panel_w <= 0 || panel_h <= 0) {
+        ESP_LOGE(TAG, "beginExternalFb: invalid framebuffer or geometry");
         return false;
     }
     _lw = logical_w;
@@ -79,12 +47,10 @@ bool MiniGfx::beginExternalFb(void *panel_handle, void *external_fb,
     _pw = panel_w;
     _ph = panel_h;
     _fb = static_cast<uint16_t *>(external_fb);
-    _fb_owned = false;
-    _panel = panel_handle;
     /* Start from a known state so early reads see a clean canvas. */
     const size_t n = static_cast<size_t>(_pw) * static_cast<size_t>(_ph);
     for (size_t i = 0; i < n; ++i) _fb[i] = 0;
-    _dirty = true;
+    __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
     return true;
 }
 
@@ -101,7 +67,7 @@ inline void MiniGfx::writeLogicalPixel(int lx, int ly, uint16_t color)
         py = lx;
     }
     _fb[py * _pw + px] = color;
-    _dirty = true;
+    __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
 }
 
 void MiniGfx::fillLogicalRect(int lx, int ly, int lw, int lh, uint16_t color)
@@ -138,7 +104,7 @@ void MiniGfx::fillLogicalRect(int lx, int ly, int lw, int lh, uint16_t color)
             row[px] = color;
         }
     }
-    _dirty = true;
+    __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
 }
 
 static inline uint16_t rgb565_of(uint32_t c)
@@ -156,7 +122,7 @@ void MiniGfx::fillScreen(uint32_t color)
     const size_t n = static_cast<size_t>(_pw) * static_cast<size_t>(_ph);
     uint16_t *p = _fb;
     for (size_t i = 0; i < n; ++i) p[i] = c;
-    _dirty = true;
+    __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
 }
 
 void MiniGfx::fillRect(int x, int y, int w, int h, uint32_t color)
@@ -334,39 +300,24 @@ void MiniGfx::pushImage(int x, int y, int w, int h, const uint16_t *pixels)
             writeLogicalPixel(x + i, y + j, pixels[j * w + i]);
         }
     }
-    _dirty = true;
+    __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
 }
 
-extern "C" void BoardDisplay_ClaimDmaSlot(void);
-
-void MiniGfx::flushAllForce(void)
+bool MiniGfx::flushRows(int first, int last)
 {
-    if (!_panel || !_fb) return;
-    /* Wait for the previous MIPI-DSI framebuffer copy to finish before
-     * starting a new one. Without this gate the driver prints
-     *   "dpi_panel_draw_bitmap: previous draw operation is not finished"
-     * and the frame is dropped. The semaphore lives inside the board's
-     * display HAL and is released by the DSI trans_done callback. */
-    BoardDisplay_ClaimDmaSlot();
-    esp_lcd_panel_draw_bitmap(static_cast<esp_lcd_panel_handle_t>(_panel),
-                              0, 0, _pw, _ph, _fb);
-    _dirty = false;
+    if (!_fb || first < 0 || last <= first || last > _ph) return false;
+    const esp_err_t err = esp_cache_msync(_fb + first * _pw,
+        (last - first) * _pw * sizeof(uint16_t),
+        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    if (err != ESP_OK) ESP_LOGE(TAG, "panel cache sync failed: %s", esp_err_to_name(err));
+    return err == ESP_OK;
 }
 
 void MiniGfx::flushAll(void)
 {
-    /* Skip the DMA2D copy when nothing has been drawn since the last
-     * flush. The boot GUI's touch task calls BoardDisplay_Present()
-     * every 16 ms; without this guard we hammer the DPI panel with
-     * redundant full-frame writes, which on the Tab5 panel produces a
-     * visible black/content flicker. */
-    if (!_dirty) return;
-    flushAllForce();
-}
-
-void MiniGfx::flushRect(int /*x*/, int /*y*/, int /*w*/, int /*h*/)
-{
-    /* Granular flush not worth the extra mapping math for boot GUI. Push the
-     * whole frame; the MIPI-DSI DMA is fast enough (2MB @ >100MB/s). */
-    flushAll();
+    // The boot touch task can publish while the GUI draws on the other core.
+    // Consume damage BEFORE writeback so a concurrent draw always schedules
+    // another flush. Clearing it afterwards can permanently lose that draw.
+    if (!__atomic_exchange_n(&_dirty, false, __ATOMIC_ACQ_REL)) return;
+    if (!flushRows(0, _ph)) __atomic_store_n(&_dirty, true, __ATOMIC_RELEASE);
 }

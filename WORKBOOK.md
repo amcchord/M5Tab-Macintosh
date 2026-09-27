@@ -1,5 +1,32 @@
 # M5Tab-Macintosh workbook
 
+## Display reliability candidate — 2026-09-26
+
+Active work is on local branch `codex/display-reliability`, based on v4.7.1,
+in the attached checkout
+`/Users/austinmcchord/.codex/worktrees/display-reliability/M5Tab-Macintosh`.
+The original control checkout's uncommitted performance work is preserved;
+these changes have not been integrated with it or pushed.
+
+[DISPLAY_RELIABILITY_REVIEW.md](DISPLAY_RELIABILITY_REVIEW.md) records the
+v3.4.2–v4.7.1 audit, fixed defects, display ownership contract, verification
+and hardware checklist. Both boards now share synchronous publication into
+their panel-owned framebuffer. Damage, palette/mode, overlay snapshots,
+shutdown and screenshot lifetime have explicit ordering. Conservative
+QuickDraw guards and HID/key-ownership fixes cover adjacent corruption risks.
+
+The final host suite passes 46 tests, including six native targets with
+AddressSanitizer/UndefinedBehaviorSanitizer. All five firmware profiles build.
+Build results and test logs are
+in this checkout's ignored `artifacts/display-reliability/`. Candidate images
+are retained under the control checkout's
+`artifacts/display-reliability-20260926/`, with source SHA and checksums.
+
+Next action: Austin flashes the matching candidate and performs the checklist.
+No hardware was accessed or flashed in this task. Single-buffer optical
+tearing and performance still need measurement. The device-state statements
+below are historical v4.7.1 evidence, not validation of this candidate.
+
 ## v4.7.1 release — 2026-09-26
 
 The control checkout is the project root. Branch

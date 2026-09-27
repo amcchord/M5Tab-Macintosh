@@ -8,12 +8,14 @@
 
 #include <string.h>
 
+#include "quickdraw_accel.h"
+#ifndef QUICKDRAW_HOST_TEST
 #include "sysdeps.h"
 #include "cpu_emulation.h"
-#include "quickdraw_accel.h"
 #include "video.h"
 #include "uae_cpu/memory.h"
 #include "uae_cpu/newcpu.h"
+#endif
 
 #ifdef ARDUINO
 #include <esp_attr.h>
@@ -318,6 +320,9 @@ static bool readBitmap(uint32 address, NativeBitmap &bitmap)
     if (row_word & 0x8000) {
         if (!guestRamRange(record, 50)) return false;
         depth = (uint16)get_word(record + 32);
+        if (get_word(record + 30) != 0 || get_word(record + 34) != 1 ||
+            get_word(record + 36) != depth || get_word(record + 16) != 0)
+            return false; // Unpacked, single-component indexed pixels only.
     }
     if (depth != 1 && depth != 8) return false;
     const uint32 width = (uint32)(bounds.right - bounds.left);
@@ -629,6 +634,32 @@ static bool sameBitmap(const NativeBitmap &a, const NativeBitmap &b)
            a.bounds.bottom == b.bounds.bottom && a.bounds.right == b.bounds.right;
 }
 
+// Raw native copies cannot translate color tables or safely traverse aliases
+// with different origins/strides. Leave these cases to guest QuickDraw before
+// touching any destination pixels. Equal table handles are a conservative
+// guarantee: equivalent-but-distinct tables can still use the guest path.
+static bool rawCopyCompatible(const NativeBitmap &a, const NativeBitmap &b)
+{
+    if (a.depth != b.depth) return false;
+    const bool a_pixmap = (get_word(a.record + 4) & 0x8000) != 0;
+    const bool b_pixmap = (get_word(b.record + 4) & 0x8000) != 0;
+    if (a_pixmap != b_pixmap) return false;
+    if (a_pixmap) {
+        const uint32 table = get_long(a.record + 42);
+        if (!table || table != get_long(b.record + 42) ||
+            !guestRamRange(table, 4) || !guestRamRange(get_long(table), 8))
+            return false;
+    }
+    if (!sameBitmap(a, b)) {
+        const uint64 a_end = (uint64)a.base +
+            (uint64)a.row_bytes * (uint32)(a.bounds.bottom - a.bounds.top);
+        const uint64 b_end = (uint64)b.base +
+            (uint64)b.row_bytes * (uint32)(b.bounds.bottom - b.bounds.top);
+        if ((uint64)a.base < b_end && (uint64)b.base < a_end) return false;
+    }
+    return true;
+}
+
 static bool copyRectBytes(const NativeBitmap &src_bitmap,
                           const NativeBitmap &dst_bitmap,
                           const QDRect &src_rect, const QDRect &dst_rect,
@@ -636,7 +667,8 @@ static bool copyRectBytes(const NativeBitmap &src_bitmap,
 {
     const int32 original_width = src_rect.right - src_rect.left;
     const int32 original_height = src_rect.bottom - src_rect.top;
-    if (original_width <= 0 || original_height <= 0 ||
+    if (!rawCopyCompatible(src_bitmap, dst_bitmap) ||
+        original_width <= 0 || original_height <= 0 ||
         src_bitmap.depth != dst_bitmap.depth ||
         original_width != dst_rect.right - dst_rect.left ||
         original_height != dst_rect.bottom - dst_rect.top) {
@@ -992,7 +1024,8 @@ static bool copyPortRectBytes(const NativeBitmap &source_bitmap,
 {
     const int32 width = destination_rect.right - destination_rect.left;
     const int32 height = destination_rect.bottom - destination_rect.top;
-    if (width <= 0 || height <= 0 ||
+    if (!rawCopyCompatible(source_bitmap, destination_bitmap) ||
+        width <= 0 || height <= 0 ||
         source_bitmap.depth != destination_bitmap.depth ||
         width != source_rect.right - source_rect.left ||
         height != source_rect.bottom - source_rect.top) {
@@ -1287,7 +1320,9 @@ static bool tryMoveTo(uint32 sp)
         return false;
     }
     NativeBitmap bitmap;
-    if (!readBitmap(port + 2, bitmap) || bitmap.depth != 1) {
+    if (!readBitmap(port + 2, bitmap) || bitmap.depth != 1 ||
+        get_long(port + 92) || get_long(port + 96) ||
+        get_long(port + 100) || get_long(port + 104)) {
         ++s_stats.move_failures;
         return false;
     }
@@ -1492,7 +1527,7 @@ static bool tryScrollRect(uint32 sp)
         return false;
     }
     NativePort port;
-    if (!readCurrentPort(port)) {
+    if (!readCurrentPort(port) || !port.visible.simple || !port.clipping.simple) {
         ++s_stats.scroll_port_failures;
         return false;
     }
