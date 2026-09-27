@@ -586,6 +586,11 @@ void EmulOp(uint16 opcode, M68kRegisters *r)
 
 			if (irq_flags & INTFLAG_1HZ) {
 				if (mac_started) {
+					// The VIA one-second interrupt that advances the Time
+					// global is not emulated. Refresh it from the RTC backend
+					// like upstream's one_second(), or GetDateTime and the
+					// menu-bar clock stay at the boot-time value.
+					WriteMacInt32(0x20c, TimerDateTime());
 					SonyInterrupt();
 					DiskInterrupt();
 					CDROMInterrupt();
