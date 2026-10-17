@@ -98,14 +98,77 @@ static void test_indexed_rotation()
     }
 }
 
+// The 1x indexed path must equal unpacking (no doubling) followed by
+// writePanelTile, at every packed depth, alignment, and odd/even geometry.
+static void test_indexed_1x()
+{
+    std::vector<uint32_t> pairs(256);
+    std::vector<uint16> palette(256);
+    for (int i = 0; i < 256; ++i) { palette[i] = rng(); pairs[i] = palette[i] * 0x00010001u; }
+    for (int bits : {1, 2, 4, 8}) for (int pw : {360, 400}) for (bool flip : {false, true}) {
+        std::vector<uint16> actual(pw * 1280, 0xdead), expected = actual;
+        for (int trial = 0; trial < 60; ++trial) {
+            const int sw = 1 + rng() % 70, sh = 1 + rng() % 50, first = rng() % 40;
+            const int stride = ((first + sw) * bits + 7) / 8 + rng() % 5;
+            const int x = rng() % (1281 - sw), y = rng() % (pw + 1 - sh);
+            std::vector<uint8> src(stride * sh);
+            for (auto &v : src) v = rng();
+            std::vector<uint16> unpacked(sw * sh);
+            for (int r = 0; r < sh; ++r) for (int c = 0; c < sw; ++c) {
+                const int bit = (first + c) * bits;
+                const int index = (src[r * stride + bit / 8] >> (8 - bits - bit % 8)) & ((1 << bits) - 1);
+                unpacked[r * sw + c] = palette[index];
+            }
+            assert(writePanelTile(expected.data(), pw, 1280, flip, x, y, sw, sh, unpacked.data()));
+            assert(writePanelIndexedTile1x(actual.data(), pw, 1280, flip, x, y, sw, sh,
+                                           src.data(), stride, bits, first, pairs.data()));
+            assert(actual == expected);
+        }
+        // Odd w/h/y are valid at 1x (no even-geometry requirement).
+        const uint8_t src1 = 0xA5;
+        const uint16_t probe = palette[(src1 >> (8 - bits)) & ((1 << bits) - 1)];
+        assert(writePanelTile(expected.data(), pw, 1280, flip, 3, pw - 5, 1, 1, &probe));
+        assert(writePanelIndexedTile1x(actual.data(), pw, 1280, flip, 3, pw - 5, 1, 1,
+                                       &src1, 40, bits, 0, pairs.data()));
+        assert(actual == expected);
+        assert(!writePanelIndexedTile1x(actual.data(), pw, 1280, flip, 1270, 0, 80, 80,
+                                        nullptr, 40, bits, 0, pairs.data()));
+        assert(!writePanelIndexedTile1x(actual.data(), pw, 1280, flip, 0, pw, 80, 80,
+                                        (const uint8 *)actual.data(), 40, bits, 0, pairs.data()));
+        assert(!writePanelIndexedTile1x(actual.data(), pw, 1280, flip, 0, 0, 80, 80,
+                                        (const uint8 *)actual.data(), 40, 3, 0, pairs.data()));
+        assert(actual == expected);
+    }
+}
+
+// renderTileFromSnapshot must fill exactly the scale-sized buffer that
+// renderAndPushDirtyTiles allocates; a 2x-hardwired expansion would overflow
+// it at PIXEL_SCALE 1 (caught by ASan) and underfill it at 2x.
+static void test_render_snapshot()
+{
+    const int scale = PIXEL_SCALE;
+    std::vector<uint8> snapshot(TILE_WIDTH * TILE_HEIGHT);
+    std::vector<uint16> palette(256);
+    std::vector<uint16> out(TILE_WIDTH * scale * TILE_HEIGHT * scale);
+    for (auto &v : snapshot) v = rng();
+    for (auto &v : palette) v = rng();
+    renderTileFromSnapshot(snapshot.data(), palette.data(), out.data());
+    for (int y = 0; y < TILE_HEIGHT; ++y)
+        for (int x = 0; x < TILE_WIDTH; ++x)
+            for (int dy = 0; dy < scale; ++dy)
+                for (int dx = 0; dx < scale; ++dx)
+                    assert(out[(y * scale + dy) * TILE_WIDTH * scale + x * scale + dx] ==
+                           palette[snapshot[y * TILE_WIDTH + x]]);
+}
+
 static void assert_panel(const std::vector<uint16> &panel, const std::vector<uint8> &guest,
                          video_depth depth, bool flip)
 {
     const int bits = 1 << depth, ppb = 8 / bits, stride = MAC_SCREEN_WIDTH / ppb;
     for (int y = 0; y < MAC_SCREEN_HEIGHT; ++y) for (int x = 0; x < MAC_SCREEN_WIDTH; ++x) {
         int index = (guest[y * stride + x / ppb] >> (8 - bits * (x % ppb + 1))) & ((1 << bits) - 1);
-        for (int dy = 0; dy < 2; ++dy) for (int dx = 0; dx < 2; ++dx) {
-            const int lx = x * 2 + dx, ly = y * 2 + dy;
+        for (int dy = 0; dy < PIXEL_SCALE; ++dy) for (int dx = 0; dx < PIXEL_SCALE; ++dx) {
+            const int lx = x * PIXEL_SCALE + dx, ly = y * PIXEL_SCALE + dy;
             const int px = flip ? ly : DISPLAY_HEIGHT - 1 - ly;
             const int py = flip ? DISPLAY_WIDTH - 1 - lx : lx;
             assert(panel[py * DISPLAY_HEIGHT + px] == palette_rgb565[index]);
@@ -230,6 +293,8 @@ static void test_lifecycle()
 
 int main()
 {
-    test_ranges(); test_rotation(); test_indexed_rotation(); test_pipeline(); test_lifecycle();
-    puts("PASS: randomized damage, panel rotation, production tile/palette pipeline, retries, splash and lifecycle");
+    test_ranges(); test_rotation(); test_indexed_rotation(); test_indexed_1x();
+    test_render_snapshot(); test_pipeline(); test_lifecycle();
+    puts("PASS: randomized damage, panel rotation, 2x/1x indexed tiles, scaled renderer, "
+         "production tile/palette pipeline, retries, splash and lifecycle");
 }

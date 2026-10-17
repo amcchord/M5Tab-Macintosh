@@ -5,15 +5,16 @@
  * at compile time based on the BOARD_* macro defined by the active
  * PlatformIO environment in platformio.ini.
  *
- * Exactly one of BOARD_M5STACK_TAB5 or BOARD_WAVESHARE_P4_101 must be set.
+ * Exactly one of BOARD_M5STACK_TAB5, BOARD_WAVESHARE_P4_101, or the
+ * host-test-only BOARD_HOST_SCALE1 must be set.
  */
 #pragma once
 
-#if !defined(BOARD_M5STACK_TAB5) && !defined(BOARD_WAVESHARE_P4_101)
+#if !defined(BOARD_M5STACK_TAB5) && !defined(BOARD_WAVESHARE_P4_101) && !defined(BOARD_HOST_SCALE1)
 #error "No board target defined. Set BOARD_M5STACK_TAB5 or BOARD_WAVESHARE_P4_101 via platformio.ini build_flags."
 #endif
 
-#if defined(BOARD_M5STACK_TAB5) && defined(BOARD_WAVESHARE_P4_101)
+#if (defined(BOARD_M5STACK_TAB5) + defined(BOARD_WAVESHARE_P4_101) + defined(BOARD_HOST_SCALE1)) != 1
 #error "Multiple board targets defined. Pick exactly one."
 #endif
 
@@ -85,6 +86,28 @@
 /* SD card - mounted by the Waveshare BSP at /sd (CONFIG_BSP_SD_MOUNT_POINT).
  * We do not use SPI mode here - the BSP configures SDMMC 4-bit slot 0. */
 #define BOARD_SD_MOUNT_POINT        "/sd"
+
+/* ------------------------------------------------------------------------- */
+/* Host scale-1 test panel (640x360, PIXEL_SCALE 1)                          */
+/* ------------------------------------------------------------------------- */
+#elif defined(BOARD_HOST_SCALE1)
+
+/* Host-test-only target (test/test_display_native.py): exercises the tile
+ * pipeline at one-to-one scale under ASan. Not a shipping board, so it
+ * defines display/tile geometry only. */
+#define BOARD_NAME                  "Host scale-1 test panel"
+
+#define BOARD_DISPLAY_WIDTH         640
+#define BOARD_DISPLAY_HEIGHT        360
+
+#define BOARD_MAC_SCREEN_WIDTH      640
+#define BOARD_MAC_SCREEN_HEIGHT     360
+#define BOARD_PIXEL_SCALE           1
+
+#define BOARD_TILE_WIDTH            32
+#define BOARD_TILE_HEIGHT           40
+#define BOARD_TILES_X               (BOARD_MAC_SCREEN_WIDTH  / BOARD_TILE_WIDTH)  /* 20 */
+#define BOARD_TILES_Y               (BOARD_MAC_SCREEN_HEIGHT / BOARD_TILE_HEIGHT) /* 9  */
 
 #endif
 

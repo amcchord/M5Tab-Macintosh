@@ -24,9 +24,10 @@ int  BoardDisplay_Height(void);
 bool BoardDisplay_BeginTiles(void);
 bool BoardDisplay_EndTiles(void);
 bool BoardDisplay_PushTile(int x, int y, int w, int h, const uint16_t *pixels);
-// Pixel-doubled indexed variant: renders w/2 x h/2 source pixels of `bits`
-// depth starting at column `first_pixel` of `src` (rows `stride` bytes apart)
-// through `pairs` (RGB565 in both halfwords).
+// Board-scaled indexed variant: renders w/SCALE x h/SCALE source pixels of
+// `bits` depth starting at column `first_pixel` of `src` (rows `stride`
+// bytes apart) through `pairs` (RGB565 in both halfwords; the 1x writer
+// uses the low halfword), where SCALE is BOARD_PIXEL_SCALE.
 bool BoardDisplay_PushIndexedTile(int x, int y, int w, int h, const uint8_t *src,
                                   uint32_t stride, int bits, int first_pixel,
                                   const uint32_t *pairs);
@@ -75,7 +76,7 @@ void BoardDisplay_Present(void);
  * supported boards use MiniGfx on the panel-owned framebuffer, uniform across
  * boards and callers don't need board-specific drawing code. */
 
-#if defined(BOARD_M5STACK_TAB5) || defined(BOARD_WAVESHARE_P4_101)
+#if defined(BOARD_M5STACK_TAB5) || defined(BOARD_WAVESHARE_P4_101) || defined(BOARD_HOST_SCALE1)
 #include "mini_gfx/mini_gfx.h"
 MiniGfx &BoardDisplay_Gfx_Board(void);
 static inline MiniGfx &BoardDisplay_Gfx(void) { return BoardDisplay_Gfx_Board(); }

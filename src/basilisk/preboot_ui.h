@@ -20,6 +20,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "board_config.h"
+
 namespace PrebootUI {
 
 struct Rect {
@@ -44,7 +46,7 @@ enum Color : uint8_t {
     kFirstDynamic
 };
 
-constexpr int kScale = 2;          /* panel pixels per logical pixel, each axis */
+constexpr int kScale = BOARD_PIXEL_SCALE;  /* panel pixels per logical pixel, each axis */
 constexpr int kMenuBarHeight = 20;
 constexpr int kTitleBarHeight = 20;  /* window frame top row to content top line */
 constexpr int kLineHeight = 16;      /* Charcoal 12 line spacing */

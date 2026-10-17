@@ -1,5 +1,6 @@
 /* ESP32 display pipeline: guest writes publish atomic damage; the video task
- * snapshots mode/palette and dirty tiles, expands indexed pixels at 2x, adds
+ * snapshots mode/palette and dirty tiles, expands indexed pixels at the
+ * board's PIXEL_SCALE (1x or 2x), adds
  * touch overlays, then writes the shared panel surface. Only a successful
  * cache publication acknowledges damage. Guest writes during rendering remain
  * pending for the next batch. Scanout itself is continuous (single buffer).
@@ -67,6 +68,12 @@
 // Physical display dimensions (post pixel-doubling)
 #define DISPLAY_WIDTH     BOARD_DISPLAY_WIDTH
 #define DISPLAY_HEIGHT    BOARD_DISPLAY_HEIGHT
+
+// The tile pipeline (indexed push, fallback renderer, DRAM buffer) supports
+// PIXEL_SCALE 1 (one-to-one) and 2 (pixel doubling) only.
+#if PIXEL_SCALE != 1 && PIXEL_SCALE != 2
+#error "PIXEL_SCALE must be 1 or 2"
+#endif
 
 // Tile-based dirty tracking. Grid dims come from board_config.h so each
 // board gets a 16x(N) grid that tiles its Mac framebuffer exactly.
@@ -675,17 +682,24 @@ static void snapshotTile(uint8 *src_buffer, int tile_x, int tile_y, uint8 *snaps
  */
 static void renderTileFromSnapshot(uint8 *snapshot, uint16 *local_palette, uint16 *out_buffer)
 {
-    int tile_pixel_width = TILE_WIDTH * PIXEL_SCALE;
-    
+    // Output geometry follows the board's PIXEL_SCALE: 1x writes one
+    // output row with one copy per source pixel; 2x duplicates each pixel
+    // into a 2x2 block (two output rows, two copies per pixel). The
+    // out_buffer is sized TILE_WIDTH*PIXEL_SCALE x TILE_HEIGHT*PIXEL_SCALE
+    // to match exactly.
+    const int scale = PIXEL_SCALE;
+    const int rows = scale > 1 ? 2 : 1;
+    const int tile_pixel_width = TILE_WIDTH * scale;
+
     uint8 *src = snapshot;
     uint16 *out = out_buffer;
-    
+
     // Process each row of the Mac tile
     for (int row = 0; row < TILE_HEIGHT; row++) {
-        // Output row pointers (two rows for 2x vertical scaling)
+        // Output row pointers (the second row is the 2x duplicate)
         uint16 *dst_row0 = out;
         uint16 *dst_row1 = out + tile_pixel_width;
-        
+
         // Process 4 pixels at a time for better memory bandwidth
         int x = 0;
         for (; x < TILE_WIDTH - 3; x += 4) {
@@ -693,40 +707,50 @@ static void renderTileFromSnapshot(uint8 *snapshot, uint16 *local_palette, uint1
             uint32 src4;
             memcpy(&src4, src, sizeof(src4));
             src += 4;
-            
-            // Convert each pixel through palette and write 2x2 scaled
+
+            // Convert each pixel through palette and write the scaled output
             uint16 c0 = local_palette[src4 & 0xFF];
             uint16 c1 = local_palette[(src4 >> 8) & 0xFF];
             uint16 c2 = local_palette[(src4 >> 16) & 0xFF];
             uint16 c3 = local_palette[(src4 >> 24) & 0xFF];
-            
-            // Write to row 0 (2 pixels per source pixel)
-            dst_row0[0] = c0; dst_row0[1] = c0;
-            dst_row0[2] = c1; dst_row0[3] = c1;
-            dst_row0[4] = c2; dst_row0[5] = c2;
-            dst_row0[6] = c3; dst_row0[7] = c3;
-            
-            // Write to row 1 (duplicate of row 0)
-            dst_row1[0] = c0; dst_row1[1] = c0;
-            dst_row1[2] = c1; dst_row1[3] = c1;
-            dst_row1[4] = c2; dst_row1[5] = c2;
-            dst_row1[6] = c3; dst_row1[7] = c3;
-            
-            dst_row0 += 8;
-            dst_row1 += 8;
+
+            if (rows == 1) {
+                // 1x: one output row, one copy per pixel.
+                dst_row0[0] = c0; dst_row0[1] = c1;
+                dst_row0[2] = c2; dst_row0[3] = c3;
+            } else {
+                // Write to row 0 (2 pixels per source pixel)
+                dst_row0[0] = c0; dst_row0[1] = c0;
+                dst_row0[2] = c1; dst_row0[3] = c1;
+                dst_row0[4] = c2; dst_row0[5] = c2;
+                dst_row0[6] = c3; dst_row0[7] = c3;
+
+                // Write to row 1 (duplicate of row 0)
+                dst_row1[0] = c0; dst_row1[1] = c0;
+                dst_row1[2] = c1; dst_row1[3] = c1;
+                dst_row1[4] = c2; dst_row1[5] = c2;
+                dst_row1[6] = c3; dst_row1[7] = c3;
+            }
+
+            dst_row0 += 4 * scale;
+            dst_row1 += 4 * scale;
         }
-        
+
         // Handle remaining pixels when TILE_WIDTH is not a multiple of 4
         for (; x < TILE_WIDTH; x++) {
             uint16 c = local_palette[*src++];
-            dst_row0[0] = c; dst_row0[1] = c;
-            dst_row1[0] = c; dst_row1[1] = c;
-            dst_row0 += 2;
-            dst_row1 += 2;
+            if (rows == 1) {
+                dst_row0[0] = c;
+            } else {
+                dst_row0[0] = c; dst_row0[1] = c;
+                dst_row1[0] = c; dst_row1[1] = c;
+            }
+            dst_row0 += scale;
+            dst_row1 += scale;
         }
-        
-        // Move output pointer by 2 rows (2x vertical scaling)
-        out += tile_pixel_width * 2;
+
+        // Move output pointer by this source row's output rows.
+        out += tile_pixel_width * rows;
     }
 }
 
@@ -750,10 +774,14 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
         case VDEPTH_8BIT: bits = 8; break;
         default: break;
     }
-    const bool indexed = bits != 0 && PIXEL_SCALE == 2;
+    const bool indexed = bits != 0 && (PIXEL_SCALE == 1 || PIXEL_SCALE == 2);
     if (indexed) {
-        for (int i = 0; i < (1 << bits); ++i)
-            pairs[i] = (uint32)local_palette[i] * 0x00010001u;
+        for (int i = 0; i < (1 << bits); ++i) {
+            // The 2x writer stores one replicated 32-bit pair per source
+            // pixel; the 1x writer takes the color in the low halfword.
+            pairs[i] = (PIXEL_SCALE == 2) ? (uint32)local_palette[i] * 0x00010001u
+                                          : local_palette[i];
+        }
     }
     if (!BoardDisplay_BeginTiles()) return;
     for (int ty = 0; ty < TILES_Y; ++ty) {
@@ -1242,10 +1270,11 @@ uint32 VideoGetFrameBufferSize(void)
  */
 /*
  *  Diagnostic: compare the physical panel with the guest frame buffer.
- *  Every 2x2 panel block is read through the scanout view (the memory the
- *  display controller shows) and checked against the palette color of its
- *  guest pixel. Pixels the guest changes during the scan, or a visible touch
- *  overlay, count as mismatches, so use it on a settled screen.
+ *  Every guest pixel maps to a PIXEL_SCALE x PIXEL_SCALE panel block, read
+ *  through the scanout view (the memory the display controller shows) and
+ *  checked against the palette color of that guest pixel. Pixels the guest
+ *  changes during the scan, or a visible touch overlay, count as
+ *  mismatches, so use it on a settled screen.
  */
 bool VideoVerifyPanel(uint32 *checked, uint32 *mismatched, int *first_x, int *first_y)
 {

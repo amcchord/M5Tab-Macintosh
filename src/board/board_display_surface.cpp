@@ -53,9 +53,12 @@ extern "C" bool BoardDisplay_PushIndexedTile(int x, int y, int w, int h, const u
                                              const uint32_t *pairs)
 {
     const bool flip = s_gfx.flip180();
-    if (!writePanelIndexedTile2x(s_gfx.scanoutFb(), s_gfx.panelW(), s_gfx.panelH(),
-                                 flip, x, y, w, h, src, stride, bits, first_pixel, pairs))
-        return false;
+    const bool written = (BOARD_PIXEL_SCALE == 1)
+        ? writePanelIndexedTile1x(s_gfx.scanoutFb(), s_gfx.panelW(), s_gfx.panelH(),
+                                  flip, x, y, w, h, src, stride, bits, first_pixel, pairs)
+        : writePanelIndexedTile2x(s_gfx.scanoutFb(), s_gfx.panelW(), s_gfx.panelH(),
+                                  flip, x, y, w, h, src, stride, bits, first_pixel, pairs);
+    if (!written) return false;
     const int first = flip ? s_gfx.panelH() - x - w : x;
     const int last = first + w;
     if (first < s_first_row) s_first_row = first;

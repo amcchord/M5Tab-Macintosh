@@ -54,6 +54,36 @@ inline bool writePanelIndexedTile2x(uint16_t *fb, int pw, int ph, bool flip,
     return true;
 }
 
+// One-to-one indexed tile write: render w x h indexed source pixels (1, 2, 4
+// or 8 bits, big-endian bit order within a byte) straight into the portrait
+// panel at landscape (x, y, w, h). `src` addresses the first source row and
+// `first_pixel` is the tile's first source column. `pairs` maps an index to
+// its RGB565 color in the low halfword, so a replicated pair table
+// (color * 0x00010001u) works unchanged.
+inline bool writePanelIndexedTile1x(uint16_t *fb, int pw, int ph, bool flip,
+                                    int x, int y, int w, int h,
+                                    const uint8_t *src, uint32_t stride,
+                                    int bits, int first_pixel,
+                                    const uint32_t *pairs)
+{
+    if (!fb || !src || !pairs || w <= 0 || h <= 0 ||
+        (bits != 1 && bits != 2 && bits != 4 && bits != 8) || first_pixel < 0 ||
+        x < 0 || y < 0 || x > ph - w || y > pw - h) return false;
+    const int base = flip ? y : pw - y - h;
+    const uint32_t mask = (1u << bits) - 1;
+    for (int column = 0; column < w; ++column) {
+        const int left = x + column;
+        uint16_t *row = fb + (flip ? ph - 1 - left : left) * pw + base;
+        const uint32_t bit = (uint32_t)(first_pixel + column) * (uint32_t)bits;
+        const int shift = 8 - bits - (int)(bit & 7);
+        const uint8_t *s = src + (bit >> 3) + (flip ? 0 : (h - 1) * stride);
+        const intptr_t step = flip ? (intptr_t)stride : -(intptr_t)stride;
+        for (int j = 0; j < h; ++j, s += step)
+            row[j] = (uint16_t)(pairs[(*s >> shift) & mask] & 0xFFFFu);
+    }
+    return true;
+}
+
 inline uint16_t readPanelPixel(const uint16_t *fb, int pw, int ph, bool flip,
                               int x, int y)
 {
