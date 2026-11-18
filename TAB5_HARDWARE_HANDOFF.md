@@ -2,7 +2,7 @@
 
 Start with a spare SD card and a copy of a known-good Macintosh disk. The first device checks are whether Finder opens the same folders after a clean restart and whether After Dark renders space black. Both can look fine in a host test while failing on a real installation. Then measure how much work the display and USB changes save on this particular Tab5.
 
-This branch starts at `3641580d72982cec464d4800f2ead507ba7c687d` (`v5.4-beta.1`). The evidence collected during development is from host tests and firmware builds. All device results in the table below are pending.
+This branch starts at `3641580d72982cec464d4800f2ead507ba7c687d` (`v5.4-beta.1`). The evidence collected during development is from host tests and firmware builds. The table lists the original test plan. The beta 2 results below cover the tests completed on the attached Tab5.
 
 | Change | Evidence already available | What the hardware owner can establish |
 | --- | --- | --- |
@@ -17,6 +17,18 @@ All 73 host tests passed on macOS. The four board/silicon release environments, 
 The host differential test also ran that translation for 12 trials per entry. It compared 4,133,446 instructions over 20,578 runs with zero failures and 208 skips. A separate production-silicon self-test firmware linked the same synthetic translation. Its relocation check passed for 626,436 bytes across 1,046 functions. Running the self-test on a Tab5 with the owner's ROM and applications is still pending.
 
 To isolate a behavior change with Git, the storage commit is `f68a961`, the display commit is `7ae81c4`, and the profiling tools and build environments landed in `acb0298`.
+
+## Beta 2 device results
+
+The pre-v3 standard and USB Debug applications both ran on an ESP32-P4 v1.3 Tab5 with 24 MB of guest RAM, a Quadra 650 ROM and Mac OS 8.1. Both application digests matched after flashing. The test disk was a verified copy of the installed image.
+
+- The existing disk had its HFS clean-unmount bit cleared. The guest showed a flashing question-mark floppy on beta 2. The same copy booted on v5.3. A clean Finder shutdown on v5.3 allowed beta 2 to boot that copy. Preserve the original image when testing recovery.
+- The USB Debug build opened a newly created Finder folder and saved a SimpleText document. After a clean shutdown, the standard build restored the folder and reopened the saved text.
+- Nine preboot screens, including USB Disk entry and exit, passed panel verification. All four indexed depths passed at 180° on USB Debug and at 0° on the standard application. At 0° one sample during the 16-color transition had 4,816 mismatched pixels. Two subsequent reads and a second selection of 16 colors matched all 921,600 pixels.
+- The board logged display underruns during startup, also seen on v5.3. These readbacks verify settled framebuffer contents. Optical behavior and physical touch gestures need separate observation.
+- Only USB-C was attached. USB-A file transfers and the cold-read USB Disk benchmark remain unmeasured. The test image had After Dark 2.0x disabled and did not contain the reported Star Trek TNG module. Its colors remain unverified.
+- The standard application completed Speedometer 4.02 with a Performance Rating of 0.908. CPU was 0.802, Graphics 0.810, Disk 0.900 and Math 10.134. There was no matched baseline run.
+- The release uses the existing translation. The host differential comparison with a patched Quadra 650 ROM passed 131,824 runs with zero failures. New workload profiling, a device differential self-test and training-versus-holdout timings remain open.
 
 ## Get the exact checkout and record the baseline
 

@@ -1,5 +1,15 @@
 # M5Tab-Macintosh workbook
 
+## Tab5 hardware handoff and v5.4 beta 2 — 2026-11-17
+
+Release branch `codex/tab5-hardware-release` starts at the four handoff commits through `cb3a03a`, on top of v5.4 beta 1. The release keeps the v5.3 translated code (`7fb5dfee…95e3dc`). The control checkout's existing local workbook edit was preserved.
+
+The attached pre-v3 Tab5 (ESP32-P4 v1.3) ran both release applications. USB Debug SHA-256 starts with `b970bb3e`, standard with `3ee30ccb`. Both flash verifications passed. Hardware coverage, the unclean-disk upgrade procedure and remaining limits are in [the handoff](TAB5_HARDWARE_HANDOFF.md) and [release notes](RELEASE_NOTES.md). The preboot screenshot tool now follows the USB Disk restart even if its final touch acknowledgment is lost.
+
+All 73 host tests passed. The release translation matched the interpreter in 131,824 trials over 506,880,417 instructions. All five release environments passed build, translated-code and merged-image checks. Waveshare and production silicon were build-tested. The release includes the standard board images, USB Debug merged and application-only images, host tools, Mac extras, build manifest and checksums.
+
+Private test evidence is under `worktrees/tab5-hardware-release/artifacts/handoff-release/`. The original 16 MB flash backup is under the control checkout's `artifacts/tab5-hardware-release/`. The attached device started in v5.3 Startup Settings. A temporary SD preparation copy was interrupted. Its allocation was recovered, the Mac reader verified the FAT filesystem, and the complete test copy matched the original after a cold read. The Mac OS tests used the duplicate. Speedometer 4.02 completed on the standard build with a 0.908 Performance Rating. After testing, the temporary SD files were removed, the original settings and PRAM were restored, and all 16 MB of flash matched the original backup. The Tab5 returned to v5.3 Startup Settings with the original disk selected.
+
 ## PR #29 and v5.4 beta 1 — 2026-10-18
 
 Review/release work is in `worktrees/scaling-review-release`, branch

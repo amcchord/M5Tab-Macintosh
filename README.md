@@ -46,20 +46,19 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-For the branch with disk-image, palette, redraw and USB improvements, the [Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md) includes build selection, device checks, benchmark commands and the results to collect.
+## v5.4 beta 2 — Disk images, indexed color and USB Disk
 
-## v5.4 beta 1 — Display scaling prerelease
+Opening an HFS disk image now preserves Finder information and volume flags.
+The display driver uses the same initial indexed colors for guest queries and
+panel output. Sparse redraws update only the affected tile rows. USB Disk
+batches adjacent SD sectors, and the AOT profiler reports hot instructions
+that were omitted from the generated code.
 
-[Download v5.4 beta 1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.1).
-The shared display code supports 1× indexed rendering and board-scaled preboot
-screens, with expanded host regression checks. Existing hardware still uses
-2× scaling and its existing SDK pins. This adds no Olimex firmware and does
-not resolve issue #28's separate color report.
-
-This prerelease is software/build validated only; physical display regression
-is still required. [v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
-remains the stable release. See [release notes](RELEASE_NOTES.md) for the beta
-assets, validation, limits and rollback.
+The [release notes](RELEASE_NOTES.md) list the tested hardware and firmware
+downloads. The [Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md) includes
+procedures for reproducing the device checks and benchmarks.
+[Download v5.4 beta 2](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.2).
+[Stable release v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3).
 
 ## v5.3 — Battery, Sleep and Brightness
 

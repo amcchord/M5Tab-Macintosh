@@ -113,7 +113,13 @@ class Tour:
             c.tap_control("usb")
             self.wait_screen("usb")
             self.capture("usb-disk", settle=1.0)
-            c.tap_control("done")
+            done = c.boot_hit("done")
+            try:
+                c.touch("tap", *done["center"])
+            except (ControlError, OSError):
+                # The Tab5 can restart before acknowledging the touch. The
+                # settings-screen check below confirms that Done took effect.
+                pass
             # The Tab5 restarts to release the USB port and comes back to
             # the settings screen; the Waveshare returns without a restart.
             deadline = time.monotonic() + 60.0
