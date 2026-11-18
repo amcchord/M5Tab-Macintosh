@@ -6,22 +6,18 @@
  *  Direct I/O with deferred flush. Each Sys_write only marks the handle
  *  as dirty; basilisk_loop() flushes periodically (DISK_FLUSH_INTERVAL)
  *  and on idle (Sys_last_write_ms + idle window). The shutdown hook in
- *  src/main.cpp calls Sys_flush_now() so ESP-IDF panic / reboot still
+ *  src/main.cpp calls Sys_flush_now() so an orderly reboot still
  *  drains the buffer to the card.
  */
 
+#ifdef DISK_IMAGE_HOST_TEST
+#include "disk_image_test_stubs.h"
+#else
 #include "sysdeps.h"
-#include "main.h"
-#include "macos_util.h"
-#include "prefs.h"
-#include "sys.h"
-
-#include "board_sd.h"  /* SD_FS alias (SD on Tab5, SD_MMC on Waveshare) */
+#include "board_sd.h"
 #include <FS.h>
-#include <Arduino.h>
-
-#define DEBUG 0
-#include "debug.h"
+#endif
+#include "sys.h"
 
 // File handle structure - minimal with dirty tracking
 struct file_handle {
@@ -195,95 +191,6 @@ void SysAddSerialPrefs(void)
 }
 
 /*
- *  Repair HFS volume - fix common corruption issues from improper shutdown
- */
-static void Sys_repair_hfs_volume(const char *path)
-{
-    // Only repair .dsk files
-    if (strstr(path, ".dsk") == NULL && strstr(path, ".DSK") == NULL) {
-        return;
-    }
-    
-    Serial.printf("[SYS] Checking HFS volume: %s\n", path);
-    
-    File f = SD_FS.open(path, "r+b");
-    if (!f) {
-        return;
-    }
-    
-    size_t file_size = f.size();
-    if (file_size < 1024 + 512) {
-        f.close();
-        return;
-    }
-    
-    // Read main MDB
-    uint8_t mdb[128];
-    if (!f.seek(1024) || f.read(mdb, 128) != 128) {
-        f.close();
-        return;
-    }
-    
-    // Check HFS signature
-    uint16_t signature = (mdb[0] << 8) | mdb[1];
-    if (signature != 0x4244) {
-        f.close();
-        return;
-    }
-    
-    // Read key fields
-    uint16_t drAtrb = (mdb[10] << 8) | mdb[11];
-    uint32_t drFndrInfo2 = (mdb[100] << 24) | (mdb[101] << 16) | (mdb[102] << 8) | mdb[103];
-    uint32_t drFndrInfo3 = (mdb[104] << 24) | (mdb[105] << 16) | (mdb[106] << 8) | mdb[107];
-    
-    // Get original drAtrb from Alternate MDB
-    size_t amdb_offset = ((file_size / 512) - 2) * 512;
-    uint16_t original_drAtrb = drAtrb;
-    
-    uint8_t amdb_sig[2];
-    if (f.seek(amdb_offset) && f.read(amdb_sig, 2) == 2) {
-        if ((amdb_sig[0] << 8 | amdb_sig[1]) == 0x4244) {
-            uint8_t amdb_atrb[2];
-            if (f.seek(amdb_offset + 10) && f.read(amdb_atrb, 2) == 2) {
-                original_drAtrb = (amdb_atrb[0] << 8) | amdb_atrb[1];
-            }
-        }
-    }
-    
-    bool needs_repair = false;
-    
-    if (drAtrb != original_drAtrb) {
-        mdb[10] = (original_drAtrb >> 8) & 0xFF;
-        mdb[11] = original_drAtrb & 0xFF;
-        needs_repair = true;
-    }
-    
-    if (drFndrInfo2 != 0) {
-        mdb[100] = mdb[101] = mdb[102] = mdb[103] = 0;
-        needs_repair = true;
-    }
-    
-    if (drFndrInfo3 != 0) {
-        mdb[104] = mdb[105] = mdb[106] = mdb[107] = 0;
-        needs_repair = true;
-    }
-    
-    if (needs_repair) {
-        Serial.println("[SYS] Repairing HFS volume...");
-        f.seek(1024 + 10);
-        f.write(&mdb[10], 2);
-        f.seek(1024 + 100);
-        f.write(&mdb[100], 8);
-        f.flush();
-        Serial.println("[SYS] Volume repaired");
-    } else {
-        Serial.println("[SYS] Volume OK");
-    }
-    
-    f.close();
-}
-
-/*
  *  Open a file/device
  */
 void *Sys_open(const char *name, bool read_only, bool is_cdrom)
@@ -292,17 +199,12 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
         return NULL;
     }
     
-    // Repair HFS volume before opening
-    if (!read_only && !is_cdrom) {
-        Sys_repair_hfs_volume(name);
-    }
-    
-    file_handle *fh = new file_handle;
+    // The guest owns the volume metadata. Opening an image only opens the file.
+    file_handle *fh = new file_handle{};
     if (!fh) {
         return NULL;
     }
     
-    memset(fh, 0, sizeof(file_handle));
     strncpy(fh->path, name, sizeof(fh->path) - 1);
     fh->is_cdrom = is_cdrom;
     fh->is_floppy = (strstr(name, ".img") != NULL || strstr(name, ".IMG") != NULL);

@@ -2,8 +2,8 @@
  * usb_msc.cpp - Pre-boot "USB Disk" mode implementation.
  *
  * See usb_msc.h for the public contract. We use Arduino-ESP32's USBMSC
- * class (a thin wrapper over arduino_tinyusb) with SD_FS.readRAW /
- * writeRAW as the raw-sector backing store. Compared to re-initializing
+ * class (a thin wrapper over arduino_tinyusb) with multi-sector FatFs
+ * I/O on the mounted SD card as the backing store. Compared to re-initializing
  * the IDF SDMMC driver ourselves this has two wins:
  *
  *   1. It coexists cleanly with Arduino's own TinyUSB bundle - no
@@ -57,6 +57,7 @@
 
 #include <USB.h>
 #include <USBMSC.h>
+#include "usb_disk_media.h"
 
 static USBMSC            s_msc;
 static volatile bool     s_exit_requested = false;
@@ -68,40 +69,23 @@ static bool              s_usb_started    = false;
 /* MSC <-> SD read/write callbacks                                           */
 /* ------------------------------------------------------------------------- */
 
-static int32_t msc_on_read(uint32_t lba, uint32_t offset, void *buffer,
-                           uint32_t bufsize)
+// Both pinned Arduino SD classes store the mounted drive in a protected base
+// member. Form a pointer to that base member, then read it on the real object.
+// No derived instance, downcast, assumed drive number or SDK patch is needed.
+struct MountedSdDrive : decltype(SD_FS) {
+    static uint8_t number() { return SD_FS.*(&MountedSdDrive::_pdrv); }
+};
+
+static UsbDiskMedia s_media;
+
+static int32_t msc_on_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t size)
 {
-    // SD_FS's readRAW works in whole sectors at LBA granularity. The
-    // offset argument is always 0 in our usage because bufsize is always
-    // a multiple of sectorSize; the Arduino example pattern handles that
-    // by iterating sector-at-a-time which also matches bufsize=N*secsz.
-    (void)offset;
-    uint32_t sec_size = SD_FS.sectorSize();
-    if (!sec_size) return -1;
-    uint32_t nsec = bufsize / sec_size;
-    uint8_t *out  = static_cast<uint8_t *>(buffer);
-    for (uint32_t i = 0; i < nsec; ++i) {
-        if (!SD_FS.readRAW(out + i * sec_size, lba + i)) {
-            return -1;
-        }
-    }
-    return nsec * sec_size;
+    return s_media.transfer(false, lba, offset, static_cast<uint8_t *>(buffer), size);
 }
 
-static int32_t msc_on_write(uint32_t lba, uint32_t offset, uint8_t *buffer,
-                            uint32_t bufsize)
+static int32_t msc_on_write(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t size)
 {
-    (void)offset;
-    uint32_t sec_size = SD_FS.sectorSize();
-    if (!sec_size) return -1;
-    uint32_t nsec = bufsize / sec_size;
-    for (uint32_t i = 0; i < nsec; ++i) {
-        // writeRAW takes a non-const buffer; the MSC callback gives us one.
-        if (!SD_FS.writeRAW(buffer + i * sec_size, lba + i)) {
-            return -1;
-        }
-    }
-    return nsec * sec_size;
+    return s_media.transfer(true, lba, offset, buffer, size);
 }
 
 static bool msc_on_start_stop(uint8_t /*power_condition*/, bool start,
@@ -152,10 +136,14 @@ extern "C" bool UsbMsc_Enter(const char **out_error_msg)
 
     uint32_t sec_size = SD_FS.sectorSize();
     uint32_t n_sec    = SD_FS.numSectors();
-    if (!sec_size || !n_sec) {
+    const uint8_t drive = MountedSdDrive::number();
+    if (!sec_size || sec_size > FF_MAX_SS || !n_sec || drive == 0xff) {
         if (out_error_msg) *out_error_msg = "SD card not available";
         return false;
     }
+    s_media.drive = drive;
+    s_media.sector_size = sec_size;
+    s_media.sectors = n_sec;
     Serial.printf("[USB_MSC] SD geometry: %u sectors x %u bytes\n",
                   (unsigned)n_sec, (unsigned)sec_size);
 
