@@ -29,16 +29,19 @@
 
 #include <stdio.h>
 
+#ifdef VIDEO_HOST_TEST
+#include "video_test_stubs.h"
+#else
 #include "sysdeps.h"
-#include "cpu_emulation.h"
 #include "main.h"
+#define DEBUG 0
+#include "debug.h"
+#endif
+#include "cpu_emulation.h"
 #include "macos_util.h"
 #include "slot_rom.h"
 #include "video.h"
 #include "video_defs.h"
-
-#define DEBUG 0
-#include "debug.h"
 
 
 // Next available NuBus slot ID
@@ -220,26 +223,15 @@ void monitor_desc::get_size_of_resolution(uint32 id, uint32 &x, uint32 &y) const
 
 
 /*
- *  Set palette to 50% gray
- */
-
-void monitor_desc::set_gray_palette(void)
-{
-	for (int i=0; i<256; i++) {
-		palette[i * 3 + 0] = 127;
-		palette[i * 3 + 1] = 127;
-		palette[i * 3 + 2] = 127;
-	}
-	set_palette(palette, 256);
-}
-
-
-/*
  *  Load gamma-corrected black-to-white ramp
  */
 
 void monitor_desc::load_gamma_ramp(void)
 {
+	// Indexed SetEntries applies gamma when installing colors. A direct-mode
+	// ramp must never overwrite those entries during GrayPage or SetGamma.
+	if (!IsDirectMode(*current_mode)) return;
+
 	// Find tables for gamma correction
 	uint8 *red_gamma = NULL, *green_gamma = NULL, *blue_gamma = NULL;
 	bool have_gamma = false;
@@ -368,8 +360,7 @@ void monitor_desc::switch_mode(vector<video_mode>::const_iterator it, uint32 par
 {
 	const video_mode &mode = *it;
 
-	// Switch mode
-	set_gray_palette();
+	// The backend publishes the new geometry and its initial palette together.
 	current_mode = it;
 	switch_to_current_mode();
 
@@ -479,8 +470,8 @@ int16 monitor_desc::driver_open(void)
 	alloc_gamma_table_size = 0;
 	set_gamma_table(0);
 
-	// Init color palette (solid gray)
-	set_gray_palette();
+	// Initialize the palette used for both GetEntries and scanout.
+	switch_to_current_mode();
 	return noErr;
 }
 

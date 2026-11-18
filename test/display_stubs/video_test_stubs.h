@@ -21,17 +21,8 @@ struct FakeSerial {
 };
 inline FakeSerial Serial;
 inline void *ps_malloc(size_t size) { return malloc(size); }
-enum video_depth { VDEPTH_1BIT, VDEPTH_2BIT, VDEPTH_4BIT, VDEPTH_8BIT };
-struct video_mode { int x, y, resolution_id, user_data; video_depth depth; uint32 bytes_per_row; };
-inline uint32 TrivialBytesPerRow(int width, video_depth depth) { return width / (8 >> depth); }
-struct monitor_desc {
-    video_mode mode;
-    monitor_desc(const vector<video_mode> &modes, video_depth, uint32) : mode(modes.back()) {}
-    virtual ~monitor_desc() = default;
-    const video_mode &get_current_mode() { return mode; }
-    void set_mac_frame_base(uint32) {}
-};
-inline vector<monitor_desc *> VideoMonitors;
+#include "sysdeps.h"
+#include "video.h"
 inline uint8 *MacFrameBaseHost;
 inline uint32 MacFrameBaseMac = 0x10000000, MacFrameSize;
 inline int MacFrameLayout;

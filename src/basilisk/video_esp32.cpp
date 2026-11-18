@@ -123,6 +123,11 @@ static bool palette_changed = true; // protected by frame_spinlock
 
 // Dirty tile bitmap - in internal SRAM for fast access during video frame processing
 DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap of dirty tiles (read by video task)
+// Owned by the renderer. Bounds are meaningful only while the tile bit is set.
+struct DirtyRows { uint8 first, end; };
+static_assert(TILE_HEIGHT <= UINT8_MAX, "tile row bounds must fit in a byte");
+DRAM_ATTR static DirtyRows dirty_rows[TOTAL_TILES];
+
 
 // Write-time dirty tracking bitmap - marked when CPU writes to framebuffer
 // This is double-buffered to avoid race conditions between CPU writes and video task reads
@@ -180,6 +185,7 @@ static volatile int current_pixels_per_byte = 1;  // Pixels packed per byte (8=1
 // ============================================================================
 // Performance profiling counters (lightweight, always enabled)
 // ============================================================================
+static uint32_t perf_panel_bytes = 0;           // Tile payload submitted in this interval
 static volatile uint32_t perf_detect_us = 0;        // Time to detect dirty tiles
 static volatile uint32_t perf_render_us = 0;        // Time to render and push frame
 static volatile uint32_t perf_frame_count = 0;      // Frames rendered
@@ -214,26 +220,20 @@ static inline uint16 rgb888_to_rgb565(uint8 r, uint8 g, uint8 b)
     return (uint16)(((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3));
 }
 
-/*
- *  Set palette for indexed color modes
- *  Thread-safe: uses spinlock since palette can be updated from CPU emulation
- *  
- *  When palette changes, we force a full screen update since all pixels
- *  may look different even though the framebuffer data hasn't changed.
- */
-void ESP32_monitor_desc::set_palette(uint8 *pal, int num)
+// Caller holds frame_spinlock. The display and capture workers snapshot this
+// converted copy; the Mac driver owns the original RGB entries.
+static void publishPalette(const uint8 *pal, int num)
 {
-    D(bug("[VIDEO] set_palette: %d entries\n", num));
-    
-    portENTER_CRITICAL(&frame_spinlock);
-    for (int i = 0; i < num && i < 256; i++) {
-        uint8 r = pal[i * 3 + 0];
-        uint8 g = pal[i * 3 + 1];
-        uint8 b = pal[i * 3 + 2];
-        palette_rgb565[i] = rgb888_to_rgb565(r, g, b);
-    }
+    for (int i = 0; i < num && i < 256; ++i, pal += 3)
+        palette_rgb565[i] = rgb888_to_rgb565(pal[0], pal[1], pal[2]);
     palette_changed = true;
     force_full_update = true;
+}
+
+void ESP32_monitor_desc::set_palette(uint8 *pal, int num)
+{
+    portENTER_CRITICAL(&frame_spinlock);
+    publishPalette(pal, num);
     portEXIT_CRITICAL(&frame_spinlock);
 }
 
@@ -272,137 +272,58 @@ static void updateVideoStateCache(video_depth depth, uint32 bytes_per_row)
     video_dirty_limit = limit;
 }
 
-/*
- *  Initialize palette with default colors for the specified depth
- *  
- *  This sets up appropriate default colors:
- *  - 1-bit: Black and white (standard Mac B&W)
- *  - 2-bit: 4-color grayscale (white, light gray, dark gray, black)
- *  - 4-bit: Classic Mac 16-color palette
- *  - 8-bit: Mac 256-color palette (6x6x6 color cube + grayscale ramp)
- *  
- *  Classic Mac convention: index 0 = white, highest index = black
- */
-static void initDefaultPalette(video_depth depth)
+// Seed the guest's indexed palette before Mac OS installs its own. Define
+// all entries so a later sparse SetEntries also preserves untouched colors.
+static void initDefaultPalette(video_depth depth, uint8 *colors)
 {
-    /* Keep Serial.println OUT of the critical section. The spinlock is
-     * taken on the calling core AND blocks the opposite core when it
-     * attempts to read the palette in the video render path. If we
-     * printed from inside the critical section, a UART TX stall would
-     * starve the other core's interrupt watchdog and panic CPU0.
-     * We only log which path we took after the critical section exits. */
-    const char *log_msg = NULL;
-
-    portENTER_CRITICAL(&frame_spinlock);
-    updateVideoStateCache(depth, TrivialBytesPerRow(MAC_SCREEN_WIDTH, depth));
-
-    switch (depth) {
-        case VDEPTH_1BIT:
-            // 1-bit: Black and white
-            // Index 0 = white, Index 1 = black
-            palette_rgb565[0] = rgb888_to_rgb565(255, 255, 255);  // White
-            palette_rgb565[1] = rgb888_to_rgb565(0, 0, 0);        // Black
-            log_msg = "[VIDEO] Initialized 1-bit B&W palette";
-            break;
-
-        case VDEPTH_2BIT:
-            // 2-bit: 4 levels of gray
-            // Index 0 = white, Index 3 = black
-            palette_rgb565[0] = rgb888_to_rgb565(255, 255, 255);  // White
-            palette_rgb565[1] = rgb888_to_rgb565(170, 170, 170);  // Light gray
-            palette_rgb565[2] = rgb888_to_rgb565(85, 85, 85);     // Dark gray
-            palette_rgb565[3] = rgb888_to_rgb565(0, 0, 0);        // Black
-            log_msg = "[VIDEO] Initialized 2-bit grayscale palette";
-            break;
-
-        case VDEPTH_4BIT:
-            // 4-bit: Classic Mac 16-color palette
-            // This matches the standard Mac 16-color CLUT
-            {
-                static const uint8 mac16[16][3] = {
-                    {255, 255, 255},  // 0: White
-                    {255, 255, 0},    // 1: Yellow
-                    {255, 102, 0},    // 2: Orange
-                    {221, 0, 0},      // 3: Red
-                    {255, 0, 153},    // 4: Magenta
-                    {51, 0, 153},     // 5: Purple
-                    {0, 0, 204},      // 6: Blue
-                    {0, 153, 255},    // 7: Cyan
-                    {0, 170, 0},      // 8: Green
-                    {0, 102, 0},      // 9: Dark Green
-                    {102, 51, 0},     // 10: Brown
-                    {153, 102, 51},   // 11: Tan
-                    {187, 187, 187},  // 12: Light Gray
-                    {136, 136, 136},  // 13: Medium Gray
-                    {68, 68, 68},     // 14: Dark Gray
-                    {0, 0, 0}         // 15: Black
-                };
-                for (int i = 0; i < 16; i++) {
-                    palette_rgb565[i] = rgb888_to_rgb565(mac16[i][0], mac16[i][1], mac16[i][2]);
-                }
-            }
-            log_msg = "[VIDEO] Initialized 4-bit 16-color palette";
-            break;
-            
-        case VDEPTH_8BIT:
-        default:
-            // 8-bit: Mac 256-color palette
-            // Uses a 6x6x6 color cube (216 colors) plus grayscale ramp
-            // This provides a good default color palette for 256-color mode
-            {
-                int idx = 0;
-                
-                // First, create a 6x6x6 color cube (216 colors)
-                // This gives 6 levels each of R, G, B: 0, 51, 102, 153, 204, 255
-                for (int r = 0; r < 6; r++) {
-                    for (int g = 0; g < 6; g++) {
-                        for (int b = 0; b < 6; b++) {
-                            uint8 rv = r * 51;
-                            uint8 gv = g * 51;
-                            uint8 bv = b * 51;
-                            palette_rgb565[idx++] = rgb888_to_rgb565(rv, gv, bv);
-                        }
-                    }
-                }
-                
-                // Fill remaining 40 entries with a grayscale ramp
-                // This provides smooth grays for UI elements
-                for (int i = 0; i < 40; i++) {
-                    uint8 gray = (i * 255) / 39;
-                    palette_rgb565[idx++] = rgb888_to_rgb565(gray, gray, gray);
-                }
-            }
-            log_msg = "[VIDEO] Initialized 8-bit 256-color palette";
-            break;
+    memset(colors, 0, 256 * 3);
+    if (depth == VDEPTH_4BIT) {
+        static const uint8 mac16[16][3] = {
+            {255, 255, 255},  // 0: White
+            {255, 255, 0},    // 1: Yellow
+            {255, 102, 0},    // 2: Orange
+            {221, 0, 0},      // 3: Red
+            {255, 0, 153},    // 4: Magenta
+            {51, 0, 153},     // 5: Purple
+            {0, 0, 204},      // 6: Blue
+            {0, 153, 255},    // 7: Cyan
+            {0, 170, 0},      // 8: Green
+            {0, 102, 0},      // 9: Dark Green
+            {102, 51, 0},     // 10: Brown
+            {153, 102, 51},   // 11: Tan
+            {187, 187, 187},  // 12: Light Gray
+            {136, 136, 136},  // 13: Medium Gray
+            {68, 68, 68},     // 14: Dark Gray
+            {0, 0, 0}         // 15: Black
+        };
+        memcpy(colors, mac16, sizeof(mac16));
+        return;
     }
-
-    palette_changed = true;
-    force_full_update = true;
-    portEXIT_CRITICAL(&frame_spinlock);
-
-    if (log_msg) {
-        Serial.println(log_msg);
+    if (depth == VDEPTH_8BIT) {
+        // Fallback color cube and gray ramp. Index zero is white, 255 black.
+        for (int i = 0; i < 216; ++i) {
+            colors[i * 3]     = 255 - (i / 36) * 51;
+            colors[i * 3 + 1] = 255 - (i / 6 % 6) * 51;
+            colors[i * 3 + 2] = 255 - (i % 6) * 51;
+        }
+        for (int i = 0; i < 40; ++i)
+            memset(colors + (216 + i) * 3, 255 - i * 255 / 39, 3);
+        return;
     }
-
+    const int count = depth == VDEPTH_1BIT ? 2 : 4;
+    for (int i = 0; i < count; ++i)
+        memset(colors + i * 3, 255 - i * 255 / (count - 1), 3);
 }
 
-/*
- *  Switch to current video mode
- */
 void ESP32_monitor_desc::switch_to_current_mode(void)
 {
     const video_mode &mode = get_current_mode();
-    D(bug("[VIDEO] switch_to_current_mode: %dx%d, depth=%d, bpr=%d\n", 
-          mode.x, mode.y, mode.depth, mode.bytes_per_row));
-    
-    // Initialize default palette for this depth
-    // MacOS will set its own palette shortly after, but this ensures
-    // the display looks reasonable immediately after the mode switch
-    initDefaultPalette(mode.depth);
-    
-    // Update frame buffer base address
+    initDefaultPalette(mode.depth, palette);
+    portENTER_CRITICAL(&frame_spinlock);
+    updateVideoStateCache(mode.depth, mode.bytes_per_row);
+    publishPalette(palette, 256);
+    portEXIT_CRITICAL(&frame_spinlock);
     set_mac_frame_base(MacFrameBaseMac);
-    
 }
 
 // ============================================================================
@@ -467,6 +388,25 @@ static void decodePackedRow(const uint8 *src, uint8 *dst, int width, video_depth
 static inline bool isTileDirty(int tile_idx)
 {
     return (dirty_tiles[tile_idx / 32] & (1u << (tile_idx % 32))) != 0;
+}
+
+static void collectTileRows(uint32 tile, uint32 first, uint32 end)
+{
+    DirtyRows &rows = dirty_rows[tile];
+    if (!isTileDirty(tile)) {
+        rows = {(uint8)first, (uint8)end};
+        dirty_tiles[tile / 32] |= 1u << (tile % 32);
+    } else {
+        if (first < rows.first) rows.first = first;
+        if (end > rows.end) rows.end = end;
+    }
+}
+
+static void markFullFrame()
+{
+    for (int tile = 0; tile < TOTAL_TILES; ++tile)
+        collectTileRows(tile, 0, TILE_HEIGHT);
+    dirty_tile_count = TOTAL_TILES;
 }
 
 static inline void markTileDirtyBit(int tile_idx)
@@ -575,7 +515,7 @@ static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uin
             markDirtyByteRange(offset, 1u << shift, frame_buffer_size,
                                bytes_per_row, (uint32)pixels_per_byte, MAC_SCREEN_WIDTH,
                                MAC_SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT,
-                               [](uint32_t tile) { dirty_tiles[tile / 32] |= 1u << (tile % 32); });
+                               collectTileRows);
         }
     }
 
@@ -583,7 +523,11 @@ static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uin
     for (int i = 0; i < (TOTAL_TILES + 31) / 32; i++) {
         // Tile-granular damage from non-CPU producers (touch overlay).
         uint32 bits = __atomic_exchange_n(&write_dirty_tiles[i], 0, __ATOMIC_ACQUIRE);
-        dirty_tiles[i] |= bits;
+        while (bits) {
+            const unsigned tile = i * 32 + __builtin_ctz(bits);
+            collectTileRows(tile, 0, TILE_HEIGHT);
+            bits &= bits - 1;
+        }
         count += __builtin_popcount(dirty_tiles[i]);
     }
     return count;
@@ -767,6 +711,7 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
     const int h = TILE_HEIGHT * PIXEL_SCALE;
     bool ok = true;
     int rendered = 0;
+    uint32_t bytes = 0;
     int bits = 0;
     switch (depth) {
         case VDEPTH_1BIT: bits = 1; break;
@@ -787,15 +732,21 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
     if (!BoardDisplay_BeginTiles()) return;
     for (int ty = 0; ty < TILES_Y; ++ty) {
         for (int tx = 0; tx < TILES_X; ++tx) {
-            if (!isTileDirty(ty * TILES_X + tx)) continue;
+            const int tile = ty * TILES_X + tx;
+            if (!isTileDirty(tile)) continue;
             // Guest writes concurrent with rendering set new damage flags,
             // which stay pending until the next frame's acquire exchange.
             if (indexed && !TouchOverlay_TileCovered(tx * w, ty * h, w, h)) {
                 // One pass from the guest frame buffer into the panel.
-                const uint8 *src = src_buffer + (uint32)ty * TILE_HEIGHT * bpr;
-                ok = BoardDisplay_PushIndexedTile(tx * w, ty * h, w, h, src, bpr, bits,
+                const DirtyRows rows = dirty_rows[tile];
+                const int y = ty * TILE_HEIGHT + rows.first;
+                const int height = (rows.end - rows.first) * PIXEL_SCALE;
+                const uint8 *src = src_buffer + (uint32)y * bpr;
+                bytes += w * height * sizeof(uint16);
+                ok = BoardDisplay_PushIndexedTile(tx * w, y * PIXEL_SCALE, w, height, src, bpr, bits,
                                                   tx * TILE_WIDTH, pairs) && ok;
             } else {
+                bytes += w * h * sizeof(uint16);
                 snapshotTile(src_buffer, tx, ty, snapshot, depth, bpr);
                 renderTileFromSnapshot(snapshot, local_palette, pixels);
                 TouchOverlay_CompositeTile(tx * w, ty * h, w, h, pixels);
@@ -805,6 +756,7 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
         }
     }
     ok = BoardDisplay_EndTiles() && ok;
+    perf_panel_bytes += bytes;  // Submitted bytes include retries.
     if (ok) memset(dirty_tiles, 0, sizeof(dirty_tiles));
     
 }
@@ -841,12 +793,13 @@ static void reportVideoPerfStats(void)
         if (total_frames > 0 && !AutomationSerialCaptureActive()) {
             Serial.printf("[VIDEO PERF] frames=%u (full=%u partial=%u skip=%u)\n",
                           total_frames, perf_full_count, perf_partial_count, perf_skip_count);
-            Serial.printf("[VIDEO PERF] avg: detect=%uus render=%uus\n",
+            Serial.printf("[VIDEO PERF] avg: detect=%uus render=%uus panel_bytes=%u\n",
                           perf_detect_us / (total_frames > 0 ? total_frames : 1),
-                          perf_render_us / (total_frames > 0 ? total_frames : 1));
+                          perf_render_us / total_frames, perf_panel_bytes);
         }
         
         // Reset counters for next interval
+        perf_panel_bytes = 0;
         perf_detect_us = 0;
         perf_render_us = 0;
         perf_frame_count = 0;
@@ -881,10 +834,7 @@ static void renderPendingFrame(uint16 *local_palette)
     // signal makes every tile visible on the next asynchronous refresh.
     t0 = micros();
 #if VIDEO_DIRTY_MARK_NOOP
-    for (int i = 0; i < (TOTAL_TILES + 31) / 32; i++) {
-        dirty_tiles[i] = 0xFFFFFFFFu;
-    }
-    dirty_tile_count = TOTAL_TILES;
+    markFullFrame();
 #else
     dirty_tile_count = collectWriteDirtyTiles(frame_bpr, frame_pixels_per_byte, frame_dirty_shift);
 #endif
@@ -907,12 +857,7 @@ static void renderPendingFrame(uint16 *local_palette)
     // If force_full_update is set (palette change, first frame), mark ALL tiles dirty
     // This ensures we always use tile mode (faster than streaming mode)
     if (full_update) {
-        // Mark all tiles as dirty
-        for (int i = 0; i < (TOTAL_TILES + 31) / 32; i++) {
-            dirty_tiles[i] = 0xFFFFFFFFu;
-        }
-        dirty_tiles[(TOTAL_TILES - 1) / 32] &= 0xFFFFFFFFu >> ((32 - TOTAL_TILES % 32) % 32);
-        dirty_tile_count = TOTAL_TILES;
+        markFullFrame();
         perf_full_count++;
     }
 
@@ -924,7 +869,7 @@ static void renderPendingFrame(uint16 *local_palette)
         t1 = micros();
         perf_render_us += (t1 - t0);
 
-        perf_partial_count++;
+        if (!full_update) perf_partial_count++;
     } else {
         // No tiles dirty, nothing to do!
         perf_skip_count++;
@@ -1054,7 +999,7 @@ bool VideoInit(bool classic)
     memset(dirty_tiles, 0, sizeof(dirty_tiles));
     memset(write_dirty_tiles, 0, sizeof(write_dirty_tiles));
     memset(video_dirty_chunks, 0, sizeof(video_dirty_chunks));
-    // initDefaultPalette publishes the initial mode/palette/redraw together.
+    // The monitor publishes the initial mode/palette/redraw together.
 
     // Don't clear the panel here. The MacSplash checkerboard painted at
     // pre-boot stays visible until the 68k actually starts drawing, at
@@ -1068,9 +1013,6 @@ bool VideoInit(bool classic)
     MacFrameBaseHost = mac_frame_buffer;
     MacFrameSize = frame_buffer_size;
     MacFrameLayout = FLAYOUT_DIRECT;
-    
-    // Initialize the palette for the selected maximum/default depth.
-    initDefaultPalette(MAC_SCREEN_DEPTH);
     
     // Create video mode vector with all supported depths
     // Per Basilisk II rules: lowest depth must be available in all resolutions,
@@ -1119,8 +1061,7 @@ bool VideoInit(bool classic)
     the_monitor = new ESP32_monitor_desc(modes, MAC_SCREEN_DEPTH, 0x80);
     VideoMonitors.push_back(the_monitor);
     
-    // Set Mac frame buffer base address
-    the_monitor->set_mac_frame_base(MacFrameBaseMac);
+    the_monitor->switch_to_current_mode();
     
     // Start video rendering task on Core 0
     // Use the optimized version that does render + push

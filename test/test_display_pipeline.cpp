@@ -8,6 +8,7 @@
 #include "panel_surface.h"
 #define VIDEO_HOST_TEST
 #include "../src/basilisk/video_esp32.cpp"
+#include "../src/basilisk/video.cpp"
 
 // Guest stores record 32-pixel spans: one tile at every depth.
 static constexpr int kSpanTiles = 1;
@@ -24,14 +25,17 @@ static void test_ranges()
             for (int trial = 0; trial < 1000; ++trial) {
                 uint32 offset = rng() % capacity, length = rng() % 12000;
                 if (trial == 0) { offset = 0; length = UINT32_MAX; }
-                std::array<bool, 160> actual{}, expected{};
+                std::array<uint64_t, 160> actual{}, expected{};
                 markDirtyByteRange(offset, length, capacity, stride, ppb, 640, height,
-                    40, 40, [&](uint32 tile) { assert(tile < 160); actual[tile] = true; });
+                    40, 40, [&](uint32 tile, uint32 first, uint32 end) {
+                        assert(tile < 160 && first < end && end <= 40);
+                        actual[tile] |= ((UINT64_C(1) << (end - first)) - 1) << first;
+                    });
                 const uint64_t end = std::min(uint64_t(capacity), uint64_t(offset) + length);
                 for (uint64_t b = offset; b < end && b / stride < height; ++b)
                     for (uint32 p = 0; p < ppb; ++p) {
                         const uint32 x = (b % stride) * ppb + p;
-                        if (x < 640) expected[(b / stride / 40) * 16 + x / 40] = true;
+                        if (x < 640) expected[(b / stride / 40) * 16 + x / 40] |= UINT64_C(1) << (b / stride % 40);
                     }
                 assert(actual == expected);
             }
@@ -224,14 +228,69 @@ static void test_pipeline()
     mac_frame_buffer = guest.data(); frame_buffer_size = guest.size();
     preserve_splash_until_first_write = false;
     uint16 local_palette[256] = {};
+    vector<video_mode> modes;
+    for (auto depth : {VDEPTH_1BIT, VDEPTH_2BIT, VDEPTH_4BIT, VDEPTH_8BIT})
+        modes.push_back({MAC_SCREEN_WIDTH, MAC_SCREEN_HEIGHT, 0x80, depth,
+                         TrivialBytesPerRow(MAC_SCREEN_WIDTH, depth), 0});
+    ESP32_monitor_desc monitor(modes, VDEPTH_1BIT, 0x80);
+    assert(monitor.driver_open() == noErr);
+    constexpr uint32 param = 0x200, dce = 0x300, table = 0x3000;
+    auto setDepth = [&](video_depth depth) {
+        WriteMacInt16(param + csMode, monitor.depth_to_apple_mode(depth));
+        WriteMacInt16(param + csPage, 0);
+        assert(monitor.driver_control(cscSetMode, param, dce) == noErr);
+    };
     for (bool flip : {false, true}) for (auto depth : {VDEPTH_8BIT, VDEPTH_1BIT, VDEPTH_2BIT, VDEPTH_4BIT}) {
         gfx.setFlip180(flip);
         for (auto &v : guest) v = rng();
-        initDefaultPalette(depth);
+        setDepth(depth);
         assert(palette_changed);
         renderPendingFrame(local_palette);
         assert_panel(panel, guest, depth, flip);
         assert(collect() == 0);
+        // GetEntries reads the same initial colors that reached scanout.
+        const int colors = palette_size(depth);
+        WriteMacInt32(param + csTable, table);
+        WriteMacInt16(param + csStart, 0);
+        WriteMacInt16(param + csCount, colors - 1);
+        assert(monitor.driver_status(cscGetEntries, param) == noErr);
+        for (int i = 0; i < colors; ++i) {
+            const uint32 rgb = table + 8 * i + 2;
+            assert(rgb888_to_rgb565(ReadMacInt16(rgb) >> 8, ReadMacInt16(rgb + 2) >> 8,
+                                    ReadMacInt16(rgb + 4) >> 8) == local_palette[i]);
+        }
+        assert(local_palette[0] == 0xffff && local_palette[colors - 1] == 0);
+        // Reset gamma, then change only entry 1 via an indexed SetEntries call.
+        const std::vector<uint16> initial_colors(local_palette, local_palette + colors);
+        WriteMacInt32(param + csGTable, 0);
+        assert(monitor.driver_control(cscSetGamma, param, dce) == noErr);
+        WriteMacInt32(param + csTable, table);
+        WriteMacInt16(param + csStart, 0xffff);
+        WriteMacInt16(param + csCount, 0);
+        WriteMacInt16(table, 1);
+        WriteMacInt16(table + 2, 0xffff);
+        WriteMacInt16(table + 4, 0);
+        WriteMacInt16(table + 6, 0);
+        assert(monitor.driver_control(cscSetEntries, param, dce) == noErr);
+        renderPendingFrame(local_palette);
+        for (int i = 0; i < colors; ++i)
+            assert(local_palette[i] == (i == 1 ? 0xf800 : initial_colors[i]));
+        assert_panel(panel, guest, depth, flip);
+
+        // A changed row inside one tile writes just that scaled stripe.
+        const int offset = current_bytes_per_row * (TILE_HEIGHT - 1);
+        guest[offset] ^= 0xff;
+        VideoMarkDirtyOffset(offset);
+        const uint32 before_bytes = perf_panel_bytes;
+        renderPendingFrame(local_palette);
+        assert(perf_panel_bytes - before_bytes == TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
+        assert_panel(panel, guest, depth, flip);
+        // Removing an overlay invalidates its whole tile even with sparse guest damage.
+        VideoMarkDirtyOffset(offset);
+        VideoMarkTilesDirtyRect(0, 0, 1, 1);
+        const uint32 before_overlay = perf_panel_bytes;
+        renderPendingFrame(local_palette);
+        assert(perf_panel_bytes - before_overlay == TILE_WIDTH * TILE_HEIGHT * PIXEL_SCALE * PIXEL_SCALE * 2);
         // An overlay forces the full snapshot/render/push path at every depth.
         test_overlay_covered = true;
         test_overlay_composites = 0;
@@ -247,8 +306,6 @@ static void test_pipeline()
         assert_panel(panel, guest, depth, flip);
         // Palette-only changes must redraw all pixels with no framebuffer writes.
         uint8 rgb[768]; for (auto &v : rgb) v = rng();
-        vector<video_mode> modes(1);
-        ESP32_monitor_desc monitor(modes, depth, 0);
         monitor.set_palette(rgb, 256);
         renderPendingFrame(local_palette);
         assert_panel(panel, guest, depth, flip);
@@ -257,13 +314,17 @@ static void test_pipeline()
     assert(collect() == 0);
     VideoMarkTilesDirtyRect(-10, -10, 11, 11);
     assert(collect() == 1);
-    initDefaultPalette(VDEPTH_8BIT); renderPendingFrame(local_palette);
+    setDepth(VDEPTH_8BIT); renderPendingFrame(local_palette);
     // A failed batch must retain old damage and merge the next write.
     guest[0] ^= 0xff; VideoMarkDirtyOffset(0);
     cache_result = -1; renderPendingFrame(local_palette);
     assert(collect() == kSpanTiles);
+    const int last_row = (TILE_HEIGHT - 1) * current_bytes_per_row;
+    guest[last_row] ^= 0xff; VideoMarkDirtyOffset(last_row);
     guest[80] ^= 0xff; VideoMarkDirtyOffset(80);
+    const uint32 before_retry = perf_panel_bytes;
     cache_result = ESP_OK; renderPendingFrame(local_palette);
+    assert(perf_panel_bytes - before_retry == (TILE_HEIGHT + 1) * TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
     assert(collect() == 0);
     assert_panel(panel, guest, VDEPTH_8BIT, true);
     // Writes to the same tile after collection cannot be collapsed away.
@@ -279,7 +340,7 @@ static void test_pipeline()
 
     // No guest writes at all: splash still has a real timeout.
     preserve_splash_until_first_write = true; preserve_splash_armed_ms = 0;
-    test_ms = 100; initDefaultPalette(VDEPTH_8BIT);
+    test_ms = 100; setDepth(VDEPTH_8BIT);
     std::fill(guest.begin(), guest.end(), 0);
     renderPendingFrame(local_palette); assert(preserve_splash_until_first_write);
     test_ms = PRESERVE_SPLASH_MAX_MS;
@@ -287,7 +348,7 @@ static void test_pipeline()
     assert_panel(panel, guest, VDEPTH_8BIT, true);
     // Packed monochrome stipples contain real content even if all bytes match.
     preserve_splash_until_first_write = true; preserve_splash_armed_ms = test_ms;
-    initDefaultPalette(VDEPTH_1BIT); std::fill(guest.begin(), guest.end(), 0x55);
+    setDepth(VDEPTH_1BIT); std::fill(guest.begin(), guest.end(), 0x55);
     VideoMarkDirtyRange(0, current_bytes_per_row * MAC_SCREEN_HEIGHT);
     renderPendingFrame(local_palette); assert(!preserve_splash_until_first_write);
     assert_panel(panel, guest, VDEPTH_1BIT, true);

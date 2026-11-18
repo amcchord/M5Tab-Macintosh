@@ -3,6 +3,7 @@
 
 // Byte ranges may cross rows, packed pixels and any number of tiles. Padding
 // bytes do not represent pixels. Use subtraction before addition to avoid wrap.
+// mark(tile, first_row, end_row) receives tile-local, half-open row bounds.
 template<class Mark>
 inline void markDirtyByteRange(uint32_t offset, uint32_t size,
                               uint32_t capacity, uint32_t stride,
@@ -25,7 +26,7 @@ inline void markDirtyByteRange(uint32_t offset, uint32_t size,
             const uint32_t tile_rows = tile_height - y % tile_height;
             if (rows > tile_rows) rows = tile_rows;
             for (uint32_t tx = 0; tx < columns; ++tx)
-                mark((y / tile_height) * columns + tx);
+                mark((y / tile_height) * columns + tx, y % tile_height, y % tile_height + rows);
             offset += rows * stride;
             continue;
         }
@@ -35,7 +36,7 @@ inline void markDirtyByteRange(uint32_t offset, uint32_t size,
         if (right > width) right = width;
         if (left < right) {
             for (uint32_t tx = left / tile_width; tx <= (right - 1) / tile_width; ++tx)
-                mark((y / tile_height) * columns + tx);
+                mark((y / tile_height) * columns + tx, y % tile_height, y % tile_height + 1);
         }
         offset += count;
     }

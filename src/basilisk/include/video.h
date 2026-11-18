@@ -187,6 +187,7 @@ public:
 	int16 driver_status(uint16 code, uint32 param);
 
 protected:
+	uint8 palette[256 * 3]{};    // Guest RGB entries; backends derive their scanout colors from these.
 	vector<video_mode> modes;                         // List of supported video modes
 	vector<video_mode>::const_iterator current_mode;  // Currently selected video mode
 
@@ -209,9 +210,6 @@ private:
 	// Get X/Y size of specified resolution
 	void get_size_of_resolution(uint32 id, uint32 &x, uint32 &y) const;
 
-	// Set palette to 50% gray
-	void set_gray_palette(void);
-
 	// Load gamma-corrected black-to-white ramp
 	void load_gamma_ramp(void);
 
@@ -227,7 +225,6 @@ private:
 	uint8 slot_id;               // NuBus slot ID number
 	static uint8 next_slot_id;   // Next available slot ID
 
-	uint8 palette[256 * 3];      // Color palette, 256 entries, RGB
 
 	bool luminance_mapping;      // Luminance mapping on/off
 	bool interrupts_enabled;     // VBL interrupts on/off
