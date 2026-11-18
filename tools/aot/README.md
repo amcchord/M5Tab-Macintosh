@@ -5,6 +5,8 @@ compiled into the firmware. [EMULATOR_PERFORMANCE.md](../../EMULATOR_PERFORMANCE
 explains the design, its safety rules and the measurements. This page is the
 procedure.
 
+For a new hardware session, the [Tab5 hardware handoff](../../TAB5_HARDWARE_HANDOFF.md#4-profile-finder-and-an-application-then-time-an-independent-workload) gives a Finder and drawing workload, repeatable collection commands and a third application to time independently.
+
 Nothing here runs on the device except the profiling and self-test builds.
 No code is generated at run time.
 
@@ -22,6 +24,10 @@ deciding that you may. A build without the file links an empty image and
 interprets everything, exactly as 5.0.1 does.
 
 ## Steps
+
+The commands below use the pre-v3 Tab5 environments. On a v3.1 or newer
+Tab5, use `esp32p4_aot_profile_rev3`, `esp32p4_aot_selftest_rev3` and
+`esp32p4_pioarduino_rev3` respectively, including the build directory names.
 
 ```sh
 PIO=.build/release-tools/bin/pio
@@ -63,6 +69,26 @@ range out, for example an application's heap.
 
 Translate again whenever `generated/cpuemu.cpp` changes: region bodies are
 copies of the handler bodies at translation time.
+
+## Reading a translation report
+
+The report is at `.pio/aot-tools/report.json`, or in `AOT_BUILD_DIR` when
+using a separate experiment directory. Each share weights a guest instruction
+by its execution count. ROM and RAM have separate denominators.
+
+| Report field | Interpretation |
+| --- | --- |
+| `rom_translated_share`, `ram_translated_share` | Share covered by decoded instructions kept for consideration before entry selection |
+| `rom_installed_share`, `ram_installed_share` | Share inside emitted regions with a selected entry. Device installation also requires matching bytes at run time. |
+| `rom_hot_untranslated`, `ram_hot_untranslated` | Up to 20 omitted guest PCs per address space with their counts and reasons, ordered by decreasing count |
+| `*_not_translated_by_executions` | Aggregated decoder and flow-check failures by reason |
+
+Use a frequent omitted PC to choose an experiment. For example, several
+addresses rejected for the same instruction may justify examining that
+handler. Addresses below the execution threshold suggest a different
+experiment with the training input or entry budget. Confirm changes with
+the interpreter comparison, the linked blob check and the independently
+timed application.
 
 ## Files
 

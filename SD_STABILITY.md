@@ -38,3 +38,17 @@ benchmark claim is made. Longer testing and other cards remain follow-up work.
 PR #16 batches raw sectors in preboot USB Disk mode. It does not change the
 normal emulator File/FatFs access path, SPI clock, or card initialization and
 was not included as a fix for this failure.
+
+## Current branch
+
+Opening a writable Macintosh image now preserves the primary HFS volume
+attributes and Finder information. The guest can apply its own consistency
+checks when it mounts the volume. A host regression compares every byte
+of an image across open and close, including one with different primary
+and alternate volume attributes. [Storage tests](test/test_storage.py)
+
+The preboot USB Disk path now sends the full aligned sector count to the
+mounted FatFs drive. A partial-sector write reads and preserves the surrounding
+bytes. The handoff includes separate procedures for checking guest disk
+behavior and benchmarking USB copies after eject and remount.
+[Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md)

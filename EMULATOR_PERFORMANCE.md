@@ -368,6 +368,23 @@ is therefore exactly one tile column wide at every depth. The old scheme
 tracked 64-byte ranges, which is 512 pixels at 1 bpp, so a one-pixel store
 redrew large areas in exactly the mode the Graphics test uses.
 
+The renderer keeps the first and last changed guest row for each tile.
+Uncovered indexed tiles submit that band to scanout. Two writes in the same
+tile include the rows between them. Removing an overlay invalidates the
+entire touched tile and a depth or palette change invalidates the screen.
+If publication fails, the next attempt includes both the old bounds and any
+new damage. This costs two bytes of internal RAM per tile, or 360 bytes on Tab5.
+
+In the host test, changing one row of a 32×40 tile at 2× scale submits 256
+bytes of RGB565 pixels. The former whole-tile path submitted 10,240 bytes.
+At 1× the same row needs 64 bytes. These counts describe panel framebuffer
+writes. The physical panel continues scanning at its configured rate.
+Every 30 seconds the serial `[VIDEO PERF]` report gives total `panel_bytes`
+submitted, including retries, and average `detect` and `render` time in
+microseconds per frame opportunity, including skips. Use a settled screen
+with touch overlays hidden for the pixel check after a timing run.
+[Host rendering tests](test/test_display_pipeline.cpp) · [Device comparison](TAB5_HARDWARE_HANDOFF.md#2-check-colors-rotation-and-redraws)
+
 ### Packed indexed tile writer
 
 `writePanelIndexedTile2x` reads packed 1-, 2-, 4- or 8-bit guest rows and

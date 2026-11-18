@@ -46,6 +46,8 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
+For the branch with disk-image, palette, redraw and USB improvements, the [Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md) includes build selection, device checks, benchmark commands and the results to collect.
+
 ## v5.4 beta 1 — Display scaling prerelease
 
 [Download v5.4 beta 1](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.1).
@@ -801,7 +803,7 @@ settings.
 | Audio | Enable / disable sound output | Enabled |
 | WiFi | SSID + password via on-screen keyboard | None |
 | Shared Folder | Any folder on the SD card — appears as a mounted volume in Mac OS | None |
-| USB Disk (Tab5 only) | Expose the SD card over USB Mass Storage via USB-A | Off |
+| USB Disk | Expose the SD card over USB Mass Storage using Tab5 USB-A or the Waveshare USB-OTG port | Off |
 
 Settings are persisted to `/basilisk_settings.txt` on the SD card, so
 the next boot starts with the same layout. The settings UI itself
