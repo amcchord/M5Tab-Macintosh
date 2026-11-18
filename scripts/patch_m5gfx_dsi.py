@@ -19,7 +19,7 @@ def patch_source(source: str) -> str:
 
 if "Import" in globals():
     Import("env")  # noqa: F821
-    if env["PIOENV"].startswith("esp32p4_pioarduino"):
+    if env["PIOENV"].startswith(("esp32p4_pioarduino", "esp32p4_aot_")):
         path = Path(env.subst("$PROJECT_LIBDEPS_DIR")) / env["PIOENV"] / "M5GFX/src/lgfx/v1/platforms/esp32p4/Bus_DSI.cpp"
         source = path.read_text()
         patched = patch_source(source)

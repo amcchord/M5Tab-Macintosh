@@ -5,7 +5,7 @@
     aot_profile.py stop --out counts.txt [--ram ram.txt] [--port PORT]
     aot_profile.py merge --out hot.txt counts.txt [counts.txt ...]
 
-The firmware must be the esp32p4_aot_profile build. `start` clears the
+Use the AOT profiling build for the board's silicon revision. `start` clears the
 counters and begins counting; run the workload (for example
 tools/speedometer_benchmark.py --suite rating); `stop` ends counting and
 writes "ROM offset (hex) count" lines. `merge` adds several count files into
@@ -142,11 +142,13 @@ def read_ram(control, path: Path) -> None:
                     lines.append(f"C {base + slot * 2:x} {value}")
                     executed += 1
             # The chunk's memory plus room for the last instruction's operands.
+            length = min(CHUNK * 2 + 16, total * 4096 - base)
             memory = None
             for _ in range(5):
-                fields = control.request(f"PEEK {base:X} 144", "OK PEEK", timeout=15.0).split()
+                fields = control.request(f"PEEK {base:X} {length}", "OK PEEK", timeout=15.0).split()
                 position = fields.index("PEEK") + 2
-                if len(fields) > position and len(fields[position]) == 288:
+                if (len(fields) > position and len(fields[position]) == length * 2
+                        and re.fullmatch(r"[0-9A-Fa-f]+", fields[position])):
                     memory = fields[position]
                     break
             if memory is None:

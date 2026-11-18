@@ -980,8 +980,9 @@ def emit_region(emitter: Emitter, name: str, members: list[Block], entries: list
 
 
 def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: OpcodeAllocator, stats: dict,
-                 counts: Counter) -> int:
-    """ROM regions and their tables. Returns the number of entries."""
+                 counts: Counter) -> tuple[int, set[int]]:
+    """Return the entry count and instruction offsets in emitted ROM regions."""
+    emitted: set[int] = set()
     rom = tr.rom
     all_ranges: list[tuple[int, int]] = []
     region_rows = []
@@ -998,6 +999,7 @@ def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: Opcod
         first = opcodes.take(len(entries))
         if first is None:
             break
+        emitted.update(i.off for b in members for i in b.insns)
         ranges = merge_ranges([i for b in members for i in b.insns])
         crc = 0
         for start, length in ranges:
@@ -1034,12 +1036,13 @@ def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: Opcod
     stats["rom_entries"] = len(entry_rows)
     stats["rom_verified_bytes"] = sum(length for _, length in all_ranges)
     stats["rom_counts"] = (len(all_ranges), len(region_rows), len(entry_rows))
-    return len(entry_rows)
+    return len(entry_rows), emitted
 
 
 def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions, blocks,
-                 opcodes: OpcodeAllocator, stats: dict, counts: Counter) -> int:
-    """RAM modules and their tables. Returns the number of entries."""
+                 opcodes: OpcodeAllocator, stats: dict, counts: Counter) -> tuple[int, set[int]]:
+    """Return the entry count and instruction offsets in emitted RAM modules."""
+    emitted: set[int] = set()
     image = tr.rom
     all_ranges: list[tuple[int, int]] = []
     module_rows = []
@@ -1063,6 +1066,7 @@ def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions,
             continue
         number = len(module_rows)
         insns = [i for _, members, _ in installed for b in members for i in b.insns]
+        emitted.update(i.off for i in insns)
         origin = min(i.off for i in insns)
         span = max(i.off + i.length for i in insns) - origin
         entry_offsets = {b.start for _, _, entries in installed for b in entries}
@@ -1150,7 +1154,7 @@ def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions,
     stats["ram_anchors"] = len(anchor_rows)
     stats["ram_verified_bytes"] = sum(length for _, length in all_ranges)
     stats["ram_counts"] = (len(all_ranges), len(module_rows), len(entry_rows), len(anchor_rows))
-    return len(entry_rows)
+    return len(entry_rows), emitted
 
 
 def select_entries(blocks: dict[int, Block], regions, min_region_insns: int, budget: int) -> int:
@@ -1161,6 +1165,27 @@ def select_entries(blocks: dict[int, Block], regions, min_region_insns: int, bud
     for block in candidates[:budget]:
         block.patched = True
     return len(candidates)
+
+
+def hot_untranslated(tr: Translator, counts: Counter, emitted: set[int],
+                     discovered: dict[int, Insn], threshold: int) -> list[dict]:
+    """Rank profiled addresses outside the generated code, independent of runtime installation."""
+    ranked = sorted((off for off in counts if off not in emitted), key=lambda off: (-counts[off], off))
+    rows = []
+    for off in ranked[:20]:
+        decoded = tr.cache.get(off)
+        if decoded is None:
+            reason = "outside the captured instruction image"
+        elif isinstance(decoded, Skipped):
+            reason = decoded.reason
+        elif counts[off] < threshold:
+            reason = "below execution threshold"
+        elif off not in discovered:
+            reason = "memory changed since it ran"
+        else:
+            reason = "no emitted region entry or module"
+        rows.append({"guest_pc": f"0x{tr.base + off:08x}", "executions": counts[off], "reason": reason})
+    return rows
 
 
 def main() -> int:
@@ -1228,10 +1253,9 @@ def main() -> int:
     out.append("AOT_BLOB_MARK(aot_blob_begin);")
     out.append("")
     opcodes = OpcodeAllocator()
-    rom_entries = generate_rom(out, tr, regions, blocks, opcodes, stats, counts)
+    rom_entries, rom_emitted = generate_rom(out, tr, regions, blocks, opcodes, stats, counts)
 
     # RAM
-    ram_report = {}
     ram_counts, image, valid = load_ram_profile(args.ram_profile) if args.ram_profile else (Counter(), b"", b"")
     for item in args.ram_exclude:
         low, high = (int(value, 16) for value in item.split(":"))
@@ -1253,7 +1277,7 @@ def main() -> int:
     choose_entries(ram_tr, ram_blocks, ram_no_entry)
     ram_candidates = select_entries(ram_blocks, ram_regions, args.min_region_insns,
                                     max(0, min(args.max_ram_entries, len(PATCH_OPCODES) - rom_entries)))
-    ram_entries = generate_ram(out, ram_tr, modules, ram_regions, ram_blocks, opcodes, stats, ram_counts)
+    ram_entries, ram_emitted = generate_ram(out, ram_tr, modules, ram_regions, ram_blocks, opcodes, stats, ram_counts)
 
     out.append("AOT_BLOB_MARK(aot_blob_end);")
     out.append("")
@@ -1283,22 +1307,21 @@ def main() -> int:
     translated = sum(insn.count for insn in insns.values())
     ram_executed = sum(ram_counts.values())
     ram_translated = sum(insn.count for insn in kept.values())
-    ram_installed = sum(i.count for members in ram_regions if any(b.patched for b in members)
-                        for b in members for i in b.insns)
     report = {
         "rom_instructions_executed": executed,
         "rom_translated_share": round(translated / max(executed, 1), 4),
-        "rom_installed_share": round(sum(i.count for members in regions if any(b.patched for b in members)
-                                         for b in members for i in b.insns) / max(executed, 1), 4),
+        "rom_installed_share": round(sum(counts[off] for off in rom_emitted) / max(executed, 1), 4),
         "rom_instructions": len(insns),
         "rom_blocks": len(blocks),
         "rom_entry_candidates": candidates,
         "ram_instructions_executed": ram_executed,
         "ram_translated_share": round(ram_translated / max(ram_executed, 1), 4),
-        "ram_installed_share": round(ram_installed / max(ram_executed, 1), 4),
+        "ram_installed_share": round(sum(ram_counts[off] for off in ram_emitted) / max(ram_executed, 1), 4),
         "ram_instructions": len(kept),
         "ram_blocks": len(ram_blocks),
         "ram_entry_candidates": ram_candidates,
+        "rom_hot_untranslated": hot_untranslated(tr, counts, rom_emitted, insns, args.min_count),
+        "ram_hot_untranslated": hot_untranslated(ram_tr, ram_counts, ram_emitted, ram_insns, ram_min),
         **stats,
         "rom_not_translated_by_executions": failures.most_common(20),
         "ram_not_translated_by_executions": ram_failures.most_common(20),

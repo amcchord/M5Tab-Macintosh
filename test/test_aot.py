@@ -8,13 +8,34 @@ then runs every region entry from random states and compares it with the
 interpreter built from the same sources.
 """
 
+import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLS = ROOT / "tools/aot"
+sys.path.insert(0, str(TOOLS))
+from aot_profile import read_ram
+
+
+class AotProfileTests(unittest.TestCase):
+    def test_read_code_at_end_of_guest_ram(self):
+        class LastPage:
+            def request(self, command, expected, timeout):
+                return {
+                    "AOTPROF RAMMAP 0": "OK AOTPROF RAMMAP 0 1 01",
+                    "AOTPROF RAMCHUNKS 0": "OK AOTPROF RAMCHUNKS 0 80000000",
+                    "AOTPROF RAMREAD 0 31": "OK AOTPROF RAMREAD 0 31 " + "00000000" * 63 + "00000002",
+                    "PEEK F80 128": "OK PEEK 00000F80 " + "45" * 128,
+                }[command]
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "ram.txt"
+            read_ram(LastPage(), path)
+            self.assertEqual(path.read_text().splitlines()[1:], ["C ffe 2", "B f80 " + "45" * 128])
 
 
 class AotTranslationTests(unittest.TestCase):
@@ -66,6 +87,17 @@ class AotTranslationTests(unittest.TestCase):
         # Guest registers in locals, in every region.
         report = self.compare_with_interpreter("--cache-run", "0")
         self.assertNotIn('"rom_regions_with_cached_registers": 0', report)
+
+    def test_hot_untranslated_report_respects_entry_budget(self):
+        report = json.loads(self.translate("--ram-profile", str(self.work / "ram.txt"),
+                                           "--max-rom-entries", "0", "--max-ram-entries", "0"))
+        for space in ("rom", "ram"):
+            self.assertEqual(report[f"{space}_installed_share"], 0.0)
+            self.assertEqual(report[f"{space}_translated_share"], 1.0)
+            hot = report[f"{space}_hot_untranslated"]
+            self.assertEqual(len(hot), 20)
+            self.assertEqual(hot, sorted(hot, key=lambda row: (-row["executions"], row["guest_pc"])))
+            self.assertEqual(hot[0]["reason"], "no emitted region entry or module")
 
     def test_entry_points_are_only_placed_on_executed_instruction_starts(self):
         # A profile entry inside another instruction (the second word of the
