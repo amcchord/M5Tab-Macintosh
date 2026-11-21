@@ -1,11 +1,14 @@
+import functools
 import hashlib
 import http.client
+import http.server
 import struct
 import subprocess
 from types import SimpleNamespace
 from unittest.mock import Mock
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -111,6 +114,27 @@ class WifiUpdateTests(unittest.TestCase):
                 with self.subTest(idf_patch=patch):
                     subprocess.run([*command, f"-DTEST_IDF_PATCH={patch}"], cwd=ROOT, check=True)
                     subprocess.run([binary], check=True, timeout=10)
+
+    def test_legacy_stream_receives_release_sized_image_from_host_helper(self):
+        image = bytes(range(251)) * 13578
+        self.path.write_bytes(image)
+        with tempfile.TemporaryDirectory() as tmp:
+            includes = Path(tmp) / "lwip"
+            includes.mkdir()
+            for leaf in ("inet.h", "sockets.h"):
+                (includes / leaf).touch()
+            binary = Path(tmp) / "receiver"
+            subprocess.run(["c++", "-std=c++17", "-fsanitize=address,undefined", "-I" + tmp,
+                            "test/test_ota_lan_socket.cpp", "-o", str(binary)], cwd=ROOT, check=True)
+            handler = functools.partial(wifi_update.ImageHandler, image=image)
+            with http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler) as server:
+                worker = threading.Thread(target=server.serve_forever)
+                worker.start()
+                try:
+                    subprocess.run([binary, str(server.server_port), self.path], check=True, timeout=15)
+                finally:
+                    server.shutdown()
+                    worker.join()
 
     def test_bad_result_never_reboots(self):
         board = Board("failed")
