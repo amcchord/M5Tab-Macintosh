@@ -116,6 +116,7 @@ int nibble(char c) {
 }
 } // namespace
 
+bool FirmwareUpdateHasDualSlots() { return other_slot() != nullptr; }
 bool FirmwareUpdateBusy() { return t.phase == Transfer::Connect || t.phase == Transfer::Download || t.phase == Transfer::Verify; }
 bool FirmwareUpdateReady() { return t.phase == Transfer::Ready; }
 
@@ -125,7 +126,7 @@ String FirmwareUpdateStatus() {
     auto boot = esp_ota_get_boot_partition();
     char result[192];
     snprintf(result, sizeof(result), "OK BOOT UPDATE STATUS state=%s layout=%s running=%s boot=%s bytes=%lu verified=%lu size=%lu result=%s",
-             states[t.phase], other_slot() ? "ab" : "single", running ? running->label : "?",
+             states[t.phase], FirmwareUpdateHasDualSlots() ? "ab" : "single", running ? running->label : "?",
              boot ? boot->label : "?", (unsigned long)t.received, (unsigned long)t.verified, (unsigned long)t.size, t.reason);
     return String(result);
 }

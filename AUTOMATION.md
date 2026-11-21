@@ -139,7 +139,7 @@ The Tab5's ESP32-C6 provides Wi-Fi over SDIO. The existing ESP-Hosted configurat
 
 Moving the server onto the C6 would require matched P4 and C6 builds. Espressif's Network Split example lets the two processors share an IP and route selected ports to the C6. Custom RPC can carry bounded commands and responses over SDIO. A port would need to stream the P4 framebuffer across that link and preserve ordinary Macintosh networking. The stock Tab5 build leaves the C6 image in place. [Network Split example](https://github.com/espressif/esp-hosted-mcu/tree/main/examples/network_split/station) · [Peer data transfer](https://github.com/espressif/esp-hosted-mcu/tree/main/examples/peer_data_transfer)
 
-P4 firmware updates currently use USB. The shipped 16 MiB flash layout has one 6 MiB factory application. Wi-Fi updates with rollback require a migration to two application slots and an OTA data partition, followed by testing rollback on failed first boot. The separate Waveshare radio updater writes its C6 firmware, whereas a Macintosh firmware update targets the P4. [Partition layout](partitions.csv) · [Espressif OTA guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/system/ota.html)
+The dashboard reads the P4 flash layout. A standard installation uses USB for firmware updates. With the optional dual-slot layout, the P4 can download and verify an update over Wi-Fi after authorization over USB in Startup Settings. [Wi-Fi update instructions](WIFI_UPDATE.md)
 
 ## Preboot configuration
 

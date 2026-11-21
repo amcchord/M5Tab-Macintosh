@@ -82,10 +82,10 @@ static void handleWebRequest(WiFiClient &client, const char *method, const char 
     if (!strcmp(method, "GET") && !strcmp(path, "/desk/status")) {
         char json[320];
         const int len = snprintf(json, sizeof(json),
-            "{\"board\":\"%s\",\"version\":\"%s\",\"control\":%s,\"uptime_sec\":%llu,"
+            "{\"board\":\"%s\",\"version\":\"%s\",\"control\":%s,\"ota_slots\":%u,\"uptime_sec\":%llu,"
             "\"internal\":%u,\"psram\":%u,\"sample_ms\":%llu,\"instructions\":%llu}",
             BOARD_NAME, M5TAB_FIRMWARE_VERSION, mode == WebSession::Control ? "true" : "false",
-            (unsigned long long)(now / 1000000), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+            FirmwareUpdateHasDualSlots() ? 2u : 1u, (unsigned long long)(now / 1000000), (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM), (unsigned long long)ms, (unsigned long long)count);
         if (len < 0 || (size_t)len >= sizeof(json)) { httpEmpty(client, "500 Internal Server Error"); return; }
         client.printf("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\n"

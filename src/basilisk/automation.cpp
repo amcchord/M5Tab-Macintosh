@@ -24,6 +24,7 @@
 
 #include "sysdeps.h"
 #include "automation.h"
+#include "firmware_update.h"
 #include "boot_gui.h"
 #include "input.h"
 #include "board_display.h"

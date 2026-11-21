@@ -25,6 +25,8 @@ static WebSession s_web_session;
 static uint64_t s_cpu_sample_count = 10000000000ULL, s_cpu_sample_ms = 5011;
 static int MALLOC_CAP_INTERNAL = 1, MALLOC_CAP_SPIRAM = 2;
 static int heap_caps_get_free_size(int) { return 2048; }
+static bool dual_slots;
+static bool FirmwareUpdateHasDualSlots() { return dual_slots; }
 static unsigned clicks, frames;
 static std::vector<uint8_t> downs, ups;
 static bool InputAutomationTryClick(int x, int y, unsigned count) {
@@ -74,6 +76,9 @@ int main() {
     assert(serve("POST","/desk/key/36").find("403 Forbidden")!=std::string::npos);
     assert(serve("POST","/desk/key/36",auth).find("403 Forbidden")!=std::string::npos);
     assert(serve("GET","/desk/status",auth).find("\"instructions\":10000000000")!=std::string::npos);
+    assert(serve("GET","/desk/status",auth).find("\"ota_slots\":1")!=std::string::npos);
+    dual_slots=true;
+    assert(serve("GET","/desk/status",auth).find("\"ota_slots\":2")!=std::string::npos);
     serve("GET","/desk/frame",auth); assert(frames==1);
     assert(serve("GET","/desk/status",auth+auth).find("403 Forbidden")!=std::string::npos);
     ++random[0]; s_web_session.open(random,WebSession::Control,esp_timer_get_time());

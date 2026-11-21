@@ -28,7 +28,7 @@ h2{font-size:18px;margin:0 0 8px}dl{margin:0 0 18px}dt{font-size:13px;color:#beb
 <p id="notice" role="status"></p></div>
 <aside><h2>Device</h2><dl><dt>Free internal memory</dt><dd id="internal">—</dd>
 <dt>Free PSRAM</dt><dd id="psram">—</dd><dt>Uptime</dt><dd id="up">—</dd>
-<dt>Access</dt><dd id="mode">—</dd><dt>Firmware updates</dt><dd>Install over USB</dd></dl>
+<dt>Access</dt><dd id="mode">—</dd><dt>Firmware updates</dt><dd id="updates">—</dd></dl>
 <h2>Guest speed</h2><button id="measure">Measure for 15 s</button><p id="result" role="status"></p></aside>
 </section></main>
 <script>
@@ -72,6 +72,7 @@ async function api(path,method='GET',body){
 async function status(){
   const s=await (await api('status')).json();
   el('device').textContent=s.board+' · '+s.version;
+  el('updates').textContent=s.ota_slots===2?'Wi-Fi update available. Authorize over USB in Startup Settings.':'Install over USB (single application slot).';
   el('internal').textContent=(s.internal/1024).toFixed(0)+' KiB';
   el('psram').textContent=(s.psram/1048576).toFixed(1)+' MiB';
   el('up').textContent=Math.floor(s.uptime_sec/60)+' min';
