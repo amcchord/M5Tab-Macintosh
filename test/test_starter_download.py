@@ -1,5 +1,6 @@
 """Exercise the real starter installer with a local card and a synthetic ZIP member."""
 from pathlib import Path
+import errno
 import hashlib
 import random
 import subprocess
@@ -135,12 +136,50 @@ class StarterDownloadTests(unittest.TestCase):
                 self.assertFalse(self.target.exists())
                 self.packed.unlink()
 
-    def test_card_write_failure_is_terminal(self):
-        result = self.run_install('write_error')
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+    def test_card_write_or_flush_failure_keeps_the_exact_staged_prefix_for_retry(self):
+        cases = [('partial_write_io', 181, 'SD card write failed'),
+                 ('partial_write_full', 181, 'SD card is full'),
+                 ('write_zero', 0, 'SD card write failed'),
+                 ('flush_full', len(self.deflate), 'SD card is full'),
+                 ('close_io', len(self.deflate), 'SD card write failed')]
+        for mode, prefix, diagnosis in cases:
+            with self.subTest(mode=mode):
+                result = self.run_install(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(self.request_offsets(result), [0])
+                self.assertIn(diagnosis, result.stdout)
+                expected_errno = errno.ENOSPC if 'full' in mode else errno.EIO
+                self.assertIn(f'errno={expected_errno})', result.stdout)
+                self.assertFalse(self.target.exists())
+                self.assertEqual(self.packed.read_bytes(), self.deflate[:prefix])
+                resumed = self.run_install()
+                self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+                self.assertEqual(self.request_offsets(resumed), [] if prefix == len(self.deflate) else [prefix])
+                self.assertEqual(self.target.read_bytes(), self.data)
+                self.target.unlink()
+
+    def test_failed_checkpoint_is_terminal_and_retry_reuses_saved_bytes(self):
+        data = random.Random(65).randbytes(2 * 1024 * 1024 + 32768)
+        compressor = zlib.compressobj(6, wbits=-15)
+        packed = compressor.compress(data) + compressor.flush()
+        args = dict(packed=packed, size=len(data), final_hash=sha(data))
+        result = self.run_install('flush_full', **args)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f'fsync failed (errno={errno.ENOSPC})', result.stdout)
+        self.assertIn('SD card is full', result.stdout)
         self.assertEqual(self.request_offsets(result), [0])
-        self.assertIn('Could not write', result.stdout)
-        self.assertFalse(self.target.exists())
+        self.assertEqual(self.packed.read_bytes(), packed[:2 * 1024 * 1024])
+        resumed = self.run_install(**args)
+        self.assertEqual(resumed.returncode, 0, resumed.stdout + resumed.stderr)
+        self.assertEqual(self.request_offsets(resumed), [2 * 1024 * 1024])
+        self.assertEqual(self.target.read_bytes(), data)
+
+    def test_unreadable_free_space_stops_before_downloading(self):
+        result = self.run_install('space_check_io')
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn('Could not check free space', result.stdout)
+        self.assertEqual(self.request_offsets(result), [])
+        self.assertFalse(self.packed.exists())
 
     def test_interrupted_and_cancelled_transfers_resume_at_exact_byte(self):
         for mode, code in [('interrupt', 1), ('cancel', 2)]:

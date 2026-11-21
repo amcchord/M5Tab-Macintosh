@@ -72,7 +72,7 @@ inline uint64_t host_free = 1ull << 32;
 inline int esp_vfs_fat_info(const char *, uint64_t *total, uint64_t *available) {
     *total = 1ull << 32;
     *available = host_free;
-    return ESP_OK;
+    return host_mode == "space_check_io" ? -1 : ESP_OK;
 }
 struct esp_http_client_event_t { int event_id; const char *header_key, *header_value; void *user_data; };
 struct esp_http_client_config_t {

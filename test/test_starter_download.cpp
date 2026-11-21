@@ -1,8 +1,10 @@
 // Compile the real installer with a synthetic pinned asset and offline server.
 #include "starter_stubs/platform.h"
 #include <unistd.h>
+#include <cerrno>
 
 static uintptr_t dictionary_start;
+static int stage_fd = -1;
 static ssize_t cardWrite(int fd, const void *data, size_t len) {
     uintptr_t p = reinterpret_cast<uintptr_t>(data);
     if (host_mode == "fragmented" && p >= dictionary_start &&
@@ -10,11 +12,42 @@ static ssize_t cardWrite(int fd, const void *data, size_t len) {
         assert(p == dictionary_start);
         printf("IMAGE_WRITE %zu\n", len);
     }
-    if (host_mode == "write_error" && len) return -1;
+    if (host_mode == "partial_write_io" || host_mode == "partial_write_full") {
+        if (stage_fd < 0) {
+            stage_fd = fd;
+            return write(fd, data, std::min(len, size_t(181)));
+        }
+        errno = host_mode == "partial_write_full" ? ENOSPC : EIO;
+        return -1;
+    }
+    if (host_mode == "write_zero") {
+        errno = ENOSPC; // A zero return does not set errno.
+        return 0;
+    }
+    stage_fd = fd;
     return write(fd, data, len);
 }
+static int cardFsync(int fd) {
+    if (fd == stage_fd && (host_mode == "flush_full" || host_mode == "partial_write_io")) {
+        errno = ENOSPC;
+        return -1;
+    }
+    return fsync(fd);
+}
+static int cardClose(int fd) {
+    int rc = close(fd);
+    if (fd == stage_fd && (host_mode == "flush_full" || host_mode == "close_io")) {
+        errno = EIO;
+        return -1;
+    }
+    return rc;
+}
 #define write cardWrite
+#define fsync cardFsync
+#define close cardClose
 #include "../src/basilisk/starter_download.cpp"
+#undef close
+#undef fsync
 #undef write
 #include <fstream>
 #include <iterator>

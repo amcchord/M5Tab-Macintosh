@@ -67,18 +67,22 @@ struct FileHandle {
         if (fd >= 0)
             close(fd);
     }
-    bool syncClose() {
-        int result = fsync(fd), closed = close(fd);
+    int syncCloseError() {
+        int error = fsync(fd) == 0 ? 0 : errno;
+        if (close(fd) != 0 && !error)
+            error = errno;
         fd = -1;
-        return result == 0 && closed == 0;
+        return error;
     }
 };
 
 bool writeAll(int fd, const unsigned char *data, size_t n) {
     while (n) {
         ssize_t wrote = write(fd, data, n);
-        if (wrote <= 0)
+        if (wrote <= 0) {
+            if (wrote == 0) errno = EIO;
             return false;
+        }
         data += wrote;
         n -= wrote;
     }
@@ -162,6 +166,13 @@ struct HttpClient {
     }
 };
 
+DownloadResult stageWriteFailure(const char *operation, int error) {
+    printf("[starter] SD download %s failed (errno=%d)\n", operation, error);
+    if (error == ENOSPC)
+        return {"SD card is full. Free space on the card, then tap Retry."};
+    return {"SD card write failed. Tap Retry. If it fails again, restart with the card seated."};
+}
+
 DownloadResult receiveFile(esp_http_client_handle_t client, const Asset &a, const char *path,
                            uint32_t &pos, Scratch &scratch) {
     FileHandle out(open(path, O_WRONLY | O_CREAT | O_APPEND, 0644));
@@ -195,14 +206,14 @@ DownloadResult receiveFile(esp_http_client_handle_t client, const Asset &a, cons
             portEXIT_CRITICAL(&lock);
         }
         if (filled && !writeAll(out.fd, scratch.input, filled)) {
-            result = {"Could not write the download. Check card space."};
+            result = stageWriteFailure("write", errno);
             break;
         }
         pos += filled;
         progress("Downloading", a, pos, a.compressed);
         if (pos - checkpoint >= 2 * 1024 * 1024) {
             if (fsync(out.fd)) {
-                result = {"Could not save download progress to the card."};
+                result = stageWriteFailure("fsync", errno);
                 break;
             }
             checkpoint = pos;
@@ -213,8 +224,9 @@ DownloadResult receiveFile(esp_http_client_handle_t client, const Asset &a, cons
     portENTER_CRITICAL(&lock);
     network_speed.stop();
     portEXIT_CRITICAL(&lock);
-    if (!out.syncClose())
-        return {"Could not finish writing the download."};
+    const int closeError = out.syncCloseError();
+    if (closeError && (!result.error || result.retry))
+        return stageWriteFailure("flush/close", closeError);
     return result;
 }
 
@@ -336,7 +348,7 @@ const char *expand(const Asset &a, const char *packed, const char *temp, Scratch
                 vTaskDelay(1);
         }
         if (done)
-            return out.syncClose() ? nullptr : "Could not finish writing the disk image.";
+            return out.syncCloseError() == 0 ? nullptr : "Could not finish writing the disk image.";
     }
     return nullptr;
 }
@@ -370,8 +382,9 @@ const char *install(const Asset &a, Scratch &s) {
     if (unlink(temp) && errno != ENOENT)
         return "Could not reset the staged image.";
     uint64_t total, free;
-    if (esp_vfs_fat_info(BOARD_SD_MOUNT_POINT, &total, &free) != ESP_OK ||
-        free < uint64_t(a.size) + a.compressed - pos + 1024 * 1024)
+    if (esp_vfs_fat_info(BOARD_SD_MOUNT_POINT, &total, &free) != ESP_OK)
+        return "Could not check free space. Restart with the card seated and resume setup.";
+    if (free < uint64_t(a.size) + a.compressed - pos + 1024 * 1024)
         return "Insufficient space on the card for this installation.";
     const char *error = download(a, packed, pos, s);
     if (error || cancelled())
@@ -420,7 +433,7 @@ const char *prepareStage() {
             return "The starter staging folder contains other files.";
     }
     FileHandle f(open(marker, O_CREAT | O_EXCL | O_WRONLY, 0644));
-    if (f.fd >= 0 && f.syncClose())
+    if (f.fd >= 0 && f.syncCloseError() == 0)
         return nullptr;
     return "Could not open the starter staging folder.";
 }
