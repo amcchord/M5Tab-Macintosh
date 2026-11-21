@@ -130,6 +130,19 @@ String FirmwareUpdateStatus() {
     return String(result);
 }
 
+String FirmwareUpdateCancel() {
+    if (FirmwareUpdateReady()) {
+        // Revoke the new boot selection before restart. The current slot
+        // will pass the normal startup confirmation again when it boots.
+        if (esp_ota_set_boot_partition(esp_ota_get_running_partition()) != ESP_OK)
+            return "ERR BOOT update_cancel_failed";
+    } else if (!FirmwareUpdateBusy()) {
+        return "ERR BOOT no_update_pending";
+    }
+    finish(Transfer::Idle, "cancelled");
+    return "OK BOOT UPDATE CANCEL";
+}
+
 String FirmwareUpdateStart(char *args) {
     if (FirmwareUpdateBusy()) return "ERR BOOT update_busy";
     auto target = other_slot();
