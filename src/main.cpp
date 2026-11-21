@@ -10,6 +10,7 @@
 
 #include <Arduino.h>
 #include "firmware_version.h"
+#include "firmware_update.h"
 
 #include "board.h"
 #include "board_config.h"
@@ -89,6 +90,7 @@ static bool initSDCard(void)
 static void haltWith(const char *msg)
 {
     Serial.printf("[MAIN] FATAL: %s\n", msg);
+    FirmwareUpdateHealth(false);
     MacSplash::ShowErrorOverlay(msg);
     while (true) { delay(1000); }
 }
@@ -126,10 +128,12 @@ void setup(void)
 
     if (!Board_Init()) {
         Serial.println("[MAIN] ERROR: Board_Init failed - halting");
+        FirmwareUpdateHealth(false);
         while (true) { delay(1000); }
     }
     if (!BoardDisplay_Init()) {
         Serial.println("[MAIN] ERROR: BoardDisplay_Init failed - halting");
+        FirmwareUpdateHealth(false);
         while (true) { delay(1000); }
     }
 
@@ -172,6 +176,7 @@ void setup(void)
     if (!AutomationStartSerial()) {
         Serial.println("[MAIN] WARNING: Preboot serial control unavailable");
     }
+    FirmwareUpdateHealth(true);
     BootGUI_ControlPoll();
 
     const esp_reset_reason_t reset_reason = esp_reset_reason();
