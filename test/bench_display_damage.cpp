@@ -28,8 +28,48 @@ static void drawOutline(uint8 *guest, int stride, int bits, int frame)
     }
 }
 
-int main()
+// Replay the same sequence of Finder selection endpoints used on the board.
+// The guest bitmap receives an XOR erase and draw before each presentation.
+struct Point { int x, y; };
+
+static void xorLine(uint8 *guest, int stride, int bits, int y, int left, int right)
 {
+    for (int x = left; x <= right; ++x) {
+        const int shift = 8 - bits - (x * bits % 8);
+        guest[y * stride + x * bits / 8] ^= ((1u << bits) - 1u) << shift;
+    }
+    VideoMarkDirtyRange(y * stride + left * bits / 8, right * bits / 8 - left * bits / 8 + 1);
+}
+
+static void selection(uint8 *guest, int stride, int bits, Point anchor, Point end)
+{
+    xorLine(guest, stride, bits, anchor.y, anchor.x, end.x);
+    for (int y = anchor.y + 1; y < end.y; ++y) {
+        xorLine(guest, stride, bits, y, anchor.x, anchor.x);
+        xorLine(guest, stride, bits, y, end.x, end.x);
+    }
+    xorLine(guest, stride, bits, end.y, anchor.x, end.x);
+}
+
+int main(int argc, char **argv)
+{
+    std::vector<Point> trace;
+    if (argc > 1) {
+        FILE *file = argc == 2 ? fopen(argv[1], "r") : nullptr;
+        if (!file) return 2;
+        Point p;
+        int read;
+        while ((read = fscanf(file, "%d %d", &p.x, &p.y)) == 2) {
+            if (p.x < 0 || p.y < 0 || p.x >= MAC_SCREEN_WIDTH || p.y >= MAC_SCREEN_HEIGHT ||
+                (!trace.empty() && (p.x <= trace.front().x || p.y <= trace.front().y))) {
+                fclose(file);
+                return 2;
+            }
+            trace.push_back(p);
+        }
+        fclose(file);
+        if (read != EOF || trace.size() < 3) return 2;
+    }
     std::vector<uint16> panel(DISPLAY_WIDTH * DISPLAY_HEIGHT);
     std::vector<uint8> guest(MAC_SCREEN_WIDTH * MAC_SCREEN_HEIGHT);
     mac_frame_buffer = guest.data();
@@ -41,15 +81,22 @@ int main()
     for (int bits : {1, 8}) {
         const int stride = MAC_SCREEN_WIDTH * bits / 8;
         updateVideoStateCache(bits == 1 ? VDEPTH_1BIT : VDEPTH_8BIT, stride);
-        for (bool dense : {false, true}) {
+        const std::vector<const char *> workloads = trace.empty() ?
+            std::vector<const char *>{"outline", "dense"} : std::vector<const char *>{"finder"};
+        for (const char *name : workloads) {
+            const bool finder = !trace.empty();
             std::fill(guest.begin(), guest.end(), 0);
             force_full_update = palette_changed = true;
+            if (finder) selection(guest.data(), stride, bits, trace.front(), trace[1]);
             renderPendingFrame(palette);
             const uint32 before_bytes = perf_panel_bytes;
             const auto started = std::chrono::steady_clock::now();
-            constexpr int frames = 1000;
+            const int frames = finder ? static_cast<int>(trace.size()) - 2 : 1000;
             for (int frame = 0; frame < frames; ++frame) {
-                if (dense) {
+                if (finder) {
+                    selection(guest.data(), stride, bits, trace.front(), trace[frame+1]);
+                    selection(guest.data(), stride, bits, trace.front(), trace[frame+2]);
+                } else if (!strcmp(name, "dense")) {
                     const int length = stride * MAC_SCREEN_HEIGHT;
                     memset(guest.data(), frame & 0xff, length);
                     VideoMarkDirtyRange(0, length);
@@ -63,7 +110,7 @@ int main()
             uint64_t hash = 0;
             for (auto pixel : panel) hash = hash * 31 + pixel;
             printf("%dbpp %s %.2f us/frame, %.1f bytes/frame, hash %016llx\n",
-                   bits, dense ? "dense" : "outline", usec / frames,
+                   bits, name, usec / frames,
                    (perf_panel_bytes - before_bytes) / double(frames),
                    (unsigned long long)hash);
         }
