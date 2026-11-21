@@ -56,7 +56,7 @@ static void on_system_shutdown(void)
 static const uint32_t SPLASH_TAP_WINDOW_MS = 4000;
 
 /* ============================================================================
- * SD card bring-up + ROM existence check
+ * SD card bring-up
  * ==========================================================================*/
 
 static bool initSDCard(void)
@@ -71,19 +71,6 @@ static bool initSDCard(void)
     Serial.printf("[MAIN] SD card initialized: %llu MB\n",
                   (unsigned long long)BoardSD_CardSizeMB());
 
-    /* SD_FS is SD on Tab5 (SPI) and SD_MMC on Waveshare (native SDMMC). */
-    const bool hasROM   = SD_FS.exists("/Q650.ROM");
-    const bool hasDisk  = SD_FS.exists("/Macintosh.dsk");
-    const bool hasFloppy = SD_FS.exists("/DiskTools1.img");
-
-    Serial.printf("[MAIN] Q650.ROM: %s\n",      hasROM    ? "found" : "MISSING");
-    Serial.printf("[MAIN] Macintosh.dsk: %s\n", hasDisk   ? "found" : "MISSING");
-    Serial.printf("[MAIN] DiskTools1.img: %s\n", hasFloppy ? "found" : "MISSING");
-
-    if (!hasROM) {
-        Serial.println("[MAIN] ERROR: Q650.ROM not found on SD card!");
-        return false;
-    }
     return true;
 }
 
@@ -152,7 +139,7 @@ void setup(void)
     /* SD comes up after the splash; practical init time fits comfortably
      * inside the 2s tap window, so the icon stays visible throughout. */
     if (!initSDCard()) {
-        haltWith("SD card or ROM file not found");
+        haltWith("Insert a FAT32 microSD card and restart.");
     }
 
     /* Register the SD-flush shutdown hook as soon as the card is up.

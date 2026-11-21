@@ -38,6 +38,7 @@
 #include "board_sd.h"  /* SD_FS alias */
 #include "preboot_screens.h"  /* Mac OS 8 Platinum screens on a 2x canvas */
 #include "usb_msc.h"
+#include "starter_download.h"
 
 // Balanced defaults: auto-connect and keep WiFi for emulator networking.
 #ifndef BOOTGUI_ENABLE_WIFI_AUTOCONNECT
@@ -350,6 +351,11 @@ static const char *control_phase = "initializing";
 static const char *control_screen = "none";
 static bool control_boot_requested = false;
 static bool control_hold = false;
+static bool starter_requested = false;
+static bool starter_system7 = false;
+static bool starter_job_system7 = false;
+static bool starter_cancel_pending = false;
+static char starter_notice[128] = {};
 static bool control_leave_wifi = false;
 static bool control_wifi_changed = false;
 static uint32_t control_restart_at = 0;
@@ -941,17 +947,164 @@ static void selectMedia(int column, int row)
                   row ? path : "None");
 }
 
+// The ROM loader accepts 64 KiB through 1 MiB. Existing user-supplied media
+// can be selected normally; checksums apply to files installed by the downloader.
+static bool usableFile(const char *path, size_t minimum, size_t maximum = SIZE_MAX)
+{
+    if (!path || !path[0]) return false;
+    File f = SD_FS.open(path, FILE_READ);
+    return f && !f.isDirectory() && f.size() >= minimum && f.size() <= maximum;
+}
+
+static bool bootMediaReady()
+{
+    return usableFile("/Q650.ROM", 64 * 1024, 1024 * 1024) &&
+           (boot_from_cd && selected_cdrom_path[0] ? usableFile(selected_cdrom_path, 512)
+                                                  : usableFile(selected_disk_path, 512));
+}
+
+static bool startStarterDownload(bool system7)
+{
+    if (!wifi_initialized || !BootGUI_IsWiFiConnected()) {
+        snprintf(starter_notice, sizeof(starter_notice), "Connect to Wi-Fi before downloading.");
+        return false;
+    }
+    if (!StarterDownloadStart(system7)) {
+        snprintf(starter_notice, sizeof(starter_notice), "Could not start the download. Try again.");
+        return false;
+    }
+    starter_system7 = starter_job_system7 = system7;
+    starter_cancel_pending = false;
+    starter_notice[0] = 0;
+    return true;
+}
+
+static bool startInstalledSystem()
+{
+    if (StarterDownloadStatus().state != StarterState::Done || starter_system7 != starter_job_system7)
+        return false;
+    const char *path = starter_system7 ? "/Macintosh7.dsk" : "/Macintosh8.dsk";
+    if (!usableFile("/Q650.ROM", 64 * 1024, 1024 * 1024) || !usableFile(path, 512)) {
+        snprintf(starter_notice, sizeof(starter_notice), "Startup files are missing. Check the card in Settings.");
+        return false;
+    }
+    char old_path[sizeof(selected_disk_path)];
+    strcpy(old_path, selected_disk_path);
+    const bool old_boot_cd = boot_from_cd;
+    strcpy(selected_disk_path, path);
+    boot_from_cd = false;
+    if (!saveSettings()) {
+        strcpy(selected_disk_path, old_path);
+        boot_from_cd = old_boot_cd;
+        snprintf(starter_notice, sizeof(starter_notice), "Could not save the startup disk. Check the card and try again.");
+        return false;
+    }
+    control_boot_requested = true;
+    return true;
+}
+
+static void runStarterScreen()
+{
+    const auto L = Screens::LayoutStarter(UI::Width(), UI::Height());
+    control_screen = "starter";
+    int pressed = Screens::kNoControl;
+    bool inside = false, dirty = true, connected = false;
+    uint32_t wifi_at = 0, paint_at = 0;
+    char shown_clock[16] = {}, shown_status[192] = {};
+    bool shown_connected = false, shown_working = false, shown_done = false, shown_failed = false;
+    while (!control_boot_requested) {
+        BootGUI_ControlPoll();
+        if (control_boot_requested) return;
+        const StarterDownloadInfo info = StarterDownloadStatus();
+        const bool working = info.state == StarterState::Working;
+        const bool done = info.state == StarterState::Done && starter_job_system7 == starter_system7;
+        if ((int32_t)(millis() - wifi_at) >= 0) {
+            connected = wifi_initialized && BootGUI_IsWiFiConnected();
+            wifi_at = millis() + 1000;
+        }
+        const bool action_enabled = working ? !starter_cancel_pending : done || connected;
+        UiTouch t;
+        if (pollUiTouch(&t)) {
+            const int hit = Screens::StarterControlAt(L, t.x, t.y);
+            if (t.pressed) {
+                pressed = (working && hit != Screens::kStarterAction) ||
+                    (hit == Screens::kStarterAction && !action_enabled) ? Screens::kNoControl : hit;
+                inside = true;
+            }
+            if (t.down) inside = pressed == hit;
+            if (t.released) {
+                if (pressed == hit && inside) {
+                    if (!working && pressed == Screens::kStarterSettings) {
+                        scanDiskFiles();
+                        return;
+                    }
+                    if (!working && pressed == Screens::kStarterWiFi) {
+                        runWiFiScreen();
+                        control_screen = "starter";
+                        wifi_at = 0;
+                    } else if (!working && (pressed == Screens::kStarter7 || pressed == Screens::kStarter8)) {
+                        starter_system7 = pressed == Screens::kStarter7;
+                        starter_notice[0] = 0;
+                    } else if (pressed == Screens::kStarterAction && action_enabled) {
+                        if (working) { StarterDownloadCancel(); starter_cancel_pending = true; }
+                        else if (done) { if (startInstalledSystem()) return; }
+                        else startStarterDownload(starter_system7);
+                    }
+                }
+                pressed = Screens::kNoControl;
+            }
+            dirty = true;
+        }
+        if (dirty || (int32_t)(millis() - paint_at) >= 0) {
+            char clock[16], status[192];
+            formatMenuClock(clock, sizeof(clock));
+            const bool failed = starter_job_system7 == starter_system7 &&
+                (info.state == StarterState::Failed || info.state == StarterState::Cancelled);
+            const char *message = starter_notice[0] ? starter_notice :
+                working && starter_cancel_pending ? "Cancelling download..." :
+                (working || done || failed) && info.message[0] ? info.message :
+                connected ? "Choose Download to install the startup files." : "Choose Wi-Fi to connect to a network.";
+            int percent = -1;
+            if (working && info.total) {
+                percent = (int)((uint64_t)info.completed * 100 / info.total);
+                snprintf(status, sizeof(status), "%s  %u%%", message, (unsigned)percent);
+            } else snprintf(status, sizeof(status), "%s", message);
+            const char *action = working ? "Cancel" : done ? "Start Up" : failed ? "Retry" : "Download";
+            Screens::StarterView view = {clock, status, connected ? "Wi-Fi connected" : "Wi-Fi disconnected",
+                action, inside ? pressed : (int)Screens::kNoControl, percent,
+                starter_system7, working, action_enabled};
+            if (dirty || connected != shown_connected || working != shown_working || done != shown_done ||
+                failed != shown_failed || strcmp(clock, shown_clock) || strcmp(status, shown_status)) {
+                Screens::PaintStarter(L, view);
+                UI::Present();
+                snprintf(shown_clock, sizeof(shown_clock), "%s", clock);
+                snprintf(shown_status, sizeof(shown_status), "%s", status);
+                shown_connected = connected; shown_working = working; shown_done = done; shown_failed = failed;
+            }
+            paint_at = millis() + 500;
+            dirty = false;
+        }
+        delay(5);
+    }
+}
+
 /* Everything the settings screen shows; repaint only when it changes. */
 struct SettingsKey {
     int selection[3], first[3], count[3], scroll[3];
     int ram, pressed, bars;
-    bool sound, boot_cd, rotate;
+    bool sound, boot_cd, rotate, needs_setup;
     char clock[16], status[72], detail[72];
 };
 
 static void runSettingsScreen(void)
 {
+    starter_requested |= !bootMediaReady();
     for (;;) {
+        if (starter_requested) {
+            starter_requested = false;
+            runStarterScreen();
+            if (control_boot_requested) return;
+        }
         control_screen = "settings";
         Serial.println("[BOOT_GUI] Showing settings screen...");
         Serial.printf("[BOOT_GUI] Found %d disk files, %d CD-ROM files, %d shared folders\n",
@@ -971,7 +1124,7 @@ static void runSettingsScreen(void)
         WifiSummary wifi = {};
         char clock[16] = "";
         SettingsKey shown;
-        bool painted = false;
+        bool painted = false, ready = bootMediaReady();
         enum { kStay, kStart, kOpenWiFi, kOpenUsb } next = kStay;
 
         while (next == kStay) {
@@ -991,7 +1144,7 @@ static void runSettingsScreen(void)
                 delay(1);
                 continue;
             }
-            if (control_boot_requested) break;
+            if (control_boot_requested || starter_requested) break;
 
             UiTouch t;
             if (pollUiTouch(&t)) {
@@ -1035,7 +1188,8 @@ static void runSettingsScreen(void)
                         } else if (pressed == Screens::kUsbButton) {
                             next = kOpenUsb;
                         } else if (pressed == Screens::kStartButton) {
-                            next = kStart;
+                            if (bootMediaReady()) next = kStart;
+                            else starter_requested = true;
                         }
                         Serial.printf("[BOOT_GUI] Control %d activated\n", pressed);
                     }
@@ -1055,6 +1209,7 @@ static void runSettingsScreen(void)
                 first[c] = Screens::ListClampFirst(L.lists[c], first[c], mediaCount(c));
 
             if ((int32_t)(millis() - refresh_at) >= 0) {
+                ready = bootMediaReady();
                 wifi = readWifiSummary();
                 formatMenuClock(clock, sizeof(clock));
                 refresh_at = millis() + 1000;
@@ -1072,6 +1227,7 @@ static void runSettingsScreen(void)
             v.boot_from_cd = boot_from_cd;
             v.rotate180 = rotation_degrees == 180;
             v.usb_available = usb_available;
+            v.needs_setup = !ready;
             v.wifi_bars = wifi.bars;
             v.wifi_status = wifi.status;
             v.wifi_detail = wifi.detail;
@@ -1090,6 +1246,7 @@ static void runSettingsScreen(void)
             key.bars = v.wifi_bars;
             key.sound = v.sound;
             key.boot_cd = v.boot_from_cd;
+            key.needs_setup = v.needs_setup;
             key.rotate = v.rotate180;
             memcpy(key.clock, clock, sizeof(key.clock));
             memcpy(key.status, wifi.status, sizeof(key.status));
@@ -1103,6 +1260,7 @@ static void runSettingsScreen(void)
             delay(2);
         }
 
+        if (starter_requested) continue;
         if (next == kOpenWiFi) {
             runWiFiScreen();
             continue;
@@ -1607,7 +1765,12 @@ static bool controlPathValid(const char *key, const char *path)
 static bool controlHitRect(const char *name, UI::Rect *out)
 {
     const int w = UI::Width(), h = UI::Height();
-    if (!strcmp(control_screen, "settings")) {
+    if (!strcmp(control_screen, "starter")) {
+        static const char *const names[Screens::kStarterCount] = {"system8", "system7", "settings", "wifi", "action"};
+        const auto layout = Screens::LayoutStarter(w, h);
+        for (int i = 0; i < Screens::kStarterCount; ++i)
+            if (!strcmp(name, names[i])) { *out = layout.controls[i]; return true; }
+    } else if (!strcmp(control_screen, "settings")) {
         static const char *const names[Screens::kSettingsControlCount] = {
             "disk", "cdrom", "extfs", "ram4", "ram8", "ram12", "ram16",
             "sound", "bootcd", "rotate", "wifi", "usb", "start"};
@@ -1689,6 +1852,32 @@ static String controlExecute(char *command)
     }
     if (strcmp(control_phase, "preboot")) return "ERR BOOT enter_preboot_first";
     if (control_restart_at || control_boot_requested) return "ERR BOOT transition_pending";
+    if (!strncmp(command, "STARTER ", 8)) {
+        const char *action = command + 8;
+        const auto info = StarterDownloadStatus();
+        if (!strcmp(action, "STATUS")) {
+            static const char *const states[] = {"idle", "working", "done", "failed", "cancelled"};
+            return String("OK BOOT STARTER ") + states[(unsigned)info.state] + " " + info.completed + " " +
+                info.total + " " + controlHex(info.message);
+        }
+        if (!strcmp(action, "SHOW") && !strcmp(control_screen, "settings")) {
+            starter_requested = true;
+            return "OK BOOT STARTER SHOW";
+        }
+        if (strcmp(control_screen, "starter")) return "ERR BOOT starter_screen_required";
+        if (!strcmp(action, "SHOW")) return "OK BOOT STARTER SHOW";
+        if (!strcmp(action, "CANCEL") && info.state == StarterState::Working) {
+            StarterDownloadCancel(); starter_cancel_pending = true;
+            return "OK BOOT STARTER CANCEL";
+        }
+        if (info.state == StarterState::Working) return "ERR BOOT download_active";
+        if (!strcmp(action, "7") || !strcmp(action, "8")) {
+            return startStarterDownload(*action == '7') ? "OK BOOT STARTER DOWNLOAD" : "ERR BOOT download_unavailable";
+        }
+        return "ERR BOOT invalid_starter_action";
+    }
+    if (!strcmp(control_screen, "starter") && !strcmp(command, "START"))
+        return startInstalledSystem() ? "OK BOOT START" : "ERR BOOT download_not_ready";
     if (strcmp(control_screen, "settings")) return "ERR BOOT settings_screen_required";
     if (!strncmp(command, "UPDATE START ", 13))
         return FirmwareUpdateStart(command + 13);
@@ -1756,7 +1945,7 @@ static String controlExecute(char *command)
     }
     if (!strcmp(command, "SAVE")) return saveSettings() ? "OK BOOT SAVE" : "ERR BOOT save_failed";
     if (!strcmp(command, "START")) {
-        if (!controlPathValid("disk", selected_disk_path) ||
+        if (!bootMediaReady() || (!boot_from_cd && !controlPathValid("disk", selected_disk_path)) ||
             !controlPathValid("cdrom", selected_cdrom_path) ||
             !controlPathValid("extfs", selected_extfs_path) ||
             (boot_from_cd && !selected_cdrom_path[0])) return "ERR BOOT invalid_boot_media";
@@ -1816,7 +2005,7 @@ void BootGUI_ControlPoll(void)
 }
 
 void BootGUI_ControlSetPhase(const char *phase) { control_phase = phase; }
-bool BootGUI_StartInSettings(void) { return control_hold; }
+bool BootGUI_StartInSettings(void) { return control_hold || !bootMediaReady(); }
 bool BootGUI_RestartPending(void)
 {
     return control_restart_at && (int32_t)(millis() - control_restart_at) >= 0;

@@ -112,6 +112,22 @@ int main()
         PaintSettings(sl, sv);
         shot("settings-pressed");
 
+        const auto setup = LayoutStarter(W, H);
+        StarterView starter = {"11:40 PM", "Choose Wi-Fi to connect to a network.", "Wi-Fi disconnected",
+                               "Download", kNoControl, -1, false, false, false};
+        PaintStarter(setup, starter);
+        shot("starter");
+        for (int i=0; i<kStarterCount; ++i) {
+            const auto &r = setup.controls[i];
+            assert(StarterControlAt(setup,r.x+r.w/2,r.y+r.h/2)==i);
+            assert(r.right()<=W && r.bottom()<=H);
+        }
+        starter.status="Downloading the startup disk.  37%";
+        starter.network="Wi-Fi connected";
+        starter.action="Cancel"; starter.working=true; starter.action_enabled=true; starter.percent=37;
+        PaintStarter(setup, starter);
+        shot("starter-download");
+
         std::vector<NetworkRow> nets = {
             {"Home Network", 4, true}, {"Coffee Shop", 2, false}, {"Neighbor 5G", 1, true},
             {"Printer-Setup", 3, false}, {"Guest", 2, true}, {"Office", 4, true},

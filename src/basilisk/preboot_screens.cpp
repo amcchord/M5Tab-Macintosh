@@ -254,7 +254,7 @@ void PaintSettings(const SettingsLayout &L, const SettingsView &v)
     if (v.usb_available)
         Button(L.controls[kUsbButton], "USB Disk...",
                v.pressed == kUsbButton ? kButtonPressed : kButtonNormal);
-    Button(L.controls[kStartButton], "Start Up",
+    Button(L.controls[kStartButton], v.needs_setup ? "Set Up..." : "Start Up",
            v.pressed == kStartButton ? kButtonPressed : kButtonNormal, true);
     ScreenCorners();
 }
@@ -268,6 +268,60 @@ int SettingsControlAt(const SettingsLayout &L, int x, int y)
         if (r.w > 0 && r.contains(x, y)) return i;
     }
     return kNoControl;
+}
+
+/* ---- SD card setup ----------------------------------------------------- */
+
+StarterLayout LayoutStarter(int width, int height)
+{
+    StarterLayout L = {};
+    const int w = width > 484 ? 460 : width - 24, h = 248;
+    L.window = {(width - w)/2, (height + kMenuBarHeight - h)/2, w, h};
+    const Rect c = WindowContent(L.window);
+    const int x = c.x + kMargin, y = c.y + kMargin, inner = c.w - 2*kMargin;
+    L.body = {x, y, inner, 38};
+    L.controls[kStarter8] = {x, y + 37, 124, 26};
+    L.controls[kStarter7] = {x + 136, y + 37, 110, 26};
+    L.network = {x, y + 70, inner, 16};
+    L.status = {x, y + 95, inner, 44};
+    L.progress = {x, y + 145, inner, 13};
+    L.controls[kStarterSettings] = buttonRowRect(c, x, 84);
+    L.controls[kStarterWiFi] = buttonRowRect(c, x + 96, 78);
+    L.controls[kStarterAction] = buttonRowRect(c, x + inner - 108, 108);
+    return L;
+}
+
+int StarterControlAt(const StarterLayout &L, int x, int y)
+{
+    for (int i = 0; i < kStarterCount; ++i)
+        if (L.controls[i].contains(x, y)) return i;
+    return kNoControl;
+}
+
+void PaintStarter(const StarterLayout &L, const StarterView &v)
+{
+    backdrop(v.clock);
+    Window(L.window, "Set Up SD Card");
+    WrapText(L.body, "Download the Macintosh ROM and a startup disk to this card. Allow 1.2 GiB of free space.", kBlack);
+    const Rect &eight = L.controls[kStarter8], &seven = L.controls[kStarter7];
+    LabeledRadio(eight.x, eight.y+7, "Mac OS 8.1", !v.system7, v.pressed == kStarter8);
+    LabeledRadio(seven.x, seven.y+7, "System 7", v.system7, v.pressed == kStarter7);
+    TextIn(L.network, v.network, kGray63);
+    WrapText(L.status, v.status, kBlack);
+    if (v.working && v.percent >= 0) {
+        FrameRect(L.progress, kBlack);
+        const Rect r = L.progress.inset(1);
+        Fill(r, kWhite);
+        const int percent = v.percent < 100 ? v.percent : 100;
+        Fill({r.x, r.y, r.w * percent / 100, r.h}, kAccent);
+    }
+    const char *labels[] = {"Settings...", "Wi-Fi...", v.action};
+    for (int i = kStarterSettings; i <= kStarterAction; ++i) {
+        const bool disabled = i == kStarterAction ? !v.action_enabled : v.working;
+        Button(L.controls[i], labels[i-kStarterSettings], disabled ? kButtonDisabled :
+               v.pressed == i ? kButtonPressed : kButtonNormal, i == kStarterAction && !v.working);
+    }
+    ScreenCorners();
 }
 
 /* ---- Wi-Fi ------------------------------------------------------------- */

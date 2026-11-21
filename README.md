@@ -629,7 +629,17 @@ The [Wi-Fi console](AUTOMATION.md#wi-fi-console) provides browser screenshots, g
 
 ### SD Card Setup
 
-#### Quick Start (Recommended)
+#### Set up a blank card on the device
+
+With firmware built from this source, insert a FAT32 microSD card with at least **1.2 GiB free** and start the device. If the ROM or selected startup image is missing, **Set Up SD Card** opens.
+
+1. Choose **Wi-Fi...**, join a network, and return to setup.
+2. Select **Mac OS 8.1** or **System 7** and choose **Download**. Keep the device powered while it downloads, expands and verifies the files.
+3. Choose **Start Up** after verification. **Settings...** lets you use an existing image on the card instead.
+
+An interrupted download can be retried. A different file already present at a starter filename is kept. To use that file, select it in Settings. To install the starter copy, move the existing file elsewhere first.
+
+#### Prepare a card on your computer
 
 Download a ready-to-use SD card image with Mac OS pre-installed:
 
