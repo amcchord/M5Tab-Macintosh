@@ -14,6 +14,7 @@ using loff_t = int32_t;
 #endif
 #define UNUSED(x) ((void)(x))
 inline constexpr auto FILE_READ = "rb";
+using SeekMode = int;
 inline constexpr int SeekEnd = SEEK_END, SeekSet = SEEK_SET;
 
 class File {
