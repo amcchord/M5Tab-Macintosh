@@ -7,13 +7,20 @@ static void ADBKeyDown(int code) { assert(!keys[code]); keys[code]=true; }
 static void ADBKeyUp(int code) { assert(keys[code]); keys[code]=false; }
 static void ADBSetRelMouseMode(bool) {}
 static void ADBMouseMoved(int,int) {}
-static void ADBMouseDown(int) {}
-static void ADBMouseUp(int) {}
+static std::vector<int> mouseEvents;
+static void ADBMouseDown(int button) { mouseEvents.push_back(button); }
+static void ADBMouseUp(int button) { mouseEvents.push_back(button | 0x80); }
 #include "../src/basilisk/input_shared_state.inc"
 
 int main()
 {
     resetInputClaims();
+    InputAutomationMouseButton(0,true);
+    assert(!InputAutomationTryClick(10,10,2) && mouseEvents.size()==1);
+    InputAutomationMouseButton(0,false);
+    mouseEvents.clear();
+    assert(InputAutomationTryClick(10,10,2));
+    assert((mouseEvents==std::vector<int>{0,128,0,128}));
     InputKeyDown(0x36);
     InputAutomationKey(0x36,true); InputAutomationKey(0x36,true);
     InputAutomationReleaseAll();

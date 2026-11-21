@@ -34,6 +34,8 @@ static void handleWebRequest(WiFiClient &client, const char *method, const char 
     portEXIT_CRITICAL(&s_network_state_lock);
     if (!active) { httpEmpty(client, "403 Forbidden"); return; }
     char token[33] = {};
+    int text_length = -1;
+    const bool text_request = !strcmp(method, "POST") && !strcmp(path, "/desk/text");
     char line[768];
     for (;;) {
         if (!httpLine(client, line, sizeof(line), remaining, deadline)) { httpEmpty(client, "400 Bad Request"); return; }
@@ -44,6 +46,19 @@ static void handleWebRequest(WiFiClient &client, const char *method, const char 
             while (*value == ' ' || *value == '\t') ++value;
             if (token[0] || strlen(value) != sizeof(token) - 1) { httpEmpty(client, "403 Forbidden"); return; }
             memcpy(token, value, sizeof(token));
+        } else if (text_request && !strncasecmp(line, "Content-Length:", 15)) {
+            const char *value = line + 15;
+            while (*value == ' ' || *value == '\t') ++value;
+            char trailing;
+            unsigned length;
+            if (text_length >= 0 || sscanf(value, "%2u%c", &length, &trailing) != 1 || !length || length > 64) {
+                httpEmpty(client, "400 Bad Request");
+                return;
+            }
+            text_length = length;
+        } else if (text_request && !strncasecmp(line, "Transfer-Encoding:", 18)) {
+            httpEmpty(client, "400 Bad Request");
+            return;
         }
     }
     if (!strcmp(method, "GET") && !strcmp(path, "/desk")) {
@@ -79,11 +94,47 @@ static void handleWebRequest(WiFiClient &client, const char *method, const char 
     }
     if (strcmp(method, "POST")) { httpEmpty(client, "404 Not Found"); return; }
     if (mode != WebSession::Control) { httpEmpty(client, "403 Forbidden"); return; }
+    if (text_request) {
+        if (text_length < 1) { httpEmpty(client, "400 Bad Request"); return; }
+        AutomationKeyStroke strokes[64];
+        for (int i = 0; i < text_length;) {
+            if ((int32_t)(millis() - deadline) >= 0) { httpEmpty(client, "408 Request Timeout"); return; }
+            const int c = client.read();
+            if (c < 0) {
+                if (!client.connected()) return;
+                vTaskDelay(1);
+                continue;
+            }
+            if ((c < 32 && c != '\n' && c != '\t') || !asciiToKeyStroke((uint8_t)c, &strokes[i])) {
+                httpEmpty(client, "400 Bad Request");
+                return;
+            }
+            ++i;
+        }
+        // Validate the whole body before typing. A revoked session stops between
+        // complete taps; each one owns its key and modifier claims independently.
+        for (int i = 0; i < text_length; ++i) {
+            portENTER_CRITICAL(&s_network_state_lock);
+            const bool authorized = s_web_session.authenticate(token, esp_timer_get_time()) == WebSession::Control;
+            portEXIT_CRITICAL(&s_network_state_lock);
+            if (!authorized || !s_emulator_ready) { httpEmpty(client, "403 Forbidden"); return; }
+            const AutomationKeyStroke stroke = strokes[i];
+            if (stroke.shift) InputKeyDown(0x38);
+            InputKeyDown(stroke.code);
+            vTaskDelay(pdMS_TO_TICKS(AUTOMATION_TYPE_KEY_HOLD_MS));
+            InputKeyUp(stroke.code);
+            if (stroke.shift) InputKeyUp(0x38);
+            vTaskDelay(pdMS_TO_TICKS(AUTOMATION_TYPE_KEY_GAP_MS));
+        }
+        httpEmpty(client, "204 No Content");
+        return;
+    }
     int x, y, key;
     char tail;
-    if (sscanf(path, "/desk/click/%4d/%4d%c", &x, &y, &tail) == 2 &&
+    const bool twice = !strncmp(path, "/desk/double-click/", 19);
+    if (sscanf(path, twice ? "/desk/double-click/%4d/%4d%c" : "/desk/click/%4d/%4d%c", &x, &y, &tail) == 2 &&
         x >= 0 && y >= 0 && x < BOARD_MAC_SCREEN_WIDTH && y < BOARD_MAC_SCREEN_HEIGHT) {
-        if (!InputAutomationTryClick(x, y)) { httpEmpty(client, "409 Conflict"); return; }
+        if (!InputAutomationTryClick(x, y, twice ? 2 : 1)) { httpEmpty(client, "409 Conflict"); return; }
     } else if (sscanf(path, "/desk/key/%3d%c", &key, &tail) == 1 && key >= 0 && key < 0x80) {
         InputKeyDown((uint8_t)key);
         vTaskDelay(pdMS_TO_TICKS(AUTOMATION_TYPE_KEY_HOLD_MS));
