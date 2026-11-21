@@ -675,6 +675,8 @@ Then format it during Mac OS installation.
 
 ### Flashing the Firmware
 
+An optional two-slot layout supports Wi-Fi application updates authorized over USB. [Provisioning and update instructions](WIFI_UPDATE.md)
+
 Pick the environment that matches your hardware:
 
 - M5Stack Tab5 -> `esp32p4_pioarduino`

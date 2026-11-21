@@ -5,7 +5,9 @@ import functools
 import hashlib
 import http.server
 import ipaddress
+import json
 import sys
+import struct
 import threading
 import time
 from pathlib import Path
@@ -57,7 +59,8 @@ def install(control, path, address, reboot):
     info = control.info().split()
     board = " ".join(info[4:-2])
     tag = BOARD_TAGS.get(board)
-    if not tag or not image.startswith(tag, APP_TAG_OFFSET):
+    descriptor_version = struct.unpack_from("<H", image, APP_TAG_OFFSET + 42)[0]
+    if not tag or descriptor_version != 1 or not image.startswith(tag, APP_TAG_OFFSET):
         raise ValueError(f"The file has no compatible Wi-Fi update descriptor for {board}.")
     if control.boot_status().get("screen") != "settings":
         raise ValueError("Shut down in Finder, then enter Startup Settings.")
@@ -104,15 +107,28 @@ def install(control, path, address, reboot):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("image", type=Path)
-    parser.add_argument("--host", required=True, type=ipaddress.IPv4Address,
+    parser.add_argument("image", nargs="?", type=Path)
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--status", action="store_true", help="Show the active and selected slots over USB")
+    actions.add_argument("--cancel", action="store_true", help="Cancel a transfer or revoke a staged update before restart")
+    parser.add_argument("--host", type=ipaddress.IPv4Address,
                         help="LAN IPv4 address of this computer reachable from the device")
     parser.add_argument("--port", help="USB serial port")
     parser.add_argument("--reboot", action="store_true", help="Restart into Startup Settings after verification")
     args = parser.parse_args()
+    if (args.status or args.cancel) and (args.image or args.reboot or args.host):
+        parser.error("--status and --cancel take only --port")
+    if not (args.status or args.cancel) and (not args.host or not args.image):
+        parser.error("provide an application image and --host")
     try:
         with MacControl(args.port, reset_on_failure=False) as control:
             control.connect()
+            if args.cancel:
+                print(control.request("BOOT UPDATE CANCEL", "OK BOOT UPDATE CANCEL", timeout=8))
+                return 0
+            if args.status:
+                print(json.dumps(status(control), indent=2))
+                return 0
             slot = install(control, args.image, str(args.host), args.reboot)
             if args.reboot:
                 previous = control.session_id

@@ -1648,6 +1648,11 @@ static String controlExecute(char *command)
             " " + (control_restart_at ? "1" : "0");
     }
     if (!strcmp(command, "UPDATE STATUS")) return FirmwareUpdateStatus();
+    if (!strcmp(command, "UPDATE CANCEL")) {
+        if (strcmp(control_phase, "preboot") || strcmp(control_screen, "settings") || control_restart_at)
+            return "ERR BOOT settings_screen_required";
+        return FirmwareUpdateCancel();
+    }
     if (FirmwareUpdateBusy()) return "ERR BOOT update_busy";
     if (!strcmp(command, "ENTER")) {
         if (!strcmp(control_screen, "usb")) return "ERR BOOT usb_disk_active";
