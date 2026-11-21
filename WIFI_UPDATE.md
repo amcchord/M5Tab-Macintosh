@@ -1,34 +1,56 @@
 # Wi-Fi application updates
 
-The optional A/B layout keeps two 6 MiB copies of the ESP32-P4 application. The normal release layout has one application slot. Provision A/B once over USB on a standalone 16 MiB installation. This procedure changes the layout and shrinks and relocates the SPIFFS partition. Back up the whole flash and export any SPIFFS data before proceeding. Keep the matching bootloader installed. The microSD card holds the Macintosh disk images.
+The standard installation has one application slot. The optional A/B layout has two 6 MiB slots. It can receive a release over Wi-Fi while the current firmware remains available. A USB data cable authorizes each update.
 
-## Provision over USB
+Download the Host Tools ZIP and the matching `-app.bin` for your board, ESP32-P4 revision and firmware profile. Extract Host Tools and put the application file beside `WIFI_UPDATE.md`. Check the downloads against the release’s `SHA256SUMS`. [v5.4 beta 3 downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Choosing a download](RELEASE_NOTES.md#choosing-a-download)
 
-Choose the usual PlatformIO environment for the board and silicon. Build from source containing this updater. This example uses a pre-v3 Tab5 USB Debug installation. Use a new backup filename and the board's actual serial port.
+Run the examples from the extracted folder on macOS or Linux. Set `PORT` to the programming USB port and `APP` to the filename you downloaded. The example selects a standard pre-v3 Tab5.
 
 ```sh
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install -r tools/requirements.txt
 PORT=/dev/cu.usbmodemXXXX
-ENV_NAME=esp32p4_pioarduino_debug
-SDK="$HOME/.platformio/packages/framework-arduinoespressif32"
-pio run -e "$ENV_NAME"
-esptool --chip esp32p4 --port "$PORT" read-flash 0 0x1000000 original-flash.bin
-shasum -a 256 original-flash.bin
-python3 "$SDK/tools/gen_esp32part.py" partitions_ota.csv partitions-ota.bin
-esptool --chip esp32p4 --port "$PORT" write-flash \
-  0x8000 partitions-ota.bin 0xe000 "$SDK/tools/partitions/boot_app0.bin" \
-  0x10000 ".pio/build/$ENV_NAME/firmware.bin"
+APP=./M5Tab-Macintosh-v5.4-beta.3-app.bin
 ```
 
-The bundled 8 KiB OTA data image selects slot 0. Its initial selection also gives rollback-enabled bootloaders a previous slot during the first update. NVS stays at `0x9000`. Use this partition table for subsequent USB re-provisioning. The normal merged release and PlatformIO upload target reinstall the single-slot table.
-
-## Install an application
-
-Shut down in Finder. Open Startup Settings, join the LAN under Wi-Fi, and return to the main Settings screen. Connect the programming USB cable. On the computer, provide its LAN IPv4 address and the application-only `firmware.bin` for the right board and silicon.
+Shut down in Finder. Start the board and tap the Happy Mac splash to enter Startup Settings. On firmware with the updater, check the installed layout. A first installation or an earlier release without the status command can proceed to USB provisioning.
 
 ```sh
 python3 tools/wifi_update.py --port "$PORT" --status
-python3 tools/wifi_update.py --port "$PORT" --host 192.168.1.20 --reboot \
-  ".pio/build/$ENV_NAME/firmware.bin"
+```
+
+If `layout` is `ab`, [install the application](#install-an-application). If it is `single`, provision the second slot once over USB.
+
+## Provision over USB
+
+This procedure is for standalone 16 MiB installations. It replaces the partition table, moves and shrinks SPIFFS, and installs the selected application in slot 0. Export any SPIFFS files you use and keep your original full-flash backup. Macintosh disks reside on the removable microSD card.
+
+```sh
+python3 -m pip install 'esptool>=5,<6'
+BACKUP="original-flash-$(date +%Y%m%d-%H%M%S).bin"
+python3 -m esptool --chip esp32p4 --port "$PORT" --after no-reset read-flash 0 0x1000000 "$BACKUP"
+python3 -m esptool --chip esp32p4 --port "$PORT" verify-flash 0 "$BACKUP"
+```
+
+Continue after the backup verifies. Keep the bootloader from the matching merged release installed. If this is the first install, or the installed bootloader came from another profile, flash the matching merged release at offset zero **after** saving the original backup. [USB flashing instructions](README.md#flashing-the-firmware)
+
+Host Tools includes the A/B partition table and its initial slot selection. This command keeps the installed bootloader and NVS at their existing addresses.
+
+```sh
+python3 -m esptool --chip esp32p4 --port "$PORT" write-flash \
+  0x8000 wifi-update/partitions-ota.bin 0xe000 wifi-update/boot_app0.bin \
+  0x10000 "$APP"
+```
+
+After restart, open Startup Settings and run the status command again. It should report `layout` as `ab` and `running` as `ota_0`. A standard merged USB flash or PlatformIO upload returns the board to the single-slot layout.
+
+## Install an application
+
+In Startup Settings, open **Wi-Fi**, join the same LAN as the computer, then return to the main Settings screen. Keep the programming USB cable connected. Replace the example IP address with the computer’s LAN IPv4 address.
+
+```sh
+python3 tools/wifi_update.py --port "$PORT" --host 192.168.1.20 --reboot "$APP"
 ```
 
 The host serves just the selected file from that interface on a temporary TCP port. The host firewall must allow the board to connect to that port. USB authorizes the exact URL, byte count and SHA-256 of the file. ESP-IDF validates the application format, then the P4 reads back the inactive slot and checks the pinned digest before selecting it. The board descriptor and compiled SDK silicon minimum identify compatible images. Earlier firmware and merged images lack the required descriptor. Omitting `--reboot` stages the verified update for the next restart.

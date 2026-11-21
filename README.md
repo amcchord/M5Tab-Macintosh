@@ -50,7 +50,7 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 Insert a spare microSD card and start the Tab5. **Set Up SD Card** downloads the Quadra 650 ROM and the selected Macintosh system disk over Wi-Fi, verifies both files on the card, and offers to start the Mac. Tab5 Startup Settings also supports formatting a card as FAT32.
 
-This release adds automatic startup recovery for supported classic HFS disks, faster Tab5 SD access, and a local Wi-Fi console with guest screenshots, speed measurements, and optional mouse and keyboard control. A two-slot installation can receive firmware updates over Wi-Fi.
+This release adds automatic startup recovery for supported classic HFS disks, faster Tab5 SD access, and a local Wi-Fi console with guest screenshots, speed measurements, and optional mouse and keyboard control. An optional two-slot installation can receive firmware updates over Wi-Fi. [Set up a spare card](#sd-card-setup) · [Enable Wi-Fi updates](WIFI_UPDATE.md)
 
 [Download v5.4 beta 3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Release notes and supported hardware](RELEASE_NOTES.md) · [Stable v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
 
@@ -617,9 +617,7 @@ The [Wi-Fi console](AUTOMATION.md#wi-fi-console) provides browser screenshots, g
 
 ### Prerequisites
 
-- **Hardware**: M5Stack Tab5
-- **Software**: [PlatformIO](https://platformio.org/) (CLI or IDE extension)
-- **SD Card**: FAT32 formatted microSD card (8GB+ recommended)
+For on-device setup, use a Tab5 with v5.4 beta 3 installed, a spare microSD card with at least 1.2 GiB available, and Wi-Fi with internet access. A computer is needed for the initial firmware flash. [USB flashing instructions](#flashing-the-firmware)
 
 ### SD Card Setup
 
@@ -627,7 +625,7 @@ The [Wi-Fi console](AUTOMATION.md#wi-fi-console) provides browser screenshots, g
 
 When the Tab5 cannot mount a card, **SD Card** shows the card identity, capacity and detected layout. Reseat the card and choose **Retry Mount** to try it again. To erase a spare card, choose **Format…**, check the card identity on the confirmation screen, then choose **Erase Card**. Formatting removes every file and partition. The Tab5 makes a FAT32 volume and restarts into setup. The same screen is available under **Startup Settings → SD Card…** for a mounted Tab5 card.
 
-With firmware built from this source, insert a FAT32 microSD card with at least **1.2 GiB free** and start the device. If the ROM or selected startup image is missing, **Set Up SD Card** opens.
+If the card already has a FAT32 volume with at least **1.2 GiB free**, insert it and start the device. If the ROM or selected startup image is missing, **Set Up SD Card** opens.
 
 1. Choose **Wi-Fi...**, join a network, and return to setup.
 2. Select **Mac OS 8.1** or **System 7** and choose **Download**. The screen shows the filename, percentage and recent download speed. Keep the device powered while it downloads, expands and verifies the files.
@@ -701,22 +699,14 @@ See [`docs/waveshare/README.md`](docs/waveshare/README.md) for the Waveshare pin
 
 #### Option 1: Pre-built Firmware (Easiest)
 
-Download the latest release from GitHub:
-
-**[📥 Download Latest Release](https://github.com/amcchord/M5Tab-Macintosh/releases/latest)**
-
-Flash the single merged binary using `esptool.py`:
+Choose the merged `.bin` for your board and ESP32-P4 silicon revision. The macOS/Linux example below installs the standard pre-v3 Tab5 build over USB-C. On Windows, activate the virtual environment with `.venv\Scripts\activate` in Command Prompt. Replace the filename for other profiles. A merged image flashes at offset zero and installs the single-slot partition table. If your board already uses two slots, update it with the matching `-app.bin`. [v5.4 beta 3 downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Choosing a download](RELEASE_NOTES.md#choosing-a-download) · [Two-slot updates](WIFI_UPDATE.md)
 
 ```bash
-# Install esptool if you don't have it
-pip install esptool
-
-# Flash the merged binary (connect Tab5 via USB-C)
-esptool.py --chip esp32p4 \
-    --port /dev/ttyACM0 \
-    --baud 921600 \
-    write_flash \
-    0x0 M5Tab-Macintosh-v5.3.bin
+python3 -m venv .venv
+. .venv/bin/activate
+python3 -m pip install 'esptool>=5,<6'
+python3 -m esptool --chip esp32p4 --port /dev/ttyACM0 --baud 921600 \
+  write-flash 0x0 M5Tab-Macintosh-v5.4-beta.3.bin
 ```
 
 **Note**: Replace `/dev/ttyACM0` with your actual port:
