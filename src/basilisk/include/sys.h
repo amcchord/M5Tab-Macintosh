@@ -55,6 +55,9 @@ extern void Sys_close(void *fh);
 extern size_t Sys_read(void *fh, void *buffer, loff_t offset, size_t length);
 extern size_t Sys_write(void *fh, void *buffer, loff_t offset, size_t length);
 extern loff_t SysGetFileSize(void *fh);
+// Arm the first hard disk for the classic File Manager's boot-volume check.
+extern void Sys_prepare_hfs_boot(void *fh, loff_t start, uint32_t sectors);
+extern bool HfsCanDeferBootCheck(void *fh, loff_t start, uint32_t sectors);
 extern void SysEject(void *fh);
 extern bool SysFormat(void *fh);
 extern bool SysIsReadOnly(void *fh);

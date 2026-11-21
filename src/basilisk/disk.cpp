@@ -307,6 +307,8 @@ int16 DiskOpen(uint32 pb, uint32 dce)
 				find_hfs_partition(*info);
 				if (info->start_byte == 0)
 					info->num_blocks = uint32(SysGetFileSize(info->fh) / 512);
+				if (info == drives.begin() && !PrefsFindInt32("bootdriver"))
+					Sys_prepare_hfs_boot(info->fh, info->start_byte, info->num_blocks);
 				info->to_be_mounted = true;
 			}
 			D(bug(" %d blocks\n", info->num_blocks));

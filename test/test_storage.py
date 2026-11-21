@@ -20,6 +20,7 @@ class StorageTests(unittest.TestCase):
                  "-Itest/storage_stubs", "-Itest/aot_host/stubs", "-Isrc/basilisk/include",
                  "-Isrc/basilisk"]
         subprocess.run([*flags, "-DDISK_IMAGE_HOST_TEST", "src/basilisk/sys_esp32.cpp",
+                        "src/basilisk/hfs_boot.cpp",
                         "test/test_disk_image.cpp", "-o", str(cls.work / "image")],
                        cwd=ROOT, check=True)
         subprocess.run([*flags, "test/test_usb_disk.cpp", "-o", str(cls.work / "usb")],

@@ -30,6 +30,8 @@ struct file_handle {
     bool pos_valid;     // Track cached file position to avoid redundant seek()
     loff_t pos;         // Current file position when pos_valid is true
     loff_t size;
+    bool boot_checked;
+    loff_t boot_flags_pos;  // Nonzero only until the guest writes its HFS flags.
     char path[256];
 };
 
@@ -284,6 +286,20 @@ void Sys_close(void *arg)
     delete fh;
 }
 
+// Do not persist a "clean" flag at open. Give a supported File Manager its
+// native needs-check bit at boot. Its mount/check/clean-unmount writes own
+// the real header, including when the guest itself still detects damage.
+void Sys_prepare_hfs_boot(void *arg, loff_t start, uint32_t sectors)
+{
+    file_handle *fh = (file_handle *)arg;
+    if (!fh || fh->boot_checked) return;
+    fh->boot_checked = true;
+    if (HfsCanDeferBootCheck(fh, start, sectors)) {
+        fh->boot_flags_pos = start + 1024 + 10;
+        Serial.printf("[HFS BOOT] Deferring startup check to the guest File Manager: %s\n", fh->path);
+    }
+}
+
 /*
  *  Read from a file/device - direct read, no caching
  */
@@ -306,6 +322,12 @@ size_t Sys_read(void *arg, void *buffer, loff_t offset, size_t length)
     size_t read_len = fh->file.read((uint8_t *)buffer, length);
     if (read_len > 0) {
         fh->pos += (loff_t)read_len;
+        if (fh->boot_flags_pos && offset >= 0 && offset <= fh->boot_flags_pos &&
+            (uint32_t)(fh->boot_flags_pos - offset) < read_len) {
+            // Big-endian drAtrb: bit 8 passes the ROM check, bit 11 requests
+            // a consistency check by the System File Manager (Apple TN1150).
+            ((uint8_t *)buffer)[fh->boot_flags_pos - offset] |= 0x09;
+        }
     }
     return read_len;
 }
@@ -332,6 +354,9 @@ size_t Sys_write(void *arg, void *buffer, loff_t offset, size_t length)
 
     size_t written = fh->file.write((uint8_t *)buffer, length);
     if (written > 0) {
+        if (fh->boot_flags_pos && offset >= 0 && offset <= fh->boot_flags_pos &&
+            (uint32_t)(fh->boot_flags_pos - offset) < written)
+            fh->boot_flags_pos = 0;
         fh->is_dirty = true;
         fh->pos += (loff_t)written;
         s_last_write_ms = millis();
