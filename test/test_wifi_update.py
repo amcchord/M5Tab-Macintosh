@@ -1,6 +1,9 @@
 import hashlib
 import http.client
 import struct
+import subprocess
+from types import SimpleNamespace
+from unittest.mock import Mock
 import sys
 import tempfile
 import unittest
@@ -67,6 +70,42 @@ class WifiUpdateTests(unittest.TestCase):
         self.assertEqual(wifi_update.install(board, self.path, "127.0.0.1", True), "ota_1")
         self.assertEqual(board.received, self.image)
         self.assertTrue(board.reboot)
+
+    def test_slow_client_gets_a_new_write_deadline_per_chunk(self):
+        image = bytes(range(251)) * 16551
+        sent = bytearray()
+        timeout = 15
+        # A 100 KiB/s link cannot transmit this image in the socket's 15 s
+        # sendall deadline, but can complete each 32 KiB write in time.
+        def send(part):
+            if len(part) / 102400 > timeout:
+                raise TimeoutError
+            self.assertLessEqual(len(part), 65536)
+            sent.extend(part)
+        handler = SimpleNamespace(path="/firmware.bin", image=image, connection=Mock(),
+                                  wfile=SimpleNamespace(write=send), send_response=Mock(),
+                                  send_header=Mock(), end_headers=Mock())
+        wifi_update.ImageHandler.do_GET(handler)
+        handler.connection.settimeout.assert_called_once_with(timeout)
+        self.assertEqual(image, sent)
+
+    def test_firmware_streams_partial_reads_and_preserves_active_slot_on_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            includes = Path(temp) / "includes"
+            for name in ("Arduino.h", "board_config.h", "WiFi.h", "sdkconfig.h",
+                         "esp_app_desc.h", "esp_app_format.h", "esp_chip_info.h", "esp_http_client.h",
+                         "esp_ota_ops.h", "mbedtls/sha256.h", "lwip/inet.h", "lwip/sockets.h"):
+                header = includes / name
+                header.parent.mkdir(parents=True, exist_ok=True)
+                header.touch()
+            binary = Path(temp) / "ota"
+            command = ["c++", "-std=c++17", "-g", "-fsanitize=address,undefined",
+                       "-Wno-deprecated-declarations", "-DBOARD_M5STACK_TAB5=1", "-I" + str(includes),
+                       "-Isrc/basilisk/include", "test/test_wifi_update_receiver.cpp", "-o", str(binary)]
+            if sys.platform != "darwin":
+                command.append("-lcrypto")
+            subprocess.run(command, cwd=ROOT, check=True)
+            subprocess.run([binary], check=True, timeout=10)
 
     def test_bad_result_never_reboots(self):
         board = Board("failed")

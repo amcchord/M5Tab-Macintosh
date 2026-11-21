@@ -15,6 +15,7 @@ from pathlib import Path
 from mac_control import ControlError, MacControl
 
 APP_TAG_OFFSET = 288
+HTTP_WRITE_CHUNK = 32 * 1024
 BOARD_TAGS = {
     "M5Stack Tab5": b"M5Tab-Macintosh/Tab5/1\0",
     "Waveshare P4 10.1": b"M5Tab-Macintosh/Waveshare-P4-10.1/1\0",
@@ -36,7 +37,11 @@ class ImageHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.connection.settimeout(15)
         try:
-            self.wfile.write(self.image)
+            # Each piece gets its own socket send deadline, even when the
+            # board needs several minutes to accept the whole application.
+            image = memoryview(self.image)
+            for start in range(0, len(image), HTTP_WRITE_CHUNK):
+                self.wfile.write(image[start:start + HTTP_WRITE_CHUNK])
         except (TimeoutError, ConnectionError):
             pass
 

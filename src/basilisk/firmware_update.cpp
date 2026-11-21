@@ -11,6 +11,7 @@
 #include <esp_ota_ops.h>
 #include <mbedtls/sha256.h>
 #include <lwip/inet.h>
+#include <lwip/sockets.h>
 #include <errno.h>
 
 namespace {
@@ -32,19 +33,23 @@ const TargetDescriptor board_tag __attribute__((section(".rodata_custom_desc"), 
     {M5TAB_OTA_BOARD, CONFIG_ESP32P4_REV_MIN_FULL, 1};
 
 struct Transfer {
-    enum Phase { Idle, Connect, Download, Verify, Ready, Failed } phase = Idle;
+    enum Phase { Idle, Connect, Headers, Download, Verify, Ready, Failed } phase = Idle;
     const char *reason = "none";
     const esp_partition_t *target = nullptr;
     esp_http_client_handle_t http = nullptr;
     esp_ota_handle_t writer = 0;
     mbedtls_sha256_context hash = {};
-    uint32_t size = 0, received = 0, verified = 0, started = 0;
+    uint32_t size = 0, received = 0, verified = 0, started = 0, last_data = 0;
+    size_t buffered = 0;
     uint8_t expected[32] = {};
     char url[128] = {};
     // Allocated only during updates. Standard single-slot installations never use it.
     uint8_t *buffer = nullptr;
 } t;
 constexpr size_t Chunk = 4096;
+constexpr uint32_t IdleTimeout = 30000;
+constexpr int ReadTimeout = 200;
+
 
 const esp_partition_t *other_slot() {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -117,11 +122,14 @@ int nibble(char c) {
 } // namespace
 
 bool FirmwareUpdateHasDualSlots() { return other_slot() != nullptr; }
-bool FirmwareUpdateBusy() { return t.phase == Transfer::Connect || t.phase == Transfer::Download || t.phase == Transfer::Verify; }
+bool FirmwareUpdateBusy() {
+    return t.phase == Transfer::Connect || t.phase == Transfer::Headers ||
+           t.phase == Transfer::Download || t.phase == Transfer::Verify;
+}
 bool FirmwareUpdateReady() { return t.phase == Transfer::Ready; }
 
 String FirmwareUpdateStatus() {
-    static const char *states[] = {"idle", "connecting", "downloading", "verifying", "ready", "failed"};
+    static const char *states[] = {"idle", "connecting", "connecting", "downloading", "verifying", "ready", "failed"};
     auto running = esp_ota_get_running_partition();
     auto boot = esp_ota_get_boot_partition();
     char result[192];
@@ -169,7 +177,8 @@ String FirmwareUpdateStart(char *args) {
     t.target = target;
     t.size = size;
     t.received = t.verified = 0;
-    t.started = millis();
+    t.buffered = 0;
+    t.started = t.last_data = millis();
     memcpy(t.expected, expected, sizeof(expected));
     strlcpy(t.url, url + 1, sizeof(t.url));
     mbedtls_sha256_init(&t.hash);
@@ -188,21 +197,51 @@ void FirmwareUpdatePoll() {
         config.disable_auto_redirect = true;
         t.http = esp_http_client_init(&config);
         if (!t.http || esp_http_client_open(t.http, 0) != ESP_OK) return finish(Transfer::Failed, "connect");
-        if (esp_http_client_fetch_headers(t.http) != t.size || esp_http_client_get_status_code(t.http) != 200 ||
+        if (esp_http_client_set_timeout_ms(t.http, ReadTimeout) != ESP_OK)
+            return finish(Transfer::Failed, "read_timeout_setup");
+        t.last_data = millis();
+        t.phase = Transfer::Headers;
+        return;
+    }
+    if (t.phase == Transfer::Headers) {
+        if (millis() - t.last_data >= IdleTimeout) return finish(Transfer::Failed, "header_timeout");
+        const int64_t length = esp_http_client_fetch_headers(t.http);
+        if (length == -ESP_ERR_HTTP_EAGAIN) return;
+        if (length != t.size || esp_http_client_get_status_code(t.http) != 200 ||
             esp_http_client_is_chunked_response(t.http)) return finish(Transfer::Failed, "http_headers");
+        t.last_data = millis();
         t.phase = Transfer::Download;
+        return;
     }
     if (t.phase == Transfer::Download) {
-        size_t need = std::min<size_t>(Chunk, t.size - t.received);
-        int n = esp_http_client_read_response(t.http, (char *)t.buffer, need);
-        if (n != (int)need) return finish(Transfer::Failed, "short_read");
-        if (!t.received) {
+        if (millis() - t.last_data >= IdleTimeout) return finish(Transfer::Failed, "download_idle");
+        // esp_http_client_read tries to fill its request, even if that takes
+        // many socket reads. Only ask for bytes already queued on this plain
+        // HTTP socket, or one byte with a short wait, then return to the GUI.
+        int queued = 0;
+        const int socket = esp_http_client_get_socket(t.http);
+        if (socket < 0 || lwip_ioctl(socket, FIONREAD, &queued) < 0)
+            return finish(Transfer::Failed, "read_socket");
+        size_t need = std::min<size_t>(Chunk - t.buffered, t.size - t.received);
+        need = std::min(need, static_cast<size_t>(std::max(1, queued)));
+        errno = 0;
+        int n = esp_http_client_read(t.http, (char *)t.buffer + t.buffered, need);
+        if (n == -ESP_ERR_HTTP_EAGAIN || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)))
+            return;
+        if (n <= 0 || static_cast<size_t>(n) > need)
+            return finish(Transfer::Failed, n == 0 ? "short_read" : "read_error");
+        t.last_data = millis();
+        t.buffered += n;
+        t.received += n;
+        if (t.buffered < Chunk && t.received < t.size) return;
+        if (!t.writer) {
             if (!compatible(t.buffer)) return finish(Transfer::Failed, "wrong_image");
             if (esp_ota_begin(t.target, OTA_WITH_SEQUENTIAL_WRITES, &t.writer) != ESP_OK)
                 return finish(Transfer::Failed, "ota_begin");
         }
-        if (esp_ota_write(t.writer, t.buffer, need) != ESP_OK) return finish(Transfer::Failed, "ota_write");
-        t.received += need;
+        if (esp_ota_write(t.writer, t.buffer, t.buffered) != ESP_OK)
+            return finish(Transfer::Failed, "ota_write");
+        t.buffered = 0;
         if (t.received < t.size) return;
         close_http();
         esp_err_t result = esp_ota_end(t.writer);
