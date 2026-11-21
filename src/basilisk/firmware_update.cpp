@@ -8,6 +8,7 @@
 #include <esp_app_format.h>
 #include <esp_chip_info.h>
 #include <esp_http_client.h>
+#include <esp_idf_version.h>
 #include <esp_ota_ops.h>
 #include <mbedtls/sha256.h>
 #include <lwip/inet.h>
@@ -215,17 +216,34 @@ void FirmwareUpdatePoll() {
     }
     if (t.phase == Transfer::Download) {
         if (millis() - t.last_data >= IdleTimeout) return finish(Transfer::Failed, "download_idle");
-        // esp_http_client_read tries to fill its request, even if that takes
-        // many socket reads. Only ask for bytes already queued on this plain
-        // HTTP socket, or one byte with a short wait, then return to the GUI.
+        size_t need = std::min<size_t>(Chunk - t.buffered, t.size - t.received);
+        char *out = (char *)t.buffer + t.buffered;
+        errno = 0;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 5, 4)
+        // esp_http_client_read tries to fill its request. Read queued bytes
+        // or wait for one byte so a slow sender cannot monopolize the GUI.
         int queued = 0;
         const int socket = esp_http_client_get_socket(t.http);
         if (socket < 0 || lwip_ioctl(socket, FIONREAD, &queued) < 0)
             return finish(Transfer::Failed, "read_socket");
-        size_t need = std::min<size_t>(Chunk - t.buffered, t.size - t.received);
         need = std::min(need, static_cast<size_t>(std::max(1, queued)));
-        errno = 0;
-        int n = esp_http_client_read(t.http, (char *)t.buffer + t.buffered, need);
+        int n = esp_http_client_read(t.http, out, need);
+#else
+        // The legacy SDK has no public socket accessor. A single-byte request
+        // cannot block across several transport reads. Drain a bounded batch
+        // while bytes are arriving, then yield for status and cancellation.
+        const uint32_t start = millis();
+        int n = 0;
+        while (size_t(n) < need) {
+            int got = esp_http_client_read(t.http, out + n, 1);
+            if (got != 1) {
+                if (!n) n = got;
+                break;
+            }
+            ++n;
+            if (millis() - start >= 8) break;
+        }
+#endif
         if (n == -ESP_ERR_HTTP_EAGAIN || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)))
             return;
         if (n <= 0 || static_cast<size_t>(n) > need)

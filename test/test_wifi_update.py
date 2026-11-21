@@ -98,14 +98,19 @@ class WifiUpdateTests(unittest.TestCase):
                 header = includes / name
                 header.parent.mkdir(parents=True, exist_ok=True)
                 header.touch()
+            (includes / "esp_idf_version.h").write_text(
+                "#define ESP_IDF_VERSION_VAL(a,b,c) (((a)<<16)|((b)<<8)|(c))\n"
+                "#define ESP_IDF_VERSION ESP_IDF_VERSION_VAL(5,5,TEST_IDF_PATCH)\n")
             binary = Path(temp) / "ota"
             command = ["c++", "-std=c++17", "-g", "-fsanitize=address,undefined",
                        "-Wno-deprecated-declarations", "-DBOARD_M5STACK_TAB5=1", "-I" + str(includes),
                        "-Isrc/basilisk/include", "test/test_wifi_update_receiver.cpp", "-o", str(binary)]
             if sys.platform != "darwin":
                 command.append("-lcrypto")
-            subprocess.run(command, cwd=ROOT, check=True)
-            subprocess.run([binary], check=True, timeout=10)
+            for patch in (1, 4):
+                with self.subTest(idf_patch=patch):
+                    subprocess.run([*command, f"-DTEST_IDF_PATCH={patch}"], cwd=ROOT, check=True)
+                    subprocess.run([binary], check=True, timeout=10)
 
     def test_bad_result_never_reboots(self):
         board = Board("failed")

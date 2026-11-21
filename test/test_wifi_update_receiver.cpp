@@ -69,10 +69,16 @@ static int64_t esp_http_client_fetch_headers(esp_http_client_handle_t) {
 static int esp_http_client_get_status_code(esp_http_client_handle_t) { return 200; }
 static bool esp_http_client_is_chunked_response(esp_http_client_handle_t) { return false; }
 static int esp_http_client_set_timeout_ms(esp_http_client_handle_t,int ms) { assert(ms>0 && ms<=250); return 0; }
+#if TEST_IDF_PATCH >= 4
 static int esp_http_client_get_socket(esp_http_client_handle_t) { return 3; }
 static int lwip_ioctl(int fd,int,int *avail) { assert(fd==3); *avail=(calls%7 == 1) ? 0 : 4096; return 0; }
+#endif
 static int esp_http_client_read(esp_http_client_handle_t,char *out,size_t wanted) {
     ++calls;
+#if TEST_IDF_PATCH == 1
+    assert(wanted == 1);
+    tick += !strcmp(mode, "trickle") ? 150 : 1;
+#endif
     if (!strcmp(mode,"idle") || calls%7 == 3) return -ESP_ERR_HTTP_EAGAIN;
     if (calls%7 == 4) { errno = EAGAIN; return -1; }
     if (!strcmp(mode,"eof") && cursor >= 4800) return 0;
@@ -115,7 +121,9 @@ static void run(unsigned step_ms=10) {
     while (FirmwareUpdateBusy()) {
         const unsigned before=calls;
         FirmwareUpdatePoll();
-        assert(calls-before <= 1); // return for USB status and cancellation after each read
+        // The fallback spends at most 8 ms draining available bytes. The
+        // newer socket API returns after one bounded read.
+        assert(calls-before <= (TEST_IDF_PATCH == 1 ? 8 : 1));
         tick+=step_ms;
     }
 }
