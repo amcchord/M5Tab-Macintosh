@@ -24,7 +24,10 @@ static bool mountArduinoSpi()
     Serial.printf("[SD] Pins: SCK=%d MOSI=%d MISO=%d CS=%d\n",
                   BOARD_SD_SPI_SCK, BOARD_SD_SPI_MOSI, BOARD_SD_SPI_MISO, BOARD_SD_SPI_CS);
 
-    SPI.begin(BOARD_SD_SPI_SCK, BOARD_SD_SPI_MISO, BOARD_SD_SPI_MOSI, BOARD_SD_SPI_CS);
+    if (!SPI.begin(BOARD_SD_SPI_SCK, BOARD_SD_SPI_MISO, BOARD_SD_SPI_MOSI, BOARD_SD_SPI_CS)) {
+        Serial.println("[SD] SPI bus initialization failed");
+        return false;
+    }
 
     constexpr uint32_t kSdSpiHz = 10000000;
     /* Pass BOARD_SD_MOUNT_POINT explicitly so the VFS prefix the rest
@@ -52,6 +55,9 @@ static bool mountArduinoSpi()
             Serial.println("[SD]   If the card was formatted as exFAT (default for");
             Serial.println("[SD]   modern cards >32 GB), reformat as FAT32.");
         }
+        // SD.begin and the probe release their drives. Also release Arduino's
+        // bus and pins before a later retry starts a different controller.
+        SPI.end();
         return false;
     }
 
@@ -123,16 +129,20 @@ extern "C" bool BoardSD_Init(void)
     if (s_mounted) return true;
 #if TAB5_SD_IDF
     if (Tab5SD_Card()) return true;
+    if (!Tab5SD_CanRetryMount()) return false;
 #endif
-#if defined(TAB5_SD_NATIVE)
+#if TAB5_SD_NATIVE
     if (Tab5SD_MountNative()) return true;
-#elif defined(TAB5_SD_DMA)
+#elif TAB5_SD_DMA
     if (Tab5SD_MountDma()) return true;
+#endif
+#if TAB5_SD_IDF
+    if (!Tab5SD_CanRetryMount()) return false;
 #endif
     return mountArduinoSpi();
 }
 
-#if defined(TAB5_SD_BENCHMARK)
+#if TAB5_SD_BENCHMARK
 bool Tab5SD_MountArduino()
 {
     return mountArduinoSpi();

@@ -26,7 +26,10 @@ uint64_t BoardSD_CardSizeMB(void);
 #include "board_config.h"
 #if defined(BOARD_M5STACK_TAB5)
   #include <SD.h>
-  #if defined(TAB5_SD_DMA) || defined(TAB5_SD_NATIVE) || defined(TAB5_SD_BENCHMARK)
+  #if TAB5_SD_DMA && TAB5_SD_NATIVE
+    #error "Select one preferred Tab5 SD driver"
+  #endif
+  #if TAB5_SD_DMA || TAB5_SD_NATIVE || TAB5_SD_BENCHMARK
     #define TAB5_SD_IDF 1
     fs::FS &BoardSD_Filesystem();
     #define SD_FS BoardSD_Filesystem()

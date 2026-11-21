@@ -10,6 +10,7 @@
 #include <vfs_api.h>
 
 static sdmmc_card_t *mounted_card;
+static bool can_retry_mount = true;
 static constexpr esp_vfs_fat_mount_config_t mount_options = {
     .format_if_mount_failed = false,
     .max_files = 5,
@@ -18,6 +19,11 @@ static constexpr esp_vfs_fat_mount_config_t mount_options = {
 const sdmmc_card_t *Tab5SD_Card()
 {
     return mounted_card;
+}
+
+bool Tab5SD_CanRetryMount()
+{
+    return can_retry_mount;
 }
 
 fs::FS &BoardSD_Filesystem()
@@ -34,7 +40,12 @@ fs::FS &BoardSD_Filesystem()
 static bool finishMount(esp_err_t err, const char *name, sdmmc_card_t *card)
 {
     if (err != ESP_OK) {
+        // IDF 5.5 can publish out_card before allocating the final mount
+        // context. On that failure /sd is already registered and the card
+        // pointer is stale. Never reuse either the pointer or mount point.
+        if (card) can_retry_mount = false;
         Serial.printf("[SD] %s mount failed: %s\n", name, esp_err_to_name(err));
+        if (!can_retry_mount) Serial.println("[SD] Bus or mount point still owned; restart required");
         return false;
     }
     mounted_card = card;
@@ -45,7 +56,7 @@ static bool finishMount(esp_err_t err, const char *name, sdmmc_card_t *card)
     return true;
 }
 
-#if defined(TAB5_SD_DMA) || defined(TAB5_SD_BENCHMARK)
+#if TAB5_SD_DMA || TAB5_SD_BENCHMARK
 bool Tab5SD_MountDma()
 {
     spi_bus_config_t bus = {};
@@ -64,13 +75,18 @@ bool Tab5SD_MountDma()
     sdmmc_card_t *card = nullptr;
     if (err == ESP_OK) {
         err = esp_vfs_fat_sdspi_mount(BOARD_SD_MOUNT_POINT, &host, &device, &mount_options, &card);
-        if (err != ESP_OK) spi_bus_free(device.host_id);
+        if (err != ESP_OK && spi_bus_free(device.host_id) != ESP_OK) {
+            can_retry_mount = false;
+        }
+    } else if (err == ESP_ERR_INVALID_STATE) {
+        // Arduino SPI also uses SPI2. Do not attach it to an occupied bus.
+        can_retry_mount = false;
     }
     return finishMount(err, "SPI DMA", card);
 }
 #endif
 
-#if defined(TAB5_SD_NATIVE) || defined(TAB5_SD_BENCHMARK)
+#if TAB5_SD_NATIVE || TAB5_SD_BENCHMARK
 bool Tab5SD_MountNative()
 {
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
