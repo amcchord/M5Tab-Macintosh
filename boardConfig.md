@@ -127,12 +127,14 @@ ADB keyboard; no compile-time option or boot setting is required.
 ### microSD Card
 | Signal | GPIO |
 |--------|------|
-| CLK | GPIO39 |
-| CMD | GPIO44 |
-| DATA0 | GPIO40 |
-| DATA1 | GPIO41 |
-| DATA2 | GPIO42 |
-| DATA3 | GPIO43 |
+| CLK | GPIO43 |
+| CMD / SPI MOSI | GPIO44 |
+| DATA0 / SPI MISO | GPIO39 |
+| DATA1 | GPIO40 |
+| DATA2 | GPIO41 |
+| DATA3 / SPI CS | GPIO42 |
+
+The standard app uses 10 MHz SPI. A previous 25 MHz build produced intermittent card errors. The P4's four-bit slot 0 and its C6 radio's slot 1 share one controller. Keep the radio running during native SD operation. See the [Tab5 card benchmark](SD_STABILITY.md#benchmarking-the-card) and [M5Stack pin map](https://docs.m5stack.com/en/core/Tab5).
 
 ### Camera (SC2356 2MP)
 | Signal | GPIO |

@@ -1,15 +1,8 @@
-/*
- * board_sd_tab5.cpp - microSD mount for M5Stack Tab5 (SPI mode).
- *
- * Mirrors the initSDCard() behaviour that lived in src/main.cpp before the
- * board HAL landed. Keeping SPI mode on Tab5 preserves the existing, tested
- * throughput characteristics. The mount point is the Arduino SD library
- * default ("/" - all paths are relative to the SD root).
- */
-
 #include "board_sd.h"
 #include "board_sd_probe.h"
 #include "board_config.h"
+
+#include "tab5_sd_idf.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -23,7 +16,7 @@
 static bool     s_mounted = false;
 static uint64_t s_size_mb = 0;
 
-extern "C" bool BoardSD_Init(void)
+static bool mountArduinoSpi()
 {
     if (s_mounted) return true;
 
@@ -64,7 +57,7 @@ extern "C" bool BoardSD_Init(void)
 
     s_size_mb = SD.cardSize() / (1024 * 1024);
     s_mounted = true;
-    Serial.printf("[SD] Mounted, %llu MB\n", (unsigned long long)s_size_mb);
+    Serial.printf("[SD] Arduino SPI 10000 kHz, %llu MB\n", (unsigned long long)s_size_mb);
     return true;
 }
 
@@ -116,5 +109,32 @@ extern "C" BoardSdFsType BoardSD_ProbeFilesystem(void)
 
 extern "C" uint64_t BoardSD_CardSizeMB(void)
 {
+#if TAB5_SD_IDF
+    if (Tab5SD_Card()) {
+        const auto &csd = Tab5SD_Card()->csd;
+        return (uint64_t)csd.capacity * csd.sector_size / (1024 * 1024);
+    }
+#endif
     return s_size_mb;
 }
+
+extern "C" bool BoardSD_Init(void)
+{
+    if (s_mounted) return true;
+#if TAB5_SD_IDF
+    if (Tab5SD_Card()) return true;
+#endif
+#if defined(TAB5_SD_NATIVE)
+    if (Tab5SD_MountNative()) return true;
+#elif defined(TAB5_SD_DMA)
+    if (Tab5SD_MountDma()) return true;
+#endif
+    return mountArduinoSpi();
+}
+
+#if defined(TAB5_SD_BENCHMARK)
+bool Tab5SD_MountArduino()
+{
+    return mountArduinoSpi();
+}
+#endif

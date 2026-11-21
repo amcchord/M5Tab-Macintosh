@@ -69,13 +69,6 @@ static bool              s_usb_started    = false;
 /* MSC <-> SD read/write callbacks                                           */
 /* ------------------------------------------------------------------------- */
 
-// Both pinned Arduino SD classes store the mounted drive in a protected base
-// member. Form a pointer to that base member, then read it on the real object.
-// No derived instance, downcast, assumed drive number or SDK patch is needed.
-struct MountedSdDrive : decltype(SD_FS) {
-    static uint8_t number() { return SD_FS.*(&MountedSdDrive::_pdrv); }
-};
-
 static UsbDiskMedia s_media;
 
 static int32_t msc_on_read(uint32_t lba, uint32_t offset, void *buffer, uint32_t size)
@@ -134,9 +127,10 @@ extern "C" bool UsbMsc_Enter(const char **out_error_msg)
     s_exit_requested = false;
     s_host_mounted   = false;
 
-    uint32_t sec_size = SD_FS.sectorSize();
-    uint32_t n_sec    = SD_FS.numSectors();
-    const uint8_t drive = MountedSdDrive::number();
+    const BoardSdMedia card = BoardSD_Media();
+    const uint32_t sec_size = card.sector_size;
+    const uint32_t n_sec = card.sectors;
+    const uint8_t drive = card.drive;
     if (!sec_size || sec_size > FF_MAX_SS || !n_sec || drive == 0xff) {
         if (out_error_msg) *out_error_msg = "SD card not available";
         return false;
