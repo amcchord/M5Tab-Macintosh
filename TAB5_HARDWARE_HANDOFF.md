@@ -1,5 +1,15 @@
 # Tab5 hardware handoff
 
+## Beta 3 on a pre-v3 Tab5
+
+The test board has an ESP32-P4 v1.3 and the stock ESP32-C6 radio firmware. The original card was put aside after its settings and PRAM were restored. Installation and formatting used a separate 29,664 MiB card.
+
+- **Formatting and storage.** The Tab5 erased the spare, created a full-size FAT32 volume with 32 KiB clusters, and opened **Set Up SD Card**. With the radio enabled, the same 4 MiB file test measured 10,198 KiB/s verified reads and 1,369 KiB/s synchronized writes on four-bit SDMMC. Legacy SPI measured 1,759 and 920 KiB/s respectively. [Card measurements](SD_STABILITY.md)
+- **System 7 first boot.** The installer downloaded the ROM and the 115,542,761-byte compressed System 7.5.3 disk, expanded it to 1,048,576,000 bytes, reread it, and booted Finder. Installing the system disk took 14 min 43 s from the first status sample to completion. Within each phase the sampled rates were 231 KiB/s downloading, 3.73 MiB/s expanding, and 9.48 MiB/s verifying. All 921,600 panel pixels matched the expected display.
+- **Speed display.** During the Mac OS 8.1 download, the setup screen showed 273.2 KiB/s at 1%. Cancelling preserved the first 3,473,408 compressed bytes on the card. [Device screenshot](screenshots/Tab5-Starter-Download.png)
+- **Mac OS 8.1 recovery.** Both the published disk and a copy of a previously failing user disk reached Finder through the guest's volume check. The HFS header on each disk recorded a clean unmount after Finder shut down.
+
+
 Start with a spare SD card and a copy of a known-good Macintosh disk. The first device checks are whether Finder opens the same folders after a clean restart and whether After Dark renders space black. Both can look fine in a host test while failing on a real installation. Then measure how much work the display and USB changes save on this particular Tab5.
 
 This branch starts at `3641580d72982cec464d4800f2ead507ba7c687d` (`v5.4-beta.1`). The evidence collected during development is from host tests and firmware builds. The table lists the original test plan. The beta 2 results below cover the tests completed on the attached Tab5.
