@@ -18,10 +18,11 @@ class StorageTests(unittest.TestCase):
         cls.work = Path(cls.temp.name)
         flags = ["c++", "-std=c++17", "-g", "-fsanitize=address,undefined",
                  "-Itest/storage_stubs", "-Itest/aot_host/stubs", "-Isrc/basilisk/include",
-                 "-Isrc/basilisk"]
+                 "-Isrc/basilisk", "-Itest/common", "-Wno-deprecated-declarations"]
+        crypto = [] if sys.platform == "darwin" else ["-lcrypto"]
         subprocess.run([*flags, "-DDISK_IMAGE_HOST_TEST", "src/basilisk/sys_esp32.cpp",
-                        "src/basilisk/hfs_boot.cpp",
-                        "test/test_disk_image.cpp", "-o", str(cls.work / "image")],
+                        "src/basilisk/hfs_boot.cpp", "src/basilisk/hfs_starter7.cpp",
+                        "test/test_disk_image.cpp", *crypto, "-o", str(cls.work / "image")],
                        cwd=ROOT, check=True)
         subprocess.run([*flags, "test/test_usb_disk.cpp", "-o", str(cls.work / "usb")],
                        cwd=ROOT, check=True)

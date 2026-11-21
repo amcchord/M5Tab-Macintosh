@@ -195,13 +195,13 @@ void SysAddSerialPrefs(void)
 /*
  *  Open a file/device
  */
-void *Sys_open(const char *name, bool read_only, bool is_cdrom)
+void *Sys_open(const char *name, bool read_only, bool is_cdrom, bool startup)
 {
     if (!name || strlen(name) == 0) {
         return NULL;
     }
     
-    // The guest owns the volume metadata. Opening an image only opens the file.
+    // DiskInit explicitly identifies its selected startup drive.
     file_handle *fh = new file_handle{};
     if (!fh) {
         return NULL;
@@ -227,6 +227,8 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom)
         fh->read_only = read_only;
     }
     
+    if (startup && !fh->read_only) Sys_repair_hfs7_starter(name);
+
     // Open file
     if (fh->read_only) {
         fh->file = SD_FS.open(name, FILE_READ);
