@@ -43,6 +43,7 @@
 #include "preboot_screens.h"  /* Mac OS 8 Platinum screens on a 2x canvas */
 #include "usb_msc.h"
 #include "starter_download.h"
+#include "starter_speed.h"
 
 // Balanced defaults: auto-connect and keep WiFi for emulator networking.
 #ifndef BOOTGUI_ENABLE_WIFI_AUTOCONNECT
@@ -1073,7 +1074,13 @@ static void runStarterScreen()
             int percent = -1;
             if (working && info.total) {
                 percent = (int)((uint64_t)info.completed * 100 / info.total);
-                snprintf(status, sizeof(status), "%s  %u%%", message, (unsigned)percent);
+                if (info.network_bytes_per_second >= 0 && !starter_cancel_pending) {
+                    char speed[24];
+                    StarterFormatSpeed(speed, sizeof(speed), info.network_bytes_per_second);
+                    snprintf(status, sizeof(status), "%s  %u%%  %s", message, (unsigned)percent, speed);
+                } else {
+                    snprintf(status, sizeof(status), "%s  %u%%", message, (unsigned)percent);
+                }
             } else snprintf(status, sizeof(status), "%s", message);
             const char *action = working ? "Cancel" : done ? "Start Up" : failed ? "Retry" : "Download";
             Screens::StarterView view = {clock, status, connected ? "Wi-Fi connected" : "Wi-Fi disconnected",
@@ -1904,8 +1911,16 @@ static String controlExecute(char *command)
         const auto info = StarterDownloadStatus();
         if (!strcmp(action, "STATUS")) {
             static const char *const states[] = {"idle", "working", "done", "failed", "cancelled"};
+            const char *message = info.state == StarterState::Idle ? "No installation started." : info.message;
+            char measured[160];
+            if (info.network_bytes_per_second >= 0) {
+                // Keep the fixed field count for earlier clients. The suffix
+                // carries the unrounded B/s value; the filename stays intact.
+                snprintf(measured, sizeof(measured), "%s [%ld B/s]", message, (long)info.network_bytes_per_second);
+                message = measured;
+            }
             return String("OK BOOT STARTER ") + states[(unsigned)info.state] + " " + info.completed + " " +
-                info.total + " " + controlHex(info.state == StarterState::Idle ? "No installation started." : info.message);
+                info.total + " " + controlHex(message);
         }
         if (!strcmp(action, "SHOW") && !strcmp(control_screen, "settings")) {
             starter_requested = true;

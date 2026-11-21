@@ -77,6 +77,19 @@ class StarterDownloadTests(unittest.TestCase):
                 self.assertEqual(self.target.read_bytes(), data)
                 self.target.unlink()
 
+    def test_resumed_download_speed_excludes_the_existing_prefix(self):
+        self.stage.mkdir()
+        (self.stage / 'installer-v1').touch()
+        prefix = 40000
+        self.packed.write_bytes(self.deflate[:prefix])
+        result = self.run_install('timed')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        rates = [int(line.split()[1]) for line in result.stdout.splitlines() if line.startswith('RATE ')]
+        self.assertEqual(rates[:8], [-1] * 8)
+        self.assertTrue(rates[8:])
+        self.assertEqual(set(rates[8:]), {40960})
+        self.assertEqual(self.target.read_bytes(), self.data)
+
     def test_interrupted_and_cancelled_transfers_resume_at_exact_byte(self):
         for mode, code in [('interrupt', 1), ('cancel', 2)]:
             with self.subTest(mode=mode):

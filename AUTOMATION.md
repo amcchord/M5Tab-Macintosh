@@ -269,7 +269,10 @@ On a fresh card, `boot-status` reports `preboot starter` and `boot-starter statu
 
 On the starter screen, `boot-starter 8` or `boot-starter 7` starts installation
 after Wi-Fi is connected. `boot-starter status` returns the stage message,
-completed bytes, and total bytes for that stage. `boot-starter cancel` requests
+completed bytes, and total bytes for that stage. During an HTTP transfer it
+also reports `network_bytes_per_second` after a short sampling interval.
+Resumed bytes already on the card are excluded. Three seconds without data
+reports zero. Verification and installation omit the network rate. `boot-starter cancel` requests
 cancellation. Wait for a terminal state before leaving the installer. A
 successful `boot-start` selects the verified image and starts the emulator.
 Use `boot-starter show` from Startup Settings to inspect the installer on a

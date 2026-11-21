@@ -47,6 +47,15 @@ class BootControlTests(unittest.TestCase):
         with self.assertRaises(mc.ControlError):
             self.client.boot_starter('status')
 
+    def test_starter_rate_keeps_the_filename_and_integer_bytes_per_second(self):
+        for bps in (0, 132157):
+            label = 'Downloading Macintosh8.dsk'
+            message = f'{label} [{bps} B/s]'.encode().hex()
+            self.client.request.return_value = f'@B2 OK BOOT STARTER working 512 2048 {message}'
+            self.assertEqual(self.client.boot_starter('status'), {
+                'state': 'working', 'completed': 512, 'total': 2048, 'message': label,
+                'network_bytes_per_second': bps})
+
     def test_strings_round_trip_spaces_equals_and_unicode(self):
         value = '/Mac OS 8 = café.hfv'
         self.client.boot_set('disk', value)

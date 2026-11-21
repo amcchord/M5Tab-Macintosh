@@ -7,6 +7,7 @@ struct StarterDownloadInfo {
     uint32_t completed;
     uint32_t total;
     char message[128];
+    int32_t network_bytes_per_second = -1;  // unavailable outside a sampled download
 };
 
 bool StarterDownloadStart(bool system7);

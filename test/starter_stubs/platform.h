@@ -16,6 +16,9 @@ using portMUX_TYPE = int;
 constexpr int portMUX_INITIALIZER_UNLOCKED = 0;
 inline void portENTER_CRITICAL(portMUX_TYPE *) {}
 inline void portEXIT_CRITICAL(portMUX_TYPE *) {}
+inline uint32_t host_ms;
+inline void (*host_read_hook)();
+inline uint32_t millis() { return host_ms; }
 inline void vTaskDelay(int) {}
 inline void vTaskDelete(void *) {}
 constexpr int MALLOC_CAP_8BIT = 1, MALLOC_CAP_SPIRAM = 2, pdPASS = 1;
@@ -103,6 +106,10 @@ inline int64_t esp_http_client_fetch_headers(HostClient *c) {
 inline int esp_http_client_get_status_code(HostClient *) { return host_mode == "http200" ? 200 : 206; }
 void StarterDownloadCancel();
 inline int esp_http_client_read(HostClient *c, char *buffer, size_t limit) {
+    if (host_read_hook) {
+        host_read_hook();
+        host_ms += 100;
+    }
     if (host_mode == "interrupt" && c->pos >= 4096) return -1;
     size_t n = std::min({limit, size_t(4096), payload.size() - c->pos});
     memcpy(buffer, payload.data() + c->pos, n);

@@ -561,8 +561,13 @@ class MacControl:
         if len(fields) != 8 or fields[4] not in {"idle", "working", "done", "failed", "cancelled"}:
             raise ControlError("invalid starter download status")
         try:
-            return {"state": fields[4], "completed": int(fields[5]), "total": int(fields[6]),
-                    "message": self._boot_decode(fields[7])}
+            message = self._boot_decode(fields[7])
+            result = {"state": fields[4], "completed": int(fields[5]), "total": int(fields[6]),
+                      "message": message}
+            label, separator, suffix = message.rpartition(" [")
+            if separator and suffix.endswith(" B/s]") and suffix[:-5].isdigit():
+                result.update(message=label, network_bytes_per_second=int(suffix[:-5]))
+            return result
         except ValueError as exc:
             raise ControlError("invalid starter download progress") from exc
 

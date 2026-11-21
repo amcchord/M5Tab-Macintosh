@@ -137,7 +137,8 @@ int main()
             assert(StarterControlAt(setup,r.x+r.w/2,r.y+r.h/2)==i);
             assert(r.right()<=W && r.bottom()<=H);
         }
-        starter.status="Downloading the startup disk.  37%";
+        starter.status="Downloading Macintosh8.dsk  37%  482.3 KiB/s";
+        assert(UI::TextWidth(starter.status) <= setup.status.w);
         starter.network="Wi-Fi connected";
         starter.action="Cancel"; starter.working=true; starter.action_enabled=true; starter.percent=37;
         PaintStarter(setup, starter);
