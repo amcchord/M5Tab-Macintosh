@@ -99,6 +99,10 @@ int main()
         const SettingsLayout sl = LayoutSettings(W, H, true);
         PaintSettings(sl, sv);
         shot("settings");
+        sv.usb_waits_for_update = true;
+        PaintSettings(sl, sv);
+        shot("settings-firmware-staged");
+        sv.usb_waits_for_update = false;
 
         // Every control must be reachable at its own center.
         for (int i = 0; i < kSettingsControlCount; ++i) {

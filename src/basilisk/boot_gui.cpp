@@ -19,6 +19,7 @@
 #include <vector>
 #include <string>
 #include <climits>
+#include <atomic>
 #include <time.h>
 #include "esp_system.h"
 #include "mac_clock.h"
@@ -30,6 +31,7 @@
 #include "boot_gui.h"
 #include "firmware_update.h"
 #include "boot_control_values.h"
+#include "boot_media.h"
 #include "board.h"
 #include "board_config.h"
 #include "board_display.h"
@@ -335,7 +337,7 @@ static std::vector<std::string> disk_files;
 static std::vector<std::string> cdrom_files;
 static std::vector<std::string> extfs_folders;
 
-static int disk_selection_index = 0;
+static int disk_selection_index = -1;
 static int cdrom_selection_index = 0;  // 0 = None
 static int extfs_selection_index = 0;  // 0 = None
 static int disk_scroll_offset = 0;
@@ -352,6 +354,7 @@ static const char *control_screen = "none";
 static bool control_boot_requested = false;
 static bool control_hold = false;
 static bool starter_requested = false;
+static bool control_leave_starter = false;
 static bool starter_system7 = false;
 static bool starter_job_system7 = false;
 static bool starter_cancel_pending = false;
@@ -575,14 +578,9 @@ static void scanDiskFiles(void)
     
     Serial.printf("[BOOT_GUI] Found %d disk images\n", disk_files.size());
     
-    // Find index of currently selected disk
-    disk_selection_index = 0;
-    for (size_t i = 0; i < disk_files.size(); i++) {
-        if (disk_files[i] == selected_disk_path) {
-            disk_selection_index = i;
-            break;
-        }
-    }
+    // Select a default only when there is no saved disk. A missing saved
+    // disk remains selected by path until the user chooses another image.
+    disk_selection_index = BootSelectDisk(disk_files, selected_disk_path, sizeof(selected_disk_path));
 }
 
 static void scanCDROMFiles(void)
@@ -958,9 +956,7 @@ static bool usableFile(const char *path, size_t minimum, size_t maximum = SIZE_M
 
 static bool bootMediaReady()
 {
-    return usableFile("/Q650.ROM", 64 * 1024, 1024 * 1024) &&
-           (boot_from_cd && selected_cdrom_path[0] ? usableFile(selected_cdrom_path, 512)
-                                                  : usableFile(selected_disk_path, 512));
+    return BootHasMedia(boot_from_cd, selected_disk_path, selected_cdrom_path, usableFile);
 }
 
 static bool startStarterDownload(bool system7)
@@ -1007,6 +1003,7 @@ static void runStarterScreen()
 {
     const auto L = Screens::LayoutStarter(UI::Width(), UI::Height());
     control_screen = "starter";
+    control_leave_starter = false;
     int pressed = Screens::kNoControl;
     bool inside = false, dirty = true, connected = false;
     uint32_t wifi_at = 0, paint_at = 0;
@@ -1014,7 +1011,7 @@ static void runStarterScreen()
     bool shown_connected = false, shown_working = false, shown_done = false, shown_failed = false;
     while (!control_boot_requested) {
         BootGUI_ControlPoll();
-        if (control_boot_requested) return;
+        if (control_boot_requested || control_leave_starter) return;
         const StarterDownloadInfo info = StarterDownloadStatus();
         const bool working = info.state == StarterState::Working;
         const bool done = info.state == StarterState::Done && starter_job_system7 == starter_system7;
@@ -1092,13 +1089,13 @@ static void runStarterScreen()
 struct SettingsKey {
     int selection[3], first[3], count[3], scroll[3];
     int ram, pressed, bars;
-    bool sound, boot_cd, rotate, needs_setup;
+    bool sound, boot_cd, rotate, needs_setup, usb_waits_for_update;
     char clock[16], status[72], detail[72];
 };
 
 static void runSettingsScreen(void)
 {
-    starter_requested |= !bootMediaReady();
+    starter_requested |= !control_hold && !bootMediaReady();
     for (;;) {
         if (starter_requested) {
             starter_requested = false;
@@ -1124,7 +1121,7 @@ static void runSettingsScreen(void)
         WifiSummary wifi = {};
         char clock[16] = "";
         SettingsKey shown;
-        bool painted = false, ready = bootMediaReady();
+        bool painted = false, update_notice = false, ready = bootMediaReady();
         enum { kStay, kStart, kOpenWiFi, kOpenUsb } next = kStay;
 
         while (next == kStay) {
@@ -1135,6 +1132,18 @@ static void runSettingsScreen(void)
                 continue;
             }
             if (FirmwareUpdateBusy()) {
+                if (!update_notice) {
+                    Screens::AlertView update = {};
+                    update.clock = clock;
+                    update.icon = UI::kIconMac;
+                    update.heading = "Updating firmware";
+                    update.body = "Keep the device powered on. Check progress or cancel from the computer connected over USB.";
+                    const auto layout = Screens::LayoutAlert(UI::Width(), UI::Height(), update);
+                    Screens::PaintAlert(layout, update);
+                    UI::Present();
+                    update_notice = true;
+                    painted = false;
+                }
                 UiTouch ignored;
                 pollUiTouch(&ignored);
                 pressed = Screens::kNoControl;
@@ -1144,7 +1153,13 @@ static void runSettingsScreen(void)
                 delay(1);
                 continue;
             }
+            update_notice = false;
             if (control_boot_requested || starter_requested) break;
+            bool usb_waits_for_update = false;
+#if defined(BOARD_M5STACK_TAB5)
+            // Leaving USB Disk on this board reboots it to release its USB PHY.
+            usb_waits_for_update = FirmwareUpdateReady();
+#endif
 
             UiTouch t;
             if (pollUiTouch(&t)) {
@@ -1186,7 +1201,7 @@ static void runSettingsScreen(void)
                         } else if (pressed == Screens::kWiFiButton) {
                             next = kOpenWiFi;
                         } else if (pressed == Screens::kUsbButton) {
-                            next = kOpenUsb;
+                            if (!usb_waits_for_update) next = kOpenUsb;
                         } else if (pressed == Screens::kStartButton) {
                             if (bootMediaReady()) next = kStart;
                             else starter_requested = true;
@@ -1227,6 +1242,7 @@ static void runSettingsScreen(void)
             v.boot_from_cd = boot_from_cd;
             v.rotate180 = rotation_degrees == 180;
             v.usb_available = usb_available;
+            v.usb_waits_for_update = usb_waits_for_update;
             v.needs_setup = !ready;
             v.wifi_bars = wifi.bars;
             v.wifi_status = wifi.status;
@@ -1247,6 +1263,7 @@ static void runSettingsScreen(void)
             key.sound = v.sound;
             key.boot_cd = v.boot_from_cd;
             key.needs_setup = v.needs_setup;
+            key.usb_waits_for_update = usb_waits_for_update;
             key.rotate = v.rotate180;
             memcpy(key.clock, clock, sizeof(key.clock));
             memcpy(key.status, wifi.status, sizeof(key.status));
@@ -1369,7 +1386,7 @@ static void runWiFiScreen(void)
     // Disconnect (without erasing config) so the scan can run.
     wl_status_t pre_status = WiFi.status();
     Serial.printf("[BOOT_GUI] WiFi pre-scan status: %d\n", pre_status);
-    if (pre_status != WL_IDLE_STATUS && pre_status != WL_DISCONNECTED) {
+    if (pre_status != WL_CONNECTED && pre_status != WL_IDLE_STATUS && pre_status != WL_DISCONNECTED) {
         WiFi.disconnect(false);
         delay(100);
     }
@@ -1431,7 +1448,7 @@ static void runWiFiScreen(void)
 
         if (connecting) {
             wl_status_t status = WiFi.status();
-            if (status == WL_CONNECTED) {
+            if (status == WL_CONNECTED && WiFi.SSID() == wifi_networks[connect_target].ssid) {
                 Serial.printf("[BOOT_GUI] WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
                 connecting = false;
                 // Save the credentials that just worked.
@@ -1497,7 +1514,9 @@ static void runWiFiScreen(void)
                             first += part / 2 * L.list.visible;
                         } else {
                             const int row = Screens::ListRowAt(L.list, first, count, t.x, t.y);
-                            if (row >= 0 && !connecting) {
+                            if (row >= 0 && !connecting && row != selected) {
+                                const char *saved = !strcmp(wifi_networks[row].ssid, wifi_ssid) ? wifi_password : "";
+                                snprintf(password, sizeof(password), "%s", saved);
                                 selected = row;
                                 Serial.printf("[BOOT_GUI] Selected network: %s\n", wifi_networks[row].ssid);
                             }
@@ -1588,23 +1607,19 @@ static void runWiFiScreen(void)
 // "Done" tears the stack down and returns to the settings screen, which
 // rescans the card for newly copied disk and CD images.
 
-// Shared context between runUsbMscScreen and its background task. Kept in
-// module scope because the task runs while the touch loop is blocked on
-// touch polling, and passing a pointer to a stack-local struct would be
-// a lifetime hazard if the UI task ever spawns a retry.
-typedef struct {
-    const char       *err;
-    volatile bool     finished;
-} UsbMscTaskCtx;
+// The UI owns this state until the worker publishes completion.
+struct UsbMscTaskCtx {
+    const char *error = nullptr;
+    std::atomic<bool> finished{false};
+};
 
 static UI::Rect s_usb_done_button = {0, 0, 0, 0};   // for BOOT HIT done
 
 static void usbMscTask(void *arg)
 {
     UsbMscTaskCtx *ctx = static_cast<UsbMscTaskCtx *>(arg);
-    UsbMsc_Enter(&ctx->err);
-    // When UsbMsc_Enter returns, SD is remounted and this task is done.
-    ctx->finished = true;
+    UsbMsc_Enter(&ctx->error);
+    ctx->finished.store(true);
     vTaskDelete(NULL);
 }
 
@@ -1620,7 +1635,7 @@ static void runUsbMscScreen(void)
     }
 
     // Spin up MSC in a background task so the touch loop keeps polling.
-    UsbMscTaskCtx ctx = { nullptr, false };
+    UsbMscTaskCtx ctx;
     TaskHandle_t msc_task = nullptr;
     BaseType_t rc = xTaskCreatePinnedToCore(
         usbMscTask, "usb_msc", 6144,
@@ -1636,8 +1651,8 @@ static void runUsbMscScreen(void)
     view.clock = clock;
     view.icon = UI::kIconCard;
     view.heading = "Your SD card is now available as a USB drive.";
-    view.body = "Copy or remove disk images on your computer, then tap Done to "
-                "return to the startup settings.";
+    view.body = "Copy files on your computer, eject the drive there, then tap Done "
+                "to return to Startup Settings.";
 #if defined(BOARD_M5STACK_TAB5)
     view.note = "Use a USB-A to USB-C cable in the Tab5's USB-A port (not USB-C).";
 #endif
@@ -1668,7 +1683,8 @@ static void runUsbMscScreen(void)
             }
         }
 
-        view.status = ctx.err ? ctx.err
+        const bool finished = ctx.finished.load();
+        view.status = finished && ctx.error ? ctx.error
                     : UsbMsc_HostMounted() ? "Connected. It is safe to copy files."
                                            : "Waiting for the computer...";
         view.button_pressed = pressed && inside;
@@ -1682,21 +1698,21 @@ static void runUsbMscScreen(void)
 
         // If the MSC task finished without user intervention (init failure),
         // keep any error visible briefly, then bail out.
-        if (ctx.finished && !should_exit) {
+        if (finished && !should_exit) {
             delay(2000);
             should_exit = true;
         }
         delay(2);
     }
 
-    // Tell the MSC task to wind down, then wait for it to exit.
-    UsbMsc_RequestExit();
-    // Poll ctx.finished rather than the task handle: once the task calls
-    // vTaskDelete(NULL) the handle is no longer safe to inspect.
-    for (int i = 0; i < 200 && !ctx.finished; ++i) {
+    // The worker can still be starting when Done is tapped. Keep asking it
+    // to stop until it releases the card or restarts the Tab5. The settings
+    // screen must never rescan a card that is still exported to the host.
+    while (!ctx.finished.load()) {
+        UsbMsc_RequestExit();
+        BootGUI_ControlPoll();
         delay(25);
     }
-    (void)msc_task;  // only used for creation
     s_usb_done_button = {0, 0, 0, 0};
 
     Serial.println("[BOOT_GUI] Exiting USB Disk screen");
@@ -1737,9 +1753,8 @@ static String controlHex(const char *value)
 
 static void controlSyncSelections(void)
 {
-    disk_selection_index = cdrom_selection_index = extfs_selection_index = 0;
-    for (size_t i = 0; i < disk_files.size(); ++i)
-        if (disk_files[i] == selected_disk_path) disk_selection_index = i;
+    disk_selection_index = BootSelectDisk(disk_files, selected_disk_path, sizeof(selected_disk_path));
+    cdrom_selection_index = extfs_selection_index = 0;
     for (size_t i = 0; i < cdrom_files.size(); ++i)
         if (cdrom_files[i] == selected_cdrom_path) cdrom_selection_index = i + 1;
     for (size_t i = 0; i < extfs_folders.size(); ++i)
@@ -1820,6 +1835,8 @@ static String controlExecute(char *command)
     if (!strcmp(command, "ENTER")) {
         if (!strcmp(control_screen, "usb")) return "ERR BOOT usb_disk_active";
         if (!strcmp(control_phase, "preboot")) {
+            if (StarterDownloadStatus().state == StarterState::Working) return "ERR BOOT download_active";
+            control_leave_starter = true;
             control_hold = true;
             control_leave_wifi = true;
         } else if (!strcmp(control_phase, "emulator") || !strcmp(control_phase, "stopped")) {
@@ -1858,7 +1875,7 @@ static String controlExecute(char *command)
         if (!strcmp(action, "STATUS")) {
             static const char *const states[] = {"idle", "working", "done", "failed", "cancelled"};
             return String("OK BOOT STARTER ") + states[(unsigned)info.state] + " " + info.completed + " " +
-                info.total + " " + controlHex(info.message);
+                info.total + " " + controlHex(info.state == StarterState::Idle ? "No installation started." : info.message);
         }
         if (!strcmp(action, "SHOW") && !strcmp(control_screen, "settings")) {
             starter_requested = true;
@@ -2057,19 +2074,11 @@ bool BootGUI_Init(void)
     scanCDROMFiles();
     scanExtFSFolders();
 
-    // If no disk is selected but we found some, select the first one
-    if (strlen(selected_disk_path) == 0 && disk_files.size() > 0) {
-        strncpy(selected_disk_path, disk_files[0].c_str(), BOOT_GUI_MAX_PATH - 1);
-        disk_selection_index = 0;
-    }
-
-    // Bring up the hosted WiFi transport unconditionally on boards
-    // that have a co-processor (Waveshare) so we can query the slave
+    // Waveshare carries an embedded radio update. Query its ESP-Hosted
     // firmware version before any autoconnect attempts. If it's out
     // of sync with the linked host library, stream the embedded
     // `esp32c6-v<X.Y.Z>.bin` blob into the slave and reboot so WiFi
-    // comes up working. On Tab5 BoardWifi_IsCoprocessorFirmwareOutdated
-    // is a no-op stub so the whole block resolves to a cheap skip.
+    // comes up working. Tab5 uses its factory ESP-Hosted radio firmware.
 #if defined(BOARD_WAVESHARE_P4_101)
     initWiFi();
     runC6FirmwareUpdateIfNeeded();
