@@ -114,3 +114,45 @@ class HfsStarter7Tests(unittest.TestCase):
         self.assertEqual(self.metadata(), (expected, tail))
         self.assertNotIn('Repaired', self.invoke('startup'))
         self.assertEqual(self.metadata(), (expected, tail))
+
+    @unittest.skipUnless(SOURCE, 'set M5TAB_STARTER7_DISK to the extracted official starter')
+    def test_used_starter_after_guest_updates_and_interrupted_mount(self):
+        with Path(SOURCE).open('rb') as source:
+            prefix = bytearray(source.read(PREFIX))
+            source.seek(SIZE - 1024)
+            tail = source.read()
+        for offset, before, after in PATCHES:
+            prefix[offset] = after
+        prefix[1034] = 0
+        # Normal updates from the on-device Finder session. Include the ends
+        # of the unreachable catalog gap and adjacent authenticated records.
+        prefix[1030:1034] = bytes.fromhex('e7276734')
+        prefix[1040:1042] = bytes(2)
+        prefix[1054:1058] = (867).to_bytes(4, 'big')
+        prefix[1094:1098] = (8962).to_bytes(4, 'big')
+        for offset in (1067368,1090148,1091288,1098956,1107500,1109210,1110898,1139348):
+            prefix[offset:offset+4] = bytes.fromhex('e7276b00')
+        prefix[1086814:1086968] = bytes(range(154))
+        self.seed(prefix, tail)
+        for mode in ('open','readonly','cdrom'):
+            self.invoke(mode)
+            self.assertEqual(self.metadata(), (prefix, tail))
+        self.assertIn('Repaired verified System 7.5.3 startup volume', self.invoke('startup'))
+        expected = bytearray(prefix)
+        expected[1034] = 1
+        self.assertEqual(self.metadata(), (expected, tail))
+        self.assertNotIn('Repaired', self.invoke('startup'))
+        for offset in (1035, 1037, 1058, 1536, 9730, 1067367, 1067372, 1086813, 1086968, 1137333, PREFIX-1):
+            with self.subTest(offset=offset):
+                bad = bytearray(prefix)
+                bad[offset] ^= 1
+                self.seed(bad, tail)
+                self.assertNotIn('Repaired', self.invoke('startup'))
+                self.assertEqual(self.metadata(), (bad, tail))
+        for offset, value in ((1040, bytes.fromhex('f9ff')), (1054, bytes.fromhex('00000361')),
+                              (1054, bytes.fromhex('00010000'))):
+            bad = bytearray(prefix)
+            bad[offset:offset+len(value)] = value
+            self.seed(bad, tail)
+            self.assertNotIn('Repaired', self.invoke('startup'))
+            self.assertEqual(self.metadata(), (bad, tail))

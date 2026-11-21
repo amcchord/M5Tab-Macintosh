@@ -32,3 +32,15 @@ M5TAB_STARTER7_DISK=/path/to/Macintosh7.dsk python3 -m unittest discover -s test
 ```
 
 To recover the original published contents, extract a fresh `Macintosh7.dsk` from the ZIP. Keep any copy containing later guest changes separate.
+
+## Interrupted startup after the first repair
+
+After a Finder session and an interrupted startup on a Tab5, the volume again had a dirty header. A read-only capture of both volume headers, the bitmap and both complete B-trees passed independent `fsck.hfs -d -f -n` verification. Compared with the repaired starter, 51 bytes differed. The master directory block recorded a new modification time, allocation search position, next catalog ID, write count and unmount flag. Eight catalog records had new modification times. Nine bytes changed inside a 154-byte unused gap in catalog leaf 55. The catalog offset table still delimited this gap.
+
+For this case the firmware checks a second SHA-256 fingerprint of the same metadata. It masks the five documented header fields, those eight modification timestamps and the unused gap at their fixed byte locations. The header must have exactly the dirty attributes. The allocation search position must fall inside the volume. The next catalog ID must be between 866 and 65535, beyond all 865 or lower IDs in the authenticated catalog. All other bytes participate in the fingerprint, including record boundaries, file lengths, allocation records, directory counts and the alternate header. A match writes and syncs only the clean-unmount byte at offset 1034. Other structural changes leave the disk in the guest's normal mount procedure. A disk with new files, for example, requires its own consistency check.
+
+| Capture | SHA-256 |
+| --- | --- |
+| Captured metadata before repeat repair | `76f44377d52f3d75b617d4c8443b3b92f591292e566910baf75d389685282b63` |
+| Capture and repaired reference with documented fields masked | `20ff5490d146f061478e87379ba691ec494d4998702886486efa60499547f50f` |
+| Captured metadata after the one-byte change | `4fef2edb449d43a0df09b832a4736709110a9410dcb2320021cf9c46e61029bc` |

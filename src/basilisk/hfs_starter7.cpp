@@ -23,6 +23,32 @@ constexpr uint8_t metadataHash[32] = {
     0x46,0x40,0x2d,0xbd,0xbd,0x6d,0xde,0xed,0xab,0xac,0xc3,0x04,0x34,0xf5,0x7d,0x45,
     0xc5,0x25,0xd5,0x53,0x87,0xcb,0xe3,0xc4,0x2f,0x63,0x94,0xec,0xe4,0xb5,0x3a,0x5b
 };
+// Digest of the independently checked, repaired volume, with only these
+// nonstructural bytes masked. Each catalog location is fixed: all pointers,
+// record offsets, keys, lengths, fork extents and the entire bitmap are pinned.
+constexpr uint8_t usedMetadataHash[32] = {
+    0x20,0xff,0x54,0x90,0xd1,0x46,0xf0,0x61,0x47,0x8e,0x87,0x37,0x9b,0xa6,0x91,0xec,
+    0x49,0x4d,0x49,0x98,0x70,0x28,0x86,0x48,0x6e,0xfa,0x60,0x49,0x95,0x47,0xf5,0x0f
+};
+struct Range { uint32_t offset; uint16_t bytes; };
+constexpr Range usedFields[] = {
+    {1030,4}, {1034,1}, {1040,2}, {1054,4}, {1094,4},  // MDB date, clean bit, allocation hint, next ID, writes.
+    {1067368,4},                    // Apple Menu Options modification date.
+    {1086814,154},                  // Unused leaf 55 bytes [350,504), between records and offset table.
+    {1090148,4}, {1091288,4},       // Macintosh Easy Open Preferences and ASLM Preferences modification dates.
+    {1098956,4}, {1107500,4},       // MacTCP and MicroMac7 modification dates.
+    {1109210,4}, {1110898,4}, {1139348,4}  // Users & Groups Data File, MacTCP DNR and Apple Menu Options Prefs.
+};
+
+void maskUsedFields(uint32_t pos, uint8_t *data, size_t n)
+{
+    for (const Range &r : usedFields) {
+        uint32_t first = r.offset > pos ? r.offset : pos;
+        uint32_t last = r.offset + r.bytes;
+        if (last > pos + n) last = pos + n;
+        if (first < last) memset(data + (first - pos), 0, last - first);
+    }
+}
 struct Patch { uint32_t offset; uint8_t before, after; };
 // Fsync and verify every edit in this order. Make the volume clean last.
 constexpr Patch patches[] = {
@@ -39,12 +65,21 @@ bool readAt(int fd, uint32_t pos, uint8_t *data, size_t n)
 }
 
 enum class Repair { Unmatched, Complete, Error };
-Repair repair(int fd, const uint8_t expected[32])
+Repair repair(int fd, const uint8_t expected[32], bool used = false)
 {
     uint8_t header[46];
     if (!readAt(fd, 1024, header, sizeof(header)) ||
         memcmp(header, "\x42\x44\xe5\x86\xd0\xff", 6) || header[10] || header[11] ||
         memcmp(header + 36, "\x09MicroMac7", 10)) return Repair::Unmatched;
+
+    if (used) {
+        uint16_t hint = (uint16_t(header[16]) << 8) | header[17];
+        uint32_t next = (uint32_t(header[30]) << 24) | (uint32_t(header[31]) << 16) |
+                        (uint32_t(header[32]) << 8) | header[33];
+        // The authenticated catalog's highest live CNID is 865. Refuse a
+        // reused ID, a near-wrap ID, or an out-of-volume allocation search hint.
+        if (hint >= 63999 || next < 866 || next > 65535) return Repair::Unmatched;
+    }
 
     constexpr size_t chunk = 8192;
     uint8_t *buffer = static_cast<uint8_t *>(malloc(chunk));
@@ -56,12 +91,16 @@ Repair repair(int fd, const uint8_t expected[32])
         size_t n = prefixBytes - pos;
         if (n > chunk) n = chunk;
         ok = read(fd, buffer, n) == ssize_t(n);
-        for (const Patch &p : patches) {
-            if (!ok || p.offset < pos || p.offset - pos >= n) continue;
-            uint8_t &value = buffer[p.offset - pos];
-            // A reset after any completed edit can resume against the same pin.
-            ok = value == p.before || value == p.after;
-            value = p.before;
+        if (used) {
+            maskUsedFields(pos, buffer, n);
+        } else {
+            for (const Patch &p : patches) {
+                if (!ok || p.offset < pos || p.offset - pos >= n) continue;
+                uint8_t &value = buffer[p.offset - pos];
+                // A reset after any completed edit can resume against the same pin.
+                ok = value == p.before || value == p.after;
+                value = p.before;
+            }
         }
         if (ok) ok = mbedtls_sha256_update(&sha, buffer, n) == 0;
     }
@@ -74,6 +113,7 @@ Repair repair(int fd, const uint8_t expected[32])
     if (!ok || memcmp(digest, expected, sizeof(digest))) return Repair::Unmatched;
 
     for (const Patch &p : patches) {
+        if (used && p.offset != 1034) continue;
         uint8_t value;
         if (!readAt(fd, p.offset, &value, 1)) return Repair::Error;
         if (value == p.after) continue;
@@ -96,10 +136,17 @@ void Sys_repair_hfs7_starter(const char *path)
     if (fd < 0) return;
     struct stat st;
     Repair result = Repair::Unmatched;
-    if (!fstat(fd, &st) && st.st_size == diskBytes) result = repair(fd, metadataHash);
+    bool used = false;
+    if (!fstat(fd, &st) && st.st_size == diskBytes) {
+        result = repair(fd, metadataHash);
+        if (result == Repair::Unmatched) {
+            used = true;
+            result = repair(fd, usedMetadataHash, true);
+        }
+    }
     if (close(fd) && result == Repair::Complete) result = Repair::Error;
     if (result == Repair::Complete)
-        Serial.printf("[HFS BOOT] Repaired verified System 7.5.3 starter: %s\n", path);
+        Serial.printf("[HFS BOOT] Repaired verified System 7.5.3 %s: %s\n", used ? "startup volume" : "starter", path);
     if (result == Repair::Error)
         Serial.printf("[HFS BOOT] System 7.5.3 repair I/O failed: %s\n", path);
 }
