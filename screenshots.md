@@ -1,91 +1,86 @@
-# Screenshots & Animations
+# Tab5 v5.4 screenshot gallery
 
-## Flying Toasters v2.5 (Performance Update)
+## Startup and setup
 
-<p align="center">
-  <img src="screenshots/Toasters2.5.gif" alt="Flying Toasters v2.5"/>
-</p>
+![Startup Settings on the Tab5](screenshots/Tab5-Startup-Settings.png)
 
-Flying Toasters running smoothly after the v2.5 performance optimizations — write-time dirty tracking, packed pixel support, and optimized memory placement.
+**Startup Settings.** Choose a Macintosh hard disk, optional CD-ROM and memory size, then select **Start Up**.
 
----
+![Set Up SD Card with Mac OS 8.1 and System 7 choices](screenshots/Tab5-Setup.png)
 
-## System 7.5.3 Booting
+**Set Up SD Card.** Connect to Wi-Fi and choose Mac OS 8.1 or System 7. Setup downloads the Macintosh ROM and the selected startup disk. Allow 1.2 GiB of free space on the card.
 
-<p align="center">
-  <img src="screenshots/MacOS753.gif" alt="System 7.5.3 Booting"/>
-</p>
+## Download and verification
 
-Watch the full boot sequence from ROM initialization through to the Mac OS 7.5.3 desktop.
+![Mac OS 8.1 download showing progress and network speed](screenshots/Tab5-Starter-Download.png)
 
----
+**Downloading.** This Tab5 capture shows the Mac OS 8.1 download at 273.2 KiB/s. An interrupted download can resume from the bytes saved on the card.
 
-## Flying Toasters (Original)
+![The Tab5 verifying a startup file on the microSD card](screenshots/Tab5-Imaging.png)
 
-<p align="center">
-  <img src="screenshots/Toasters.gif" alt="Flying Toasters Screensaver"/>
-</p>
+**Verifying.** Setup checks the compressed download, expands the disk image onto the card, then rereads and verifies the installed image. The network speed appears only during the download.
 
-The classic After Dark Flying Toasters screensaver running on real Mac OS via the emulator.
+## Card management
 
----
+![SD Card inspection showing the card and its mounted volume](screenshots/Tab5-SD-Card.png)
 
-## Performance Statistics
+**SD Card.** Check the card identity, physical capacity, filesystem and volume size before choosing a card action.
 
-<p align="center">
-  <img src="screenshots/Performance.jpeg" width="80%" alt="Performance Statistics"/>
-</p>
+![Erase SD Card confirmation on the Tab5](screenshots/Tab5-Format-Confirm.png)
 
-Serial output showing the v2.5 performance monitoring — CPU cycles, video frame times, cache statistics, and more.
+**Erase SD Card?** The confirmation names the card. **Erase Card** removes every file and partition and creates a FAT32 volume. **Cancel** returns to inspection.
 
----
+![USB Disk mode on the Tab5](screenshots/Tab5-USB-Disk.png)
 
-## Static Screenshots
+**USB Disk.** Connect a computer to the Tab5’s USB-A port to access the card. Eject the mounted card on the computer before leaving USB Disk mode.
 
-<p align="center">
-  <img src="screenshots/MacOS8.1_Booted.jpeg" width="45%" alt="Mac OS 8.1 Desktop"/>
-  <img src="screenshots/MacOS8.1_About.jpeg" width="45%" alt="Mac OS 8.1 About This Macintosh"/>
-</p>
+## Finder and disk performance
 
-<p align="center">
-  <img src="screenshots/MacOS8.1_Booting.jpeg" width="45%" alt="Mac OS 8.1 Booting"/>
-  <img src="screenshots/MacOS753_About.jpeg" width="45%" alt="System 7.5.3 About This Macintosh"/>
-</p>
+![Macintosh Finder running on the Tab5](screenshots/Tab5-Finder.png)
 
----
+**Finder.** The Macintosh desktop after startup on the Tab5.
 
-## Networking Demo
+![The System 7 guest disk test showing verified reads and writes](screenshots/Tab5-System7-Disk-Benchmark.png)
 
-<p align="center">
-  <img src="screenshots/Internet-Sys7.png" width="80%" alt="Browsing the Internet on System 7"/>
-</p>
+**Guest disk test.** The benchmark writes 4 MiB to the Macintosh startup volume, reads it back, verifies every byte and removes its test file. [Four-bit SDMMC and SPI measurements](SD_STABILITY.md)
 
-Browsing the web on System 7 using the built-in WiFi networking via the ESP32-C6 co-processor.
+## Touch input
 
-### Loading a Webpage Video
+| QWERTY keyboard on Tab5 | Game controls on Tab5 |
+| --- | --- |
+| ![v4 photo of the Tab5 keyboard overlay](screenshots/v4-M5Keyboard.jpeg) | ![v4 photo of the Tab5 gaming D-pad overlay](screenshots/v4-M5Gamemode.jpeg) |
+| Three-finger tap to show or hide the keyboard. | Four-finger tap to show or hide the D-pad. |
 
-Watch the emulator load a real webpage over WiFi:
+The photos above show the v4 controls on a physical Tab5. [Keyboard on the Waveshare 10.1-inch display](screenshots/v4-WaveshareBootKeyboard.jpeg)
 
-<p align="center">
-  <video src="screenshots/LoadingAWebpage.mp4" width="80%" controls>
-    Your browser does not support the video tag.
-  </video>
-</p>
+## Earlier releases
 
-<p align="center">
-  <a href="screenshots/LoadingAWebpage.mp4">
-    <img src="https://img.shields.io/badge/▶_Download_Video-Loading_a_Webpage-green?style=for-the-badge" alt="Download Webpage Loading Video"/>
-  </a>
-</p>
+<details>
+<summary>Boot recordings and Flying Toasters</summary>
 
----
+![System 7.5.3 starting up on the Tab5](screenshots/MacOS753.gif)
 
-## Video
+**System 7.5.3 startup.** A recording of the physical display. [Boot video (MOV)](screenshots/MacOS753_Booting.mov)
 
-For even higher quality footage, check out the boot video:
+![Flying Toasters on the Tab5 with v2.5 firmware](screenshots/Toasters2.5.gif)
 
-<p align="center">
-  <a href="screenshots/MacOS753_Booting.mov">
-    <img src="https://img.shields.io/badge/▶_Download_Video-Mac_OS_Booting-red?style=for-the-badge" alt="Download Boot Video"/>
-  </a>
-</p>
+**Flying Toasters.** After Dark running on the Tab5 in v2.5. [Original recording (GIF)](screenshots/Toasters.gif)
+
+</details>
+
+<details>
+<summary>Hardware photos, benchmarks and web browsing</summary>
+
+| Mac OS 8.1 startup on the Tab5 | Mac OS 8.1 Finder on the Tab5 |
+| --- | --- |
+| ![Tab5 displaying the Mac OS startup screen](screenshots/MacOS8.1_Booting.jpeg) | ![Tab5 displaying the Mac OS 8.1 desktop](screenshots/MacOS8.1_Booted.jpeg) |
+
+**About This Computer.** [Mac OS 8.1 photo](screenshots/MacOS8.1_About.jpeg) and [System 7.5.3 photo](screenshots/MacOS753_About.jpeg).
+
+**Speedometer.** The Performance Test window photographed on the Tab5 in [v2.5](screenshots/2-5-Performance.jpeg) and [v3.0](screenshots/3-0-Performance.png).
+
+![System 7 Today open in Internet Explorer on the Tab5](screenshots/Internet-Sys7.jpg)
+
+**Web browsing over Wi-Fi.** Internet Explorer on System 7 displaying the System 7 Today site. [Forum photo](screenshots/Internert-Forums.jpg) · [Page load video (MP4)](screenshots/LoadingAWebpage.mp4)
+
+</details>
