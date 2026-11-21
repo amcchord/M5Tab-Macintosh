@@ -631,6 +631,8 @@ The [Wi-Fi console](AUTOMATION.md#wi-fi-console) provides browser screenshots, g
 
 #### Set up a blank card on the device
 
+When the Tab5 cannot mount a card, **SD Card** shows the card identity, capacity and detected layout. Reseat the card and choose **Retry Mount** to try it again. To erase a spare card, choose **Format…**, check the card identity on the confirmation screen, then choose **Erase Card**. Formatting removes every file and partition. The Tab5 makes a FAT32 volume and restarts into setup. The same screen is available under **Startup Settings → SD Card…** for a mounted Tab5 card.
+
 With firmware built from this source, insert a FAT32 microSD card with at least **1.2 GiB free** and start the device. If the ROM or selected startup image is missing, **Set Up SD Card** opens.
 
 1. Choose **Wi-Fi...**, join a network, and return to setup.

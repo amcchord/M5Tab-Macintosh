@@ -139,7 +139,9 @@ void setup(void)
     /* SD comes up after the splash; practical init time fits comfortably
      * inside the 2s tap window, so the icon stays visible throughout. */
     if (!initSDCard()) {
-        haltWith("Insert a FAT32 microSD card and restart.");
+        if (!BootGUI_PrepareUI()) haltWith("Cannot open SD card recovery.");
+        AutomationStartSerial();
+        BootGUI_WaitForCard();
     }
 
     /* Register the SD-flush shutdown hook as soon as the card is up.

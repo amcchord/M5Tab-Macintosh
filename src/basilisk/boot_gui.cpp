@@ -37,6 +37,8 @@
 #include "board_display.h"
 #include "board_touch.h"
 #include "board_wifi.h"
+#include "board_sd_format.h"
+#include "card_erase_confirmation.h"
 #include "board_sd.h"  /* SD_FS alias */
 #include "preboot_screens.h"  /* Mac OS 8 Platinum screens on a 2x canvas */
 #include "usb_msc.h"
@@ -62,6 +64,7 @@ typedef struct {
     bool is_pressed;
     bool was_pressed;
     bool was_released;
+    bool injected;
 } TouchEvent;
 
 // Touch task handles
@@ -113,6 +116,7 @@ static void touchTask(void* param)
 
         BoardTouchDetail touch = BoardTouch_GetDetail();
         portENTER_CRITICAL(&touch_spinlock);
+        evt.injected = touch_injected;
         if (touch_injected) {
             touch.pressed = touch_injected_pressed;
             touch.x = touch_injected_x;
@@ -380,6 +384,7 @@ static QueueHandle_t control_replies = nullptr;
 // Forward Declarations
 // ============================================================================
 
+static String controlHex(const char *value);
 static void loadSettings(void);
 static bool saveSettings(void);
 static void scanDiskFiles(void);
@@ -732,6 +737,7 @@ struct UiTouch {
     bool down;           // finger currently on the glass
     bool pressed;        // touch began since the last poll
     bool released;       // touch ended since the last poll
+    bool injected;       // this touch came from USB automation
 };
 
 static bool pollUiTouch(UiTouch *t)
@@ -743,6 +749,7 @@ static bool pollUiTouch(UiTouch *t)
     t->down = e.is_pressed;
     t->pressed = e.was_pressed;
     t->released = e.was_released;
+    t->injected = e.injected;
     return true;
 }
 
@@ -945,6 +952,8 @@ static void selectMedia(int column, int row)
                   row ? path : "None");
 }
 
+#include "card_recovery_ui.inc"
+
 // The ROM loader accepts 64 KiB through 1 MiB. Existing user-supplied media
 // can be selected normally; checksums apply to files installed by the downloader.
 static bool usableFile(const char *path, size_t minimum, size_t maximum = SIZE_MAX)
@@ -1097,6 +1106,10 @@ static void runSettingsScreen(void)
 {
     starter_requested |= !control_hold && !bootMediaReady();
     for (;;) {
+        if (card_requested) {
+            card_requested = false;
+            runCardScreen(true);
+        }
         if (starter_requested) {
             starter_requested = false;
             runStarterScreen();
@@ -1154,7 +1167,7 @@ static void runSettingsScreen(void)
                 continue;
             }
             update_notice = false;
-            if (control_boot_requested || starter_requested) break;
+            if (control_boot_requested || starter_requested || card_requested) break;
             bool usb_waits_for_update = false;
 #if defined(BOARD_M5STACK_TAB5)
             // Leaving USB Disk on this board reboots it to release its USB PHY.
@@ -1202,6 +1215,10 @@ static void runSettingsScreen(void)
                             next = kOpenWiFi;
                         } else if (pressed == Screens::kUsbButton) {
                             if (!usb_waits_for_update) next = kOpenUsb;
+                        } else if (pressed == Screens::kSDCardButton) {
+#if defined(BOARD_M5STACK_TAB5)
+                            if (!FirmwareUpdateReady()) card_requested = true;
+#endif
                         } else if (pressed == Screens::kStartButton) {
                             if (bootMediaReady()) next = kStart;
                             else starter_requested = true;
@@ -1242,6 +1259,9 @@ static void runSettingsScreen(void)
             v.boot_from_cd = boot_from_cd;
             v.rotate180 = rotation_degrees == 180;
             v.usb_available = usb_available;
+#if defined(BOARD_M5STACK_TAB5)
+            v.card_available = true;
+#endif
             v.usb_waits_for_update = usb_waits_for_update;
             v.needs_setup = !ready;
             v.wifi_bars = wifi.bars;
@@ -1277,7 +1297,7 @@ static void runSettingsScreen(void)
             delay(2);
         }
 
-        if (starter_requested) continue;
+        if (starter_requested || card_requested) continue;
         if (next == kOpenWiFi) {
             runWiFiScreen();
             continue;
@@ -1780,6 +1800,7 @@ static bool controlPathValid(const char *key, const char *path)
 static bool controlHitRect(const char *name, UI::Rect *out)
 {
     const int w = UI::Width(), h = UI::Height();
+    if (card_open) return cardHitRect(name, out);
     if (!strcmp(control_screen, "starter")) {
         static const char *const names[Screens::kStarterCount] = {"system8", "system7", "settings", "wifi", "action"};
         const auto layout = Screens::LayoutStarter(w, h);
@@ -1788,7 +1809,14 @@ static bool controlHitRect(const char *name, UI::Rect *out)
     } else if (!strcmp(control_screen, "settings")) {
         static const char *const names[Screens::kSettingsControlCount] = {
             "disk", "cdrom", "extfs", "ram4", "ram8", "ram12", "ram16",
-            "sound", "bootcd", "rotate", "wifi", "usb", "start"};
+            "sound", "bootcd", "rotate", "wifi", "usb", "start", "sdcard"};
+        if (!strcmp(name, "sdcard")) {
+#if defined(BOARD_M5STACK_TAB5)
+            if (FirmwareUpdateReady()) return false;
+#else
+            return false;
+#endif
+        }
         const Screens::SettingsLayout L = Screens::LayoutSettings(w, h, UsbMsc_IsSupported());
         for (int i = 0; i < Screens::kSettingsControlCount; ++i)
             if (!strcmp(name, names[i])) { *out = L.controls[i]; return out->w > 0; }
@@ -1826,6 +1854,8 @@ static String controlExecute(char *command)
             " " + (control_restart_at ? "1" : "0");
     }
     if (!strcmp(command, "UPDATE STATUS")) return FirmwareUpdateStatus();
+    if (card_open && !strncmp(command, "CARD ", 5)) return cardCommand(command+5);
+    if (card_open && strncmp(command, "HIT ", 4)) return "ERR BOOT card_screen_active";
     if (!strcmp(command, "UPDATE CANCEL")) {
         if (strcmp(control_phase, "preboot") || strcmp(control_screen, "settings") || control_restart_at)
             return "ERR BOOT settings_screen_required";
@@ -1896,6 +1926,13 @@ static String controlExecute(char *command)
     if (!strcmp(control_screen, "starter") && !strcmp(command, "START"))
         return startInstalledSystem() ? "OK BOOT START" : "ERR BOOT download_not_ready";
     if (strcmp(control_screen, "settings")) return "ERR BOOT settings_screen_required";
+#if defined(BOARD_M5STACK_TAB5)
+    if (!strcmp(command, "CARD SHOW")) {
+        if (FirmwareUpdateReady()) return "ERR BOOT reboot_pending";
+        card_requested = true;
+        return "OK BOOT CARD SHOW";
+    }
+#endif
     if (!strncmp(command, "UPDATE START ", 13))
         return FirmwareUpdateStart(command + 13);
     if (!strcmp(command, "UPDATE REBOOT")) {
@@ -2037,8 +2074,9 @@ void BootGUI_Restart(void)
 // Public API
 // ============================================================================
 
-bool BootGUI_Init(void)
+bool BootGUI_PrepareUI(void)
 {
+    if (gui_initialized) return true;
     Serial.println("[BOOT_GUI] Initializing...");
 
     // If MacSplash already warmed up the touch panel and started the touch
@@ -2066,6 +2104,29 @@ bool BootGUI_Init(void)
     Serial.printf("[BOOT_GUI] Canvas %dx%d, shown at %dx%d\n", UI::Width(), UI::Height(),
                   BoardDisplay_Width(), BoardDisplay_Height());
 
+    control_requests = xQueueCreate(1, sizeof(BootControlRequest));
+    control_replies = xQueueCreate(1, sizeof(BootControlReply));
+    if (!control_requests || !control_replies) {
+        if (control_requests) vQueueDelete(control_requests);
+        if (control_replies) vQueueDelete(control_replies);
+        control_requests = control_replies = nullptr;
+        Serial.println("[BOOT_GUI] WARNING: Serial settings queues unavailable");
+    }
+    control_hold = esp_reset_reason() == ESP_RST_SW && control_boot_cookie == CONTROL_BOOT_COOKIE;
+    control_boot_cookie = 0; // One boot only; ordinary power cycles keep their behavior.
+    control_phase = "preboot";
+    gui_initialized = true;
+    return true;
+}
+
+void BootGUI_WaitForCard(void)
+{
+    runCardScreen(false);
+}
+
+bool BootGUI_Init(void)
+{
+    if (!BootGUI_PrepareUI()) return false;
     // Load saved settings
     loadSettings();
 
@@ -2100,18 +2161,6 @@ bool BootGUI_Init(void)
         Serial.println("[BOOT_GUI] WiFi auto-connect disabled by build flag");
     }
 
-    control_requests = xQueueCreate(1, sizeof(BootControlRequest));
-    control_replies = xQueueCreate(1, sizeof(BootControlReply));
-    if (!control_requests || !control_replies) {
-        if (control_requests) vQueueDelete(control_requests);
-        if (control_replies) vQueueDelete(control_replies);
-        control_requests = control_replies = nullptr;
-        Serial.println("[BOOT_GUI] WARNING: Serial settings queues unavailable");
-    }
-    control_hold = esp_reset_reason() == ESP_RST_SW && control_boot_cookie == CONTROL_BOOT_COOKIE;
-    control_boot_cookie = 0; // One boot only; ordinary power cycles keep their behavior.
-    control_phase = "preboot";
-    gui_initialized = true;
     Serial.println("[BOOT_GUI] Initialization complete");
 
     return true;
@@ -2240,7 +2289,7 @@ void BootGUI_StopTouchTask(void)
 
 bool BootGUI_InjectTouch(int x, int y, bool pressed)
 {
-    if (!touch_task_running) return false;
+    if (!touch_task_running || (pressed && card_blocks_injected_press.load())) return false;
     portENTER_CRITICAL(&touch_spinlock);
     touch_injected = true;
     touch_injected_pressed = pressed;
