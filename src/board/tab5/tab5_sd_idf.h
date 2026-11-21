@@ -6,10 +6,11 @@
 #include <sdmmc_cmd.h>
 
 const sdmmc_card_t *Tab5SD_Card();
+bool Tab5SD_CanRetryMount();
 bool Tab5SD_MountDma();
 bool Tab5SD_MountNative();
 #endif
 
-#if defined(TAB5_SD_BENCHMARK)
+#if TAB5_SD_BENCHMARK
 bool Tab5SD_MountArduino();
 #endif

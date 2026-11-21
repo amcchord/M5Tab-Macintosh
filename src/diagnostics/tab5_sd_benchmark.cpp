@@ -1,5 +1,5 @@
 // Standalone test firmware. Each reboot starts with an unclaimed card bus.
-#if defined(TAB5_SD_BENCHMARK)
+#if TAB5_SD_BENCHMARK
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_heap_caps.h>
