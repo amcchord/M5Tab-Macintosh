@@ -123,10 +123,11 @@ static bool palette_changed = true; // protected by frame_spinlock
 
 // Dirty tile bitmap - in internal SRAM for fast access during video frame processing
 DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap of dirty tiles (read by video task)
-// Owned by the renderer. Bounds are meaningful only while the tile bit is set.
-struct DirtyRows { uint8 first, end; };
-static_assert(TILE_HEIGHT <= UINT8_MAX, "tile row bounds must fit in a byte");
-DRAM_ATTR static DirtyRows dirty_rows[TOTAL_TILES];
+// One bit per source row. Only the renderer changes these masks, and a
+// mask is meaningful only while its tile is pending publication.
+static_assert(TILE_HEIGHT < 64, "row runs need a clear sentinel above the tile");
+static constexpr uint64_t all_tile_rows = (UINT64_C(1) << TILE_HEIGHT) - 1;
+DRAM_ATTR static uint64_t dirty_rows[TOTAL_TILES];
 
 
 // Write-time dirty tracking bitmap - marked when CPU writes to framebuffer
@@ -390,22 +391,20 @@ static inline bool isTileDirty(int tile_idx)
     return (dirty_tiles[tile_idx / 32] & (1u << (tile_idx % 32))) != 0;
 }
 
-static void collectTileRows(uint32 tile, uint32 first, uint32 end)
+static void collectTileRows(uint32 tile, uint64_t rows)
 {
-    DirtyRows &rows = dirty_rows[tile];
     if (!isTileDirty(tile)) {
-        rows = {(uint8)first, (uint8)end};
+        dirty_rows[tile] = rows;
         dirty_tiles[tile / 32] |= 1u << (tile % 32);
     } else {
-        if (first < rows.first) rows.first = first;
-        if (end > rows.end) rows.end = end;
+        dirty_rows[tile] |= rows;
     }
 }
 
 static void markFullFrame()
 {
     for (int tile = 0; tile < TOTAL_TILES; ++tile)
-        collectTileRows(tile, 0, TILE_HEIGHT);
+        collectTileRows(tile, all_tile_rows);
     dirty_tile_count = TOTAL_TILES;
 }
 
@@ -509,13 +508,29 @@ static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uin
         // Acquire pairs with the producers' release fence: pixels written
         // before a flag was set are visible to the render that follows.
         const uint32 flags = __atomic_exchange_n(&video_dirty_chunks[i], 0, __ATOMIC_ACQ_REL);
-        for (int byte = 0; byte < 4; byte++) {
-            if (!((flags >> (byte * 8)) & 0xff)) continue;
-            const uint32 offset = (uint32)(i * 4 + byte) << shift;
-            markDirtyByteRange(offset, 1u << shift, frame_buffer_size,
-                               bytes_per_row, (uint32)pixels_per_byte, MAC_SCREEN_WIDTH,
-                               MAC_SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT,
-                               collectTileRows);
+        // In the advertised packed modes, each flag maps directly to one
+        // tile column in one guest row. Four adjacent flags share the row.
+        constexpr uint32 spans_per_row = MAC_SCREEN_WIDTH / VIDEO_DIRTY_SPAN_PIXELS;
+        if (spans_per_row % 4 == 0 && TILE_WIDTH == VIDEO_DIRTY_SPAN_PIXELS &&
+            bytes_per_row == (spans_per_row << shift)) {
+            const uint32 first_span = (uint32)i * 4;
+            const uint32 y = first_span / spans_per_row;
+            const uint32 tile = (y / TILE_HEIGHT) * TILES_X + first_span % spans_per_row;
+            const uint64_t row = UINT64_C(1) << (y % TILE_HEIGHT);
+            for (int byte = 0; byte < 4; ++byte)
+                if ((flags >> (byte * 8)) & 0xff) collectTileRows(tile + byte, row);
+        } else {
+            for (int byte = 0; byte < 4; ++byte) {
+                if (!((flags >> (byte * 8)) & 0xff)) continue;
+                const uint32 offset = (uint32)(i * 4 + byte) << shift;
+                markDirtyByteRange(offset, 1u << shift, frame_buffer_size,
+                                   bytes_per_row, (uint32)pixels_per_byte, MAC_SCREEN_WIDTH,
+                                   MAC_SCREEN_HEIGHT, TILE_WIDTH, TILE_HEIGHT,
+                                   [](uint32 tile, uint32 first, uint32 end) {
+                                       collectTileRows(tile, ((UINT64_C(1) << end) -
+                                                              (UINT64_C(1) << first)));
+                                   });
+            }
         }
     }
 
@@ -525,7 +540,7 @@ static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uin
         uint32 bits = __atomic_exchange_n(&write_dirty_tiles[i], 0, __ATOMIC_ACQUIRE);
         while (bits) {
             const unsigned tile = i * 32 + __builtin_ctz(bits);
-            collectTileRows(tile, 0, TILE_HEIGHT);
+            collectTileRows(tile, all_tile_rows);
             bits &= bits - 1;
         }
         count += __builtin_popcount(dirty_tiles[i]);
@@ -738,13 +753,21 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
             // which stay pending until the next frame's acquire exchange.
             if (indexed && !TouchOverlay_TileCovered(tx * w, ty * h, w, h)) {
                 // One pass from the guest frame buffer into the panel.
-                const DirtyRows rows = dirty_rows[tile];
-                const int y = ty * TILE_HEIGHT + rows.first;
-                const int height = (rows.end - rows.first) * PIXEL_SCALE;
-                const uint8 *src = src_buffer + (uint32)y * bpr;
-                bytes += w * height * sizeof(uint16);
-                ok = BoardDisplay_PushIndexedTile(tx * w, y * PIXEL_SCALE, w, height, src, bpr, bits,
-                                                  tx * TILE_WIDTH, pairs) && ok;
+                uint64_t rows = dirty_rows[tile];
+                // A one-row gap costs less to include than another rotated
+                // tile submission, particularly for alternating scan lines.
+                rows |= (rows << 1) & (rows >> 1);
+                while (rows) {
+                    const int first = __builtin_ctzll(rows);
+                    const int end = first + __builtin_ctzll(~(rows >> first));
+                    const int y = ty * TILE_HEIGHT + first;
+                    const int height = (end - first) * PIXEL_SCALE;
+                    const uint8 *src = src_buffer + (uint32)y * bpr;
+                    bytes += w * height * sizeof(uint16);
+                    ok = BoardDisplay_PushIndexedTile(tx * w, y * PIXEL_SCALE, w, height, src, bpr,
+                                                      bits, tx * TILE_WIDTH, pairs) && ok;
+                    rows &= UINT64_MAX << end;
+                }
             } else {
                 bytes += w * h * sizeof(uint16);
                 snapshotTile(src_buffer, tx, ty, snapshot, depth, bpr);

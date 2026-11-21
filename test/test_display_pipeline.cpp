@@ -285,6 +285,18 @@ static void test_pipeline()
         renderPendingFrame(local_palette);
         assert(perf_panel_bytes - before_bytes == TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
         assert_panel(panel, guest, depth, flip);
+        // Non-adjacent changes in one tile skip intervening clean bands.
+        // Rows 30-34 cross the 32-bit boundary on the ESP32-P4.
+        for (int row : {0, 2, 30, 31, 32, 34, 39}) {
+            const int address = row * current_bytes_per_row;
+            guest[address] ^= 0xff;
+            VideoMarkDirtyOffset(address);
+        }
+        const uint32 before_runs = perf_panel_bytes;
+        renderPendingFrame(local_palette);
+        // Rows 1 and 33 are the two one-row gaps included with their bands.
+        assert(perf_panel_bytes - before_runs == 9 * TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
+        assert_panel(panel, guest, depth, flip);
         // Removing an overlay invalidates its whole tile even with sparse guest damage.
         VideoMarkDirtyOffset(offset);
         VideoMarkTilesDirtyRect(0, 0, 1, 1);
@@ -324,7 +336,7 @@ static void test_pipeline()
     guest[80] ^= 0xff; VideoMarkDirtyOffset(80);
     const uint32 before_retry = perf_panel_bytes;
     cache_result = ESP_OK; renderPendingFrame(local_palette);
-    assert(perf_panel_bytes - before_retry == (TILE_HEIGHT + 1) * TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
+    assert(perf_panel_bytes - before_retry == 3 * TILE_WIDTH * PIXEL_SCALE * PIXEL_SCALE * 2);
     assert(collect() == 0);
     assert_panel(panel, guest, VDEPTH_8BIT, true);
     // Writes to the same tile after collection cannot be collapsed away.

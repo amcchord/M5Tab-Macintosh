@@ -368,17 +368,36 @@ is therefore exactly one tile column wide at every depth. The old scheme
 tracked 64-byte ranges, which is 512 pixels at 1 bpp, so a one-pixel store
 redrew large areas in exactly the mode the Graphics test uses.
 
-The renderer keeps the first and last changed guest row for each tile.
-Uncovered indexed tiles submit that band to scanout. Two writes in the same
-tile include the rows between them. Removing an overlay invalidates the
-entire touched tile and a depth or palette change invalidates the screen.
-If publication fails, the next attempt includes both the old bounds and any
-new damage. This costs two bytes of internal RAM per tile, or 360 bytes on Tab5.
+The renderer records the changed guest rows in a 64-bit mask per tile.
+Uncovered indexed tiles submit each consecutive run. A single clean row
+between runs is included to keep alternating scan lines in one submission.
+A write to the first and last rows of a 32×40 tile at 2× scale submits
+512 bytes instead of the previous 10,240. Removing an overlay invalidates
+the entire touched tile. Depth and palette changes invalidate the screen.
+Failed publication retains the row masks for the retry. The masks use
+1,440 bytes of internal RAM on Tab5, up from 360 bytes for the old bounds.
 
-In the host test, changing one row of a 32×40 tile at 2× scale submits 256
-bytes of RGB565 pixels. The former whole-tile path submitted 10,240 bytes.
-At 1× the same row needs 64 bytes. These counts describe panel framebuffer
-writes. The physical panel continues scanning at its configured rate.
+A native benchmark exercises the production renderer with a 220×30 moving
+outline and a full-screen fill for 1,000 frames at each depth. Compared with
+`82dcfe9`, the outline fell from 60,380 to 18,361 panel bytes per frame at
+both 1 and 8 bpp. On an Apple Silicon Mac, median time across three runs
+fell from 4.18 to 1.92 µs/frame at 1 bpp and from 4.11 to 2.27 at 8 bpp.
+Full-screen writes stayed at 1,843,200 bytes/frame. Their median times fell
+from 108.84 to 96.34 µs and from 113.91 to 99.86 µs respectively. All four
+final panel images had matching before/after hashes. Use the device
+procedure below to measure the impact on ESP32-P4 guest workloads.
+
+To reproduce from the project root, build the same benchmark with each
+version of `video_esp32.cpp`. For the baseline, put a copy from `82dcfe9`
+in a directory and add that directory as the first include path.
+
+```sh
+c++ -std=c++17 -O3 -pthread -DBOARD_M5STACK_TAB5=1 -Itest/display_stubs \
+  -Isrc/board -Isrc/basilisk -Isrc/basilisk/include test/bench_display_damage.cpp \
+  src/board/board_display_surface.cpp src/board/mini_gfx/mini_gfx.cpp -o /tmp/bench-display
+/tmp/bench-display
+```
+
 Every 30 seconds the serial `[VIDEO PERF]` report gives total `panel_bytes`
 submitted, including retries, and average `detect` and `render` time in
 microseconds per frame opportunity, including skips. Use a settled screen
