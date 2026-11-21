@@ -50,11 +50,13 @@ extern void SysAddSerialPrefs(void);
  *  that is freed by Sys_close().
  */
 
-extern void *Sys_open(const char *name, bool read_only, bool is_cdrom = false);
+extern void *Sys_open(const char *name, bool read_only, bool is_cdrom = false, bool startup = false);
 extern void Sys_close(void *fh);
 extern size_t Sys_read(void *fh, void *buffer, loff_t offset, size_t length);
 extern size_t Sys_write(void *fh, void *buffer, loff_t offset, size_t length);
 extern loff_t SysGetFileSize(void *fh);
+// Repair the authenticated, published System 7.5.3 starter before mounting it.
+extern void Sys_repair_hfs7_starter(const char *path);
 // Arm the first hard disk for the classic File Manager's boot-volume check.
 extern void Sys_prepare_hfs_boot(void *fh, loff_t start, uint32_t sectors);
 extern bool HfsCanDeferBootCheck(void *fh, loff_t start, uint32_t sectors);
