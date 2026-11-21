@@ -37,6 +37,10 @@
 #include "video.h"
 
 #include "board_config.h"
+#include "../firmware_version.h"
+#include "web_dashboard.h"
+#include "web_session.h"
+#include "esp_timer.h"
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -102,6 +106,9 @@ static bool s_serial_screenshot_locked = false;
 static volatile bool s_serial_capture_busy = false;
 static uint32_t s_serial_screenshot_last_activity_ms = 0;
 static portMUX_TYPE s_network_state_lock = portMUX_INITIALIZER_UNLOCKED;
+static WebSession s_web_session;
+static uint64_t s_cpu_sample_count = 0;
+static uint64_t s_cpu_sample_ms = 0;
 static int s_automation_wifi_status = WL_IDLE_STATUS;
 static bool s_automation_wifi_configured = false;
 static bool s_automation_wifi_auto_connect = false;
@@ -649,6 +656,41 @@ static void getNetworkState(int *status, char *ip, size_t ip_capacity,
     portEXIT_CRITICAL(&s_network_state_lock);
 }
 
+extern "C" void AutomationPublishCpuSample(uint64_t count)
+{
+    const uint64_t ms = esp_timer_get_time() / 1000;
+    portENTER_CRITICAL(&s_network_state_lock);
+    s_cpu_sample_ms = ms;
+    s_cpu_sample_count = count;
+    portEXIT_CRITICAL(&s_network_state_lock);
+}
+
+static void closeWebSession()
+{
+    portENTER_CRITICAL(&s_network_state_lock);
+    s_web_session.close();
+    portEXIT_CRITICAL(&s_network_state_lock);
+}
+
+static void openWebSession(bool control)
+{
+    uint8_t random[16];
+    esp_fill_random(random, sizeof(random));
+    char ip[16], token[33] = {};
+    portENTER_CRITICAL(&s_network_state_lock);
+    if (s_emulator_ready && s_automation_wifi_status == WL_CONNECTED && s_automation_http_url[0]) {
+        s_web_session.open(random, control ? WebSession::Control : WebSession::View, esp_timer_get_time());
+        memcpy(token, s_web_session.token, sizeof(token));
+        memcpy(ip, s_automation_wifi_ip, sizeof(ip));
+    }
+    portEXIT_CRITICAL(&s_network_state_lock);
+    if (!token[0]) {
+        protocolReply("@B2 ERR WEB connect_wifi_and_start_emulator\n");
+        return;
+    }
+    protocolReply("@B2 OK WEB http://%s:%u/desk#%s\n", ip, AUTOMATION_HTTP_PORT, token);
+}
+
 static void automationWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
 {
     switch (event) {
@@ -662,6 +704,7 @@ static void automationWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
         case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
         case ARDUINO_EVENT_WIFI_STA_LOST_IP:
         case ARDUINO_EVENT_WIFI_STA_STOP:
+            closeWebSession();
             s_automation_wifi_has_ip = false;
             updateNetworkState(WL_DISCONNECTED, "0.0.0.0", "");
             break;
@@ -670,52 +713,8 @@ static void automationWiFiEvent(WiFiEvent_t event, WiFiEventInfo_t info)
     }
 }
 
-static void pollAutomationHttp(void)
+static void sendHttpFrame(WiFiClient &client)
 {
-    if (!s_emulator_ready || !s_automation_wifi_has_ip) return;
-    int wifi_status = WL_IDLE_STATUS;
-    char ip[16];
-    getNetworkState(&wifi_status, ip, sizeof(ip), NULL, 0);
-    char http_url[96];
-    snprintf(http_url, sizeof(http_url), "http://%s:%u/frame/%s",
-             ip, AUTOMATION_HTTP_PORT, s_automation_http_token);
-    if (!s_automation_http_started) {
-        s_automation_http_server.begin();
-        s_automation_http_server.setNoDelay(true);
-        s_automation_http_started = true;
-        Serial.printf("[AUTOMATION] HTTP framebuffer ready at %s\n", http_url);
-    }
-    updateNetworkState(wifi_status, ip, http_url);
-
-    WiFiClient client = s_automation_http_server.accept();
-    if (!client) return;
-    client.setTimeout(AUTOMATION_HTTP_TIMEOUT_MS);
-
-    char request[AUTOMATION_HTTP_REQUEST_CAPACITY] = {};
-    size_t length = 0;
-    const uint32_t deadline = millis() + AUTOMATION_HTTP_TIMEOUT_MS;
-    while (length + 1 < sizeof(request) &&
-           (int32_t)(millis() - deadline) < 0) {
-        if (client.available() <= 0) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-        const int raw = client.read();
-        if (raw < 0) continue;
-        if (raw == '\n') break;
-        if (raw != '\r') request[length++] = (char)raw;
-    }
-
-    char expected_path[32];
-    snprintf(expected_path, sizeof(expected_path), "GET /frame/%s ",
-             s_automation_http_token);
-    if (strncmp(request, expected_path, strlen(expected_path)) != 0) {
-        client.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
-                     "Connection: close\r\n\r\n");
-        client.stop();
-        return;
-    }
-
     if (s_screenshot_mutex == NULL ||
         xSemaphoreTake(s_screenshot_mutex, 0) != pdTRUE) {
         client.print("HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\n"
@@ -746,6 +745,58 @@ static void pollAutomationHttp(void)
     client.stop();
     releaseScreenshot();
     xSemaphoreGive(s_screenshot_mutex);
+}
+
+#include "web_console_http.inc"
+
+static void pollAutomationHttp(void)
+{
+    if (!s_emulator_ready || !s_automation_wifi_has_ip) return;
+    int wifi_status = WL_IDLE_STATUS;
+    char ip[16];
+    getNetworkState(&wifi_status, ip, sizeof(ip), NULL, 0);
+    char http_url[96];
+    snprintf(http_url, sizeof(http_url), "http://%s:%u/frame/%s",
+             ip, AUTOMATION_HTTP_PORT, s_automation_http_token);
+    if (!s_automation_http_started) {
+        s_automation_http_server.begin();
+        s_automation_http_server.setNoDelay(true);
+        s_automation_http_started = true;
+        Serial.printf("[AUTOMATION] HTTP framebuffer ready at %s\n", http_url);
+    }
+    updateNetworkState(wifi_status, ip, http_url);
+
+    WiFiClient client = s_automation_http_server.accept();
+    if (!client) return;
+    client.setTimeout(AUTOMATION_HTTP_TIMEOUT_MS);
+
+    char request[AUTOMATION_HTTP_REQUEST_CAPACITY] = {};
+    size_t remaining = 4096;
+    const uint32_t deadline = millis() + 3000;
+    if (!httpLine(client, request, sizeof(request), remaining, deadline)) {
+        httpEmpty(client, "400 Bad Request");
+        client.stop();
+        return;
+    }
+    char method[8], path[96], version[12], tail;
+    if (sscanf(request, "%7s %95s %11s%c", method, path, version, &tail) == 3 &&
+        (!strcmp(version, "HTTP/1.1") || !strcmp(version, "HTTP/1.0")) &&
+        (!strcmp(path, "/desk") || !strncmp(path, "/desk/", 6))) {
+        handleWebRequest(client, method, path, remaining, deadline);
+        client.stop();
+        return;
+    }
+    char expected_path[32];
+    snprintf(expected_path, sizeof(expected_path), "GET /frame/%s ",
+             s_automation_http_token);
+    if (strncmp(request, expected_path, strlen(expected_path)) != 0) {
+        client.print("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n"
+                     "Connection: close\r\n\r\n");
+        client.stop();
+        return;
+    }
+
+    sendHttpFrame(client);
 }
 
 static void sendScreenshotChunk(uint32_t frame_id, size_t chunk)
@@ -874,6 +925,15 @@ static void processLegacyCommand(char *command)
         } else {
             protocolReply("@B2 ERR BOOT timeout_or_unavailable\n");
         }
+        return;
+    }
+    if (!strcmp(command, "WEB OPEN") || !strcmp(command, "WEB CONTROL")) {
+        openWebSession(!strcmp(command, "WEB CONTROL"));
+        return;
+    }
+    if (!strcmp(command, "WEB CLOSE")) {
+        closeWebSession();
+        protocolReply("@B2 OK WEB CLOSED\n");
         return;
     }
     if (strcmp(command, "HTTP") == 0) {
@@ -1770,6 +1830,7 @@ extern "C" bool AutomationInit(void)
 extern "C" void AutomationExit(void)
 {
     s_emulator_ready = false;
+    closeWebSession();
     automation_network_task_running = false;
     for (int i = 0; i < 100 && automation_network_task_handle != NULL; ++i) {
         vTaskDelay(pdMS_TO_TICKS(5));

@@ -1340,6 +1340,9 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("info")
+    web = subparsers.add_parser("web-open", help="issue a 30-minute Wi-Fi console link for this boot")
+    web.add_argument("--control", action="store_true", help="allow guest clicks and key taps")
+    subparsers.add_parser("web-close", help="revoke the current Wi-Fi console session")
     subparsers.add_parser("boot-status")
     get = subparsers.add_parser("boot-get", help="read current boot settings (passwords stay private)")
     get.add_argument("key", nargs="?", choices=BOOT_READ_SETTINGS)
@@ -1414,6 +1417,12 @@ def main(argv: list[str] | None = None) -> int:
                 elif action == "start": result = control.boot_start()
                 else: result = control.boot_action(action)
                 print(json.dumps(result if result is not None else {"ok": True}, indent=2))
+            elif args.command == "web-open":
+                reply = control.request("WEB CONTROL" if args.control else "WEB OPEN", "OK WEB")
+                print(reply.removeprefix("@B2 OK WEB "))
+            elif args.command == "web-close":
+                control.request("WEB CLOSE", "OK WEB CLOSED")
+                print("Web session closed.")
             elif args.command == "info":
                 print(control.info())
             elif args.command == "screenshot":

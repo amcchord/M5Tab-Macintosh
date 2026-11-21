@@ -1,10 +1,9 @@
 /*
  * board_wifi_firmware_tab5.cpp - No-op co-processor OTA on Tab5.
  *
- * The Tab5 build uses arduino-esp32's native WiFi (Arduino WiFi.setPins
- * path) rather than esp_wifi_remote, so there's no separate slave
- * firmware to OTA. The symbol is provided so call sites in shared code
- * (boot_gui.cpp) link cleanly on both boards.
+ * The stock C6 runs the Wi-Fi radio over SDIO. The P4 configures that
+ * link through Arduino WiFi.setPins(). This target does not bundle or
+ * install a C6 firmware image.
  */
 
 #include "board_wifi.h"

@@ -102,6 +102,19 @@ extern "C" void InputAutomationMouseButton(uint8_t button, bool pressed)
     }
 }
 
+// A web click is a complete gesture. Preserve any button held by USB automation.
+extern "C" bool InputAutomationTryClick(int x, int y)
+{
+    InputStateGuard guard;
+    if (automation_mouse_buttons[0]) return false;
+    InputAutomationMouseMove(x, y, false);
+    vTaskDelay(pdMS_TO_TICKS(15));
+    InputAutomationMouseButton(0, true);
+    vTaskDelay(pdMS_TO_TICKS(25));
+    InputAutomationMouseButton(0, false);
+    return true;
+}
+
 extern "C" void InputAutomationReleaseAll(void)
 {
     InputStateGuard guard;

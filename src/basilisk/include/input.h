@@ -80,6 +80,7 @@ void InputKeyUp(uint8_t mac_keycode);
  */
 void InputAutomationKey(uint8_t mac_keycode, bool pressed);
 void InputAutomationMouseMove(int x, int y, bool relative);
+bool InputAutomationTryClick(int x, int y);
 void InputAutomationMouseButton(uint8_t button, bool pressed);
 void InputAutomationReleaseAll(void);
 
