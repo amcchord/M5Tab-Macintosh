@@ -10,11 +10,15 @@
 
 **Set Up SD Card.** Connect to Wi-Fi and choose Mac OS 8.1 or System 7. Setup downloads the Macintosh ROM and the selected startup disk. Allow 1.2 GiB of free space on the card.
 
-## Download and verification
+## Download, installation and verification
 
 ![Mac OS 8.1 download showing progress and network speed](screenshots/Tab5-Starter-Download.png)
 
 **Downloading.** This Tab5 capture shows the Mac OS 8.1 download at 273.2 KiB/s. An interrupted download can resume from the bytes saved on the card.
+
+![Mac OS 8.1 installation progress at 65%](screenshots/Tab5-Installing.png)
+
+**Installing.** The original v5.4 renderer drew this illustration from a recorded Tab5 progress sample. Setup had expanded and written 687,407,104 of 1,048,576,000 bytes to `Macintosh8.dsk` (65%).
 
 ![The Tab5 verifying a startup file on the microSD card](screenshots/Tab5-Imaging.png)
 
@@ -40,6 +44,10 @@
 
 **Finder.** The Macintosh desktop after startup on the Tab5.
 
+![The Tab5 Wi-Fi console in a browser](screenshots/Tab5-Web-Console.png)
+
+**Wi-Fi console.** Open the console in a browser to view the Macintosh display, check performance or send mouse and keyboard input. [Wi-Fi console instructions](AUTOMATION.md#wi-fi-console)
+
 ![The System 7 guest disk test showing verified reads and writes](screenshots/Tab5-System7-Disk-Benchmark.png)
 
 **Guest disk test.** The benchmark writes 4 MiB to the Macintosh startup volume, reads it back, verifies every byte and removes its test file. [Four-bit SDMMC and SPI measurements](SD_STABILITY.md)
@@ -60,7 +68,7 @@ The photos above show the v4 controls on a physical Tab5. [Keyboard on the Waves
 
 ![System 7.5.3 starting up on the Tab5](screenshots/MacOS753.gif)
 
-**System 7.5.3 startup.** A recording of the physical display. [Boot video (MOV)](screenshots/MacOS753_Booting.mov)
+**System 7.5.3 startup.** A recording of the physical display. [Boot video (MOV)](https://github.com/amcchord/M5Tab-Macintosh/blob/v5.4/screenshots/MacOS753_Booting.mov)
 
 ![Flying Toasters on the Tab5 with v2.5 firmware](screenshots/Toasters2.5.gif)
 
@@ -81,6 +89,6 @@ The photos above show the v4 controls on a physical Tab5. [Keyboard on the Waves
 
 ![System 7 Today open in Internet Explorer on the Tab5](screenshots/Internet-Sys7.jpg)
 
-**Web browsing over Wi-Fi.** Internet Explorer on System 7 displaying the System 7 Today site. [Forum photo](screenshots/Internert-Forums.jpg) · [Page load video (MP4)](screenshots/LoadingAWebpage.mp4)
+**Web browsing over Wi-Fi.** Internet Explorer on System 7 displaying the System 7 Today site. [Forum photo](screenshots/Internert-Forums.jpg) · [Page load video (MP4)](https://github.com/amcchord/M5Tab-Macintosh/blob/v5.4/screenshots/LoadingAWebpage.mp4)
 
 </details>
