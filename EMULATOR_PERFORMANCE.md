@@ -398,6 +398,37 @@ c++ -std=c++17 -O3 -pthread -DBOARD_M5STACK_TAB5=1 -Itest/display_stubs \
 /tmp/bench-display
 ```
 
+For a board comparison, prepare the same disposable guest disk with the
+SimAnt Finder window at the upper left of a 640×360 desktop. Save a color
+screenshot with the window active. This trace expects empty window space
+at (92,122) through (270,158). Run the same host tool and reference image
+against both firmware revisions, using a new output directory each time.
+
+```sh
+python3 tools/finder_display_benchmark.py --port "$PORT" --disk /TestBench.dsk \
+  --reference finder.png --output baseline
+python3 tools/finder_display_benchmark.py --port "$PORT" --disk /TestBench.dsk \
+  --reference finder.png --output candidate --compare baseline/trace.json
+```
+
+The tool checks the front window and Control Strip against the reference and
+confirms all four selection edges in screenshots before and after timing.
+Each accepted device interval contains exactly 96 moves. The tool records
+clock and frame counts, checks the physical panel after release and rejects
+incomplete periods or mismatched workloads. Compare median `panel_bytes` and
+`render_us` using accepted intervals from both builds.
+
+The coordinates in `moves.txt` can also be passed to the host executable
+built above. Its Finder workload erases and draws the outline for each move
+through the production renderer. The top and bottom edges share a 40-row
+tile. Interior columns therefore contain separate horizontal bands. On the
+same host replay, the original cross-tile path (top at 145, bottom at
+168–183) submitted 20,400 bytes/move on both revisions. The same-tile path
+(top at 122, bottom at 143–158) submitted 43,160 bytes/move on the
+contiguous-row implementation and 19,280 on the sparse-row implementation,
+with identical final panel hashes at 1 and 8 bpp. These counts describe the
+synthetic writes. Mac OS also redraws its cursor and other desktop elements.
+
 Every 30 seconds the serial `[VIDEO PERF]` report gives total `panel_bytes`
 submitted, including retries, and average `detect` and `render` time in
 microseconds per frame opportunity, including skips. Use a settled screen
