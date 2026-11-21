@@ -82,13 +82,16 @@ static int esp_http_client_read(esp_http_client_handle_t,char *out,size_t wanted
     memcpy(out, image.data()+cursor, n); cursor+=n; return n;
 }
 #ifndef __APPLE__
-static size_t strlcpy(char *dst,const char *src,size_t n) { snprintf(dst,n,"%s",src); return strlen(src); }
+static size_t host_strlcpy(char *dst,const char *src,size_t n) { snprintf(dst,n,"%s",src); return strlen(src); }
+#define strlcpy host_strlcpy
 #else
 #define section(x) section("__DATA,__otatest")
 #endif
 #include "../src/basilisk/firmware_update.cpp"
 #ifdef __APPLE__
 #undef section
+#else
+#undef strlcpy
 #endif
 
 static void start(const char *test, size_t size = 9007) {
