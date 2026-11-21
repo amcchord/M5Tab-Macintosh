@@ -13,25 +13,29 @@ using BYTE = uint8_t;
 using sdspi_dev_handle_t = int;
 using esp_err_t = int;
 using FRESULT = int;
+constexpr int ESP_ERR_NO_MEM=3;
 constexpr int ESP_OK=0, ESP_ERR_INVALID_STATE=2, SDMMC_HOST_FLAG_SPI=4;
+constexpr int SDMMC_FREQ_DEFAULT = 20000, SDMMC_FREQ_HIGHSPEED = 40000;
 constexpr int SDMMC_HOST_SLOT_0=0, SDSPI_DEFAULT_HOST=1, CTRL_SYNC=0;
 constexpr int FR_OK=0, RES_OK=0, FM_FAT32=2, MALLOC_CAP_DMA=1, MALLOC_CAP_INTERNAL=2;
-struct sdmmc_host_t { int slot, flags; int (*get_real_freq)(int,int*); };
+struct sdmmc_host_t { int slot, flags; int (*get_real_freq)(int,int*); int max_freq_khz; };
 struct sdspi_device_config_t { int host_id; };
 struct sdmmc_slot_config_t {};
 struct sdmmc_card_t {
     sdmmc_host_t host;
     struct { int mfg_id, oem_id; char name[8]; int revision, serial, date; } cid;
     struct { int capacity, sector_size; } csd;
-    unsigned log_bus_width, is_mem, is_mmc;
+    unsigned log_bus_width, is_mem, is_mmc, rca;
 };
 struct MKFS_PARM { unsigned fmt, n_fat, align, au_size; };
 struct PARTITION { unsigned char pd, pt; };
 inline PARTITION VolToPart[2]={{0,0},{1,0}};
-inline struct { template<class... A> void printf(const char *, A...) {} } Serial;
+inline struct { template<class... A> void printf(const char *, A...) {} void println(const char *) {} } Serial;
 inline const char *esp_err_to_name(int){return "fixture";}
 inline unsigned serial_number=1234, media_sectors=8*1024*1024, write_calls, mkfs_calls;
-inline bool fail_read=false, restored=false;
+inline bool fail_read=false, restored=false, native_response=true;
+inline unsigned native_probes, native_releases;
+inline int native_init_error;
 inline std::map<unsigned,std::array<BYTE,512>> sectors;
 inline void put16(BYTE *p,uint16_t v){p[0]=v;p[1]=v>>8;}
 inline void put32(BYTE *p,uint32_t v){put16(p,v);put16(p+2,v>>16);}
@@ -43,13 +47,22 @@ inline uint32_t esp_rom_crc32_le(uint32_t x,const uint8_t *b,size_t n){
 inline void *heap_caps_aligned_alloc(size_t a,size_t n,int){void *p;return posix_memalign(&p,a,n)?nullptr:p;}
 inline int sdmmc_host_init(){return ESP_OK;}
 inline int sdmmc_host_init_slot(int,const sdmmc_slot_config_t *){return ESP_OK;}
-inline int sdmmc_host_deinit_slot(int){return ESP_OK;}
+inline int sdmmc_host_deinit_slot(int slot){assert(slot==SDMMC_HOST_SLOT_0);++native_releases;return ESP_OK;}
 inline int sdspi_host_init(){return ESP_OK;}
 inline int sdspi_host_init_device(const sdspi_device_config_t *,int *slot){*slot=5;return ESP_OK;}
 inline int sdspi_host_remove_device(int slot){assert(slot==5);return ESP_OK;}
 inline int spi_bus_free(int){return ESP_OK;}
 inline int sdmmc_card_init(const sdmmc_host_t *host,sdmmc_card_t *c){
+    if (!(host->flags & SDMMC_HOST_FLAG_SPI)) {
+        assert(host->max_freq_khz == SDMMC_FREQ_DEFAULT);
+        ++native_probes;
+        if (!native_response) return 1;
+    }
     c->host=*host;c->csd={(int)media_sectors,512};c->cid={3,127,"SD32G",1,(int)serial_number,1};
+    if (!(host->flags & SDMMC_HOST_FLAG_SPI)) {
+        c->rca=1;
+        if (native_init_error) return native_init_error;
+    }
     c->is_mem=1;c->log_bus_width=c->host.flags&SDMMC_HOST_FLAG_SPI?0:2;return ESP_OK;
 }
 inline int sdmmc_read_sectors(sdmmc_card_t *,BYTE *p,unsigned n,unsigned count){

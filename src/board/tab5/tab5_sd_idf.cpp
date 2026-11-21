@@ -44,8 +44,8 @@ esp_err_t Tab5SD_NativeConfig(sdmmc_host_t &host, sdmmc_slot_config_t &slot)
 
     sd_pwr_ctrl_ldo_config_t ldo = {};
     ldo.ldo_chan_id = 4;
-    // Keep SD I/O at 3.3 V for the lifetime of the boot, including a
-    // fallback to SPI. Releasing channel 4 here would disable the rail.
+    // LDO4 powers the P4 SD I/O pads. The socket VDD is on SOC_3.3V.
+    // Keep the pad supply at 3.3 V for native mode and SPI.
     static sd_pwr_ctrl_handle_t supply;
     esp_err_t err = ESP_OK;
     if (!supply) err = sd_pwr_ctrl_new_on_chip_ldo(&ldo, &supply);
@@ -140,13 +140,14 @@ bool Tab5SD_MountDma()
 #endif
 
 #if TAB5_SD_NATIVE || TAB5_SD_BENCHMARK
-bool Tab5SD_MountNative()
+bool Tab5SD_MountNative(int max_freq_khz)
 {
     sdmmc_host_t host;
     sdmmc_slot_config_t slot;
     esp_err_t err = Tab5SD_NativeConfig(host, slot);
     sdmmc_card_t *card = nullptr;
     if (err == ESP_OK) {
+        host.max_freq_khz = max_freq_khz;
         err = esp_vfs_fat_sdmmc_mount(BOARD_SD_MOUNT_POINT, &host, &slot, &mount_options, &card);
     }
     return finishMount(err, "SDMMC slot 0", card);
