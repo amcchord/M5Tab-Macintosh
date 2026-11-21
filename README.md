@@ -46,19 +46,13 @@ Both variants share the BasiliskII core, video pipeline, USB HID handling, and b
 
 ---
 
-## v5.4 beta 2 — Disk images, indexed color and USB Disk
+## v5.4 beta 3
 
-Opening an HFS disk image now preserves Finder information and volume flags.
-The display driver uses the same initial indexed colors for guest queries and
-panel output. Sparse redraws update only the affected tile rows. USB Disk
-batches adjacent SD sectors, and the AOT profiler reports hot instructions
-that were omitted from the generated code.
+Insert a spare microSD card and start the Tab5. **Set Up SD Card** downloads the Quadra 650 ROM and the selected Macintosh system disk over Wi-Fi, verifies both files on the card, and offers to start the Mac. Tab5 Startup Settings also supports formatting a card as FAT32.
 
-The [release notes](RELEASE_NOTES.md) list the tested hardware and firmware
-downloads. The [Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md) includes
-procedures for reproducing the device checks and benchmarks.
-[Download v5.4 beta 2](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.2).
-[Stable release v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3).
+This release adds automatic startup recovery for supported classic HFS disks, faster Tab5 SD access, and a local Wi-Fi console with guest screenshots, speed measurements, and optional mouse and keyboard control. A two-slot installation can receive firmware updates over Wi-Fi.
+
+[Download v5.4 beta 3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Release notes and supported hardware](RELEASE_NOTES.md) · [Stable v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
 
 ## v5.3 — Battery, Sleep and Brightness
 
