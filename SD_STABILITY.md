@@ -66,7 +66,7 @@ Build `pio run -e esp32p4_tab5_sd_benchmark` for the pre-v3 Tab5. This standalon
 
 Use the same card and Wi-Fi state to compare modes. Wait for the command to finish before resetting. A card initialized in SPI mode generally stays in that mode until its supply is removed. To test native mode after SPI, restart into the diagnostic, reseat the card while it is idle, then issue `MOUNT NATIVE` first. The card needs a FAT32 filesystem.
 
-Tab5 release builds try four-bit SDMMC first, SPI DMA second, and Arduino SPI last. The next driver runs after the previous attempt releases the bus and mount point. USB Disk uses the geometry and drive number of the mounted card. The card uses SDMMC slot 0 and the Wi-Fi coprocessor uses slot 1. [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
+Tab5 release builds try four-bit SDMMC first and fall back to the 10 MHz Arduino SPI driver. SPI DMA remains available for diagnostic comparisons. The next driver runs after the previous attempt releases the bus and mount point. USB Disk uses the geometry and drive number of the mounted card. The card uses SDMMC slot 0 and the Wi-Fi coprocessor uses slot 1. [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
 
 
 ### Measured effect of FAT cluster size
