@@ -65,7 +65,7 @@ struct SettingsView {
     MediaColumn columns[3];
     int ram_mb;
     bool sound, boot_from_cd, rotate180;
-    bool usb_available;
+    bool usb_available, usb_waits_for_update;
     bool needs_setup;
     int wifi_bars;                 /* 0..4 */
     const char *wifi_status;       /* "Connected", "Not connected", ... */

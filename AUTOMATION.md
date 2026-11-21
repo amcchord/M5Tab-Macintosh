@@ -261,6 +261,8 @@ python3 tools/mac_control.py touch up                    # ...and release
   as `settings`, `starter`, `wifi`, `keyboard`, `usb` or `firmware`. Starter setup
   exposes `system8`, `system7`, `wifi`, `settings` and `action` touch targets.
 
+On a fresh card, `boot-status` reports `preboot starter` and `boot-starter status` reports `idle`. Use `boot-enter` to return to Startup Settings for serial Wi-Fi configuration. An active installation must finish or be cancelled before leaving setup.
+
 On the starter screen, `boot-starter 8` or `boot-starter 7` starts installation
 after Wi-Fi is connected. `boot-starter status` returns the stage message,
 completed bytes, and total bytes for that stage. `boot-starter cancel` requests
@@ -273,8 +275,7 @@ populated card. Opening the screen leaves the card contents intact.
 screen this way and writes one PNG per step (plus `-panel.png` readbacks with
 `--panel`) and `manifest.json` with the boot status, `PANEL VERIFY` result and
 timings. It changes only in-memory selections and reloads the saved settings
-at the end. With `--usb` it also visits USB Disk mode, which unmounts the SD
-card while shown; on the Tab5, Done restarts the device (to release the USB
+at the end. With `--usb` it also visits USB Disk mode, which gives the host exclusive access to SD sectors; on the Tab5, Done restarts the device (to release the USB
 port) and returns to the settings screen. It exits with status 2 if any step's
 panel does not match its screen.
 

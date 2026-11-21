@@ -32,6 +32,7 @@
  */
 
 #include <Arduino.h>
+#include <atomic>
 #include "usb_msc.h"
 #include "boot_gui.h"
 #include "board_sd.h"
@@ -60,8 +61,8 @@
 #include "usb_disk_media.h"
 
 static USBMSC            s_msc;
-static volatile bool     s_exit_requested = false;
-static volatile bool     s_host_mounted   = false;
+static std::atomic<bool> s_exit_requested{false};
+static std::atomic<bool> s_host_mounted{false};
 static bool              s_msc_up         = false;
 static bool              s_usb_started    = false;
 
@@ -147,6 +148,22 @@ extern "C" bool UsbMsc_Enter(const char **out_error_msg)
     Serial.printf("[USB_MSC] SD geometry: %u sectors x %u bytes\n",
                   (unsigned)n_sec, (unsigned)sec_size);
 
+    s_msc.vendorID("M5Tab");
+    s_msc.productID("Macintosh-SD");
+    s_msc.productRevision("1.0");
+    s_msc.onRead(msc_on_read);
+    s_msc.onWrite(msc_on_write);
+    s_msc.onStartStop(msc_on_start_stop);
+    s_msc.isWritable(true);
+
+    if (!s_msc.begin(n_sec, sec_size)) {
+        if (out_error_msg) *out_error_msg = "USBMSC.begin() failed";
+        s_msc.end();
+        return false;
+    }
+    s_msc.mediaPresent(true);
+    s_msc_up = true;
+
 #if defined(BOARD_M5STACK_TAB5)
     // Tab5 path: USB-A jack is wired to OTG-HS (where USB.begin() lands).
     // Turn off Tab5's own 5V output to the USB-A load switch so the
@@ -156,21 +173,6 @@ extern "C" bool UsbMsc_Enter(const char **out_error_msg)
     M5.Power.setExtOutput(false, m5::ext_port_mask_t::ext_USB);
 #endif
 
-    s_msc.vendorID("M5Tab");
-    s_msc.productID("Macintosh-SD");
-    s_msc.productRevision("1.0");
-    s_msc.onRead(msc_on_read);
-    s_msc.onWrite(msc_on_write);
-    s_msc.onStartStop(msc_on_start_stop);
-    s_msc.mediaPresent(true);
-    s_msc.isWritable(true);
-
-    if (!s_msc.begin(n_sec, sec_size)) {
-        if (out_error_msg) *out_error_msg = "USBMSC.begin() failed";
-        return false;
-    }
-    s_msc_up = true;
-
     if (!s_usb_started) {
         USB.productName("Macintosh-SD");
         USB.manufacturerName("M5Tab");
@@ -179,6 +181,9 @@ extern "C" bool UsbMsc_Enter(const char **out_error_msg)
             if (out_error_msg) *out_error_msg = "USB.begin() failed";
             s_msc.end();
             s_msc_up = false;
+#if defined(BOARD_M5STACK_TAB5)
+            M5.Power.setExtOutput(true, m5::ext_port_mask_t::ext_USB);
+#endif
             return false;
         }
         s_usb_started = true;

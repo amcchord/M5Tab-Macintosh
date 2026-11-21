@@ -56,6 +56,7 @@ class PrebootUITests(unittest.TestCase):
     def test_tab5_screens(self):
         names = self.render("BOARD_M5STACK_TAB5")
         self.assertIn("settings", names)
+        self.assertIn("settings-firmware-staged", names)
         self.assertIn("keyboard-unflipped", names)
 
     def test_waveshare_screens(self):
