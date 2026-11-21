@@ -176,7 +176,8 @@ void DiskInit(void)
 			read_only = true;
 			str++;
 		}
-		void *fh = Sys_open(str, read_only);
+		bool startup = drives.empty() && !PrefsFindInt32("bootdriver");
+		void *fh = Sys_open(str, read_only, false, startup);
 		if (fh) {
 			DISK_DEBUG("  Opened successfully, size=%lld bytes", (long long)SysGetFileSize(fh));
 			drives.push_back(disk_drive_info(fh, SysIsReadOnly(fh)));
