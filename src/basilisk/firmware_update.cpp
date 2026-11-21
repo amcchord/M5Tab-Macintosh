@@ -14,6 +14,10 @@
 #include <lwip/inet.h>
 #include <lwip/sockets.h>
 #include <errno.h>
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+#include <new>
+#include "ota_http_lan.h"
+#endif
 
 namespace {
 constexpr uint32_t SlotSize = 0x600000;
@@ -37,13 +41,18 @@ struct Transfer {
     enum Phase { Idle, Connect, Headers, Download, Verify, Ready, Failed } phase = Idle;
     const char *reason = "none";
     const esp_partition_t *target = nullptr;
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+    OtaHttpLan *http = nullptr;
+    sockaddr_in peer = {};
+#else
     esp_http_client_handle_t http = nullptr;
+    char url[128] = {};
+#endif
     esp_ota_handle_t writer = 0;
     mbedtls_sha256_context hash = {};
     uint32_t size = 0, received = 0, verified = 0, started = 0, last_data = 0;
     size_t buffered = 0;
     uint8_t expected[32] = {};
-    char url[128] = {};
     // Allocated only during updates. Standard single-slot installations never use it.
     uint8_t *buffer = nullptr;
 } t;
@@ -67,7 +76,11 @@ const esp_partition_t *other_slot() {
 
 void close_http() {
     if (t.http) {
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+        delete t.http;
+#else
         esp_http_client_cleanup(t.http);
+#endif
         t.http = nullptr;
     }
 }
@@ -102,7 +115,7 @@ bool compatible(const uint8_t *data) {
            (candidate.sdk_min_revision >= 300) == (chip.revision >= 300);
 }
 
-bool valid_url(const char *s) {
+bool parse_url(const char *s, sockaddr_in &peer) {
     // A specific LAN IPv4 endpoint and a fixed resource; no credentials,
     // redirects, DNS or URL reinterpretation by a second parser.
     char ip[16] = {};
@@ -110,8 +123,9 @@ bool valid_url(const char *s) {
     int used = 0;
     if (sscanf(s, "http://%15[0-9.]:%5u/firmware.bin%n", ip, &port, &used) != 2 ||
         !used || s[used] || !port || port > 65535) return false;
-    in_addr addr;
-    return inet_pton(AF_INET, ip, &addr) == 1;
+    peer.sin_family = AF_INET;
+    peer.sin_port = htons(port);
+    return inet_pton(AF_INET, ip, &peer.sin_addr) == 1;
 }
 
 int nibble(char c) {
@@ -166,7 +180,8 @@ String FirmwareUpdateStart(char *args) {
         return "ERR BOOT invalid_size";
     char *digest = end + 1;
     char *url = strchr(digest, ' ');
-    if (!url || url - digest != 64 || !valid_url(url + 1)) return "ERR BOOT invalid_update_request";
+    sockaddr_in peer = {};
+    if (!url || url - digest != 64 || !parse_url(url + 1, peer)) return "ERR BOOT invalid_update_request";
     uint8_t expected[32];
     for (unsigned i = 0; i < sizeof(expected); ++i) {
         int hi = nibble(digest[i * 2]), lo = nibble(digest[i * 2 + 1]);
@@ -181,7 +196,11 @@ String FirmwareUpdateStart(char *args) {
     t.buffered = 0;
     t.started = t.last_data = millis();
     memcpy(t.expected, expected, sizeof(expected));
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+    t.peer = peer;
+#else
     strlcpy(t.url, url + 1, sizeof(t.url));
+#endif
     mbedtls_sha256_init(&t.hash);
     t.reason = "none";
     t.phase = Transfer::Connect;
@@ -192,6 +211,16 @@ void FirmwareUpdatePoll() {
     if (!FirmwareUpdateBusy()) return;
     if (millis() - t.started > 15u * 60u * 1000u) return finish(Transfer::Failed, "timeout");
     if (t.phase == Transfer::Connect) {
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+        if (millis() - t.started >= 3000) return finish(Transfer::Failed, "connect");
+        if (!t.http) {
+            t.http = new (std::nothrow) OtaHttpLan;
+            if (!t.http || !t.http->open(t.peer)) return finish(Transfer::Failed, "connect");
+        }
+        auto result = t.http->sendRequest();
+        if (result == OtaHttpLan::Result::Pending) return;
+        if (result == OtaHttpLan::Result::Error) return finish(Transfer::Failed, "connect");
+#else
         esp_http_client_config_t config = {};
         config.url = t.url;
         config.timeout_ms = 3000;
@@ -200,16 +229,23 @@ void FirmwareUpdatePoll() {
         if (!t.http || esp_http_client_open(t.http, 0) != ESP_OK) return finish(Transfer::Failed, "connect");
         if (esp_http_client_set_timeout_ms(t.http, ReadTimeout) != ESP_OK)
             return finish(Transfer::Failed, "read_timeout_setup");
+#endif
         t.last_data = millis();
         t.phase = Transfer::Headers;
         return;
     }
     if (t.phase == Transfer::Headers) {
         if (millis() - t.last_data >= IdleTimeout) return finish(Transfer::Failed, "header_timeout");
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 5, 4)
+        auto result = t.http->headers(t.size);
+        if (result == OtaHttpLan::Result::Pending) return;
+        if (result == OtaHttpLan::Result::Error) return finish(Transfer::Failed, "http_headers");
+#else
         const int64_t length = esp_http_client_fetch_headers(t.http);
         if (length == -ESP_ERR_HTTP_EAGAIN) return;
         if (length != t.size || esp_http_client_get_status_code(t.http) != 200 ||
             esp_http_client_is_chunked_response(t.http)) return finish(Transfer::Failed, "http_headers");
+#endif
         t.last_data = millis();
         t.phase = Transfer::Download;
         return;
@@ -229,22 +265,11 @@ void FirmwareUpdatePoll() {
         need = std::min(need, static_cast<size_t>(std::max(1, queued)));
         int n = esp_http_client_read(t.http, out, need);
 #else
-        // The legacy SDK has no public socket accessor. A single-byte request
-        // cannot block across several transport reads. Drain a bounded batch
-        // while bytes are arriving, then yield for status and cancellation.
-        const uint32_t start = millis();
-        int n = 0;
-        while (size_t(n) < need) {
-            int got = esp_http_client_read(t.http, out + n, 1);
-            if (got != 1) {
-                if (!n) n = got;
-                break;
-            }
-            ++n;
-            if (millis() - start >= 8) break;
-        }
+        // The socket is nonblocking. Return partial data immediately and
+        // leave room for serial status and cancellation between flash chunks.
+        int n = t.http->read(out, need);
 #endif
-        if (n == -ESP_ERR_HTTP_EAGAIN || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)))
+        if (n == -ESP_ERR_HTTP_EAGAIN || (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)))
             return;
         if (n <= 0 || static_cast<size_t>(n) > need)
             return finish(Transfer::Failed, n == 0 ? "short_read" : "read_error");

@@ -2,6 +2,8 @@
 // byte-for-byte inactive flash slot. The SHA-256 implementation is real.
 #include <algorithm>
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/select.h>
 #include <cassert>
 #include <cerrno>
 #include <cstdint>
@@ -75,10 +77,7 @@ static int lwip_ioctl(int fd,int,int *avail) { assert(fd==3); *avail=(calls%7 ==
 #endif
 static int esp_http_client_read(esp_http_client_handle_t,char *out,size_t wanted) {
     ++calls;
-#if TEST_IDF_PATCH == 1
-    assert(wanted == 1);
-    tick += !strcmp(mode, "trickle") ? 150 : 1;
-#endif
+
     if (!strcmp(mode,"idle") || calls%7 == 3) return -ESP_ERR_HTTP_EAGAIN;
     if (calls%7 == 4) { errno = EAGAIN; return -1; }
     if (!strcmp(mode,"eof") && cursor >= 4800) return 0;
@@ -87,6 +86,43 @@ static int esp_http_client_read(esp_http_client_handle_t,char *out,size_t wanted
     assert(n);
     memcpy(out, image.data()+cursor, n); cursor+=n; return n;
 }
+#if TEST_IDF_PATCH < 4
+static std::string request_bytes, raw_headers;
+static size_t header_offset;
+static int lwip_socket(int, int, int) { request_bytes.clear(); header_offset=0; return 3; }
+static int lwip_fcntl(int fd, int cmd, int flags) { assert(fd==3 && cmd==F_SETFL && flags==O_NONBLOCK); return 0; }
+static int lwip_connect(int, const sockaddr *, socklen_t) { errno=EINPROGRESS; return -1; }
+static int lwip_select(int, fd_set *, fd_set *, fd_set *, timeval *timeout) {
+    assert(timeout && !timeout->tv_sec && !timeout->tv_usec);
+    return strcmp(mode,"connect_timeout")!=0;
+}
+static int lwip_getsockopt(int,int,int,void *data,socklen_t *) { *static_cast<int*>(data)=0; return 0; }
+static int lwip_send(int,const void *data,size_t size,int) {
+    size=std::min(size_t(17),size);
+    request_bytes.append(static_cast<const char *>(data),size);
+    return size;
+}
+static int lwip_close(int) { return 0; }
+static int lwip_recv(int, void *out, size_t size, int) {
+    if (!headers++) { errno=EAGAIN; return -1; }
+    if (!strcmp(mode,"no_headers")) { errno=EAGAIN; return -1; }
+    if (header_offset < raw_headers.size()) {
+        const size_t count=std::min({size,raw_headers.size()-header_offset,size_t(31)});
+        memcpy(out,raw_headers.data()+header_offset,count);
+        header_offset+=count;
+        if (header_offset==raw_headers.size() && !strcmp(mode,"normal")) {
+            // Some body bytes arrived in the same packet as the last header.
+            memcpy(static_cast<char *>(out)+count,image.data(),9);
+            cursor=9;
+            return count+9;
+        }
+        return count;
+    }
+    int n=esp_http_client_read(nullptr, static_cast<char *>(out),size);
+    if (n==-ESP_ERR_HTTP_EAGAIN) { errno=EAGAIN; return -1; }
+    return n;
+}
+#endif
 #ifndef __APPLE__
 static size_t host_strlcpy(char *dst,const char *src,size_t n) { snprintf(dst,n,"%s",src); return strlen(src); }
 #define strlcpy host_strlcpy
@@ -102,6 +138,18 @@ static size_t host_strlcpy(char *dst,const char *src,size_t n) { snprintf(dst,n,
 
 static void start(const char *test, size_t size = 9007) {
     mode=test; calls=headers=begins=writes=aborted=0; cursor=0; boot=&a; flash.clear();
+#if TEST_IDF_PATCH < 4
+    std::string length=std::to_string(size);
+    raw_headers="HTTP/1.0 200 OK\r\nContent-Length: "+length+"\r\n\r\n";
+    if (!strcmp(test,"length")) raw_headers="HTTP/1.0 200 OK\r\nContent-Length: 1\r\n\r\n";
+    if (!strcmp(test,"duplicate")) raw_headers.insert(raw_headers.size()-2,"Content-Length: "+length+"\r\n");
+    if (!strcmp(test,"chunked")) raw_headers.insert(raw_headers.size()-2,"Transfer-Encoding: chunked\r\n");
+    if (!strcmp(test,"bad_length")) raw_headers.replace(raw_headers.find(length),length.size(),"9x");
+    if (!strcmp(test,"redirect")) raw_headers.replace(9,3,"302");
+    if (!strcmp(test,"oversize")) raw_headers="HTTP/1.0 200 OK\r\nX-Huge: "+std::string(3000,'x')+"\r\n\r\n";
+    if (!strcmp(test,"missing")) raw_headers="HTTP/1.0 200 OK\r\n\r\n";
+    if (!strcmp(test,"bare_lf")) raw_headers.insert(raw_headers.find("Content-Length:"),"Fake: ok\nOuch\r\n");
+#endif
     image.resize(size);
     for (size_t i=0; i<size; ++i) image[i]=i*17+3;
     esp_image_header_t header{ESP_IMAGE_HEADER_MAGIC,1,ESP_CHIP_ID_ESP32P4,0,0};
@@ -121,13 +169,19 @@ static void run(unsigned step_ms=10) {
     while (FirmwareUpdateBusy()) {
         const unsigned before=calls;
         FirmwareUpdatePoll();
-        // The fallback spends at most 8 ms draining available bytes. The
-        // newer socket API returns after one bounded read.
-        assert(calls-before <= (TEST_IDF_PATCH == 1 ? 8 : 1));
+        // Each poll makes at most one nonblocking legacy body receive.
+        assert(calls-before <= 1);
         tick+=step_ms;
     }
 }
 int main() {
+#if TEST_IDF_PATCH < 4
+    for (auto test : {"chunked","duplicate","missing","bad_length","oversize","redirect","bare_lf","connect_timeout"}) {
+        start(test); run();
+        assert(t.phase==Transfer::Failed && boot==&a && !begins);
+        assert(!strcmp(t.reason,!strcmp(test,"connect_timeout") ? "connect" : "http_headers"));
+    }
+#endif
     for (size_t size : {size_t(9007), DescriptorOffset+sizeof(board_tag)}) {
         start("normal",size); run();
         assert(FirmwareUpdateReady() && boot==&b && flash==image && t.verified==size);
