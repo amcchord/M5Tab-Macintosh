@@ -133,8 +133,9 @@ extern "C" bool BoardSD_Init(void)
 #endif
 #if TAB5_SD_NATIVE
     if (Tab5SD_MountNative()) return true;
-#elif TAB5_SD_DMA
-    if (Tab5SD_MountDma()) return true;
+#endif
+#if TAB5_SD_DMA
+    if (Tab5SD_CanRetryMount() && Tab5SD_MountDma()) return true;
 #endif
 #if TAB5_SD_IDF
     if (!Tab5SD_CanRetryMount()) return false;
