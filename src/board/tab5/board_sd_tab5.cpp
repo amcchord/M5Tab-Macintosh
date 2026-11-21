@@ -3,6 +3,7 @@
 #include "board_config.h"
 
 #include "tab5_sd_idf.h"
+#include "tab5_sd_host.h"
 
 #include <Arduino.h>
 #include <SPI.h>
@@ -126,10 +127,10 @@ extern "C" uint64_t BoardSD_CardSizeMB(void)
 
 extern "C" bool BoardSD_Init(void)
 {
+    if (!Tab5SD_CanRetryMount()) return false;
     if (s_mounted) return true;
 #if TAB5_SD_IDF
     if (Tab5SD_Card()) return true;
-    if (!Tab5SD_CanRetryMount()) return false;
 #endif
 #if TAB5_SD_NATIVE
     if (Tab5SD_MountNative()) return true;
@@ -149,3 +150,42 @@ bool Tab5SD_MountArduino()
     return mountArduinoSpi();
 }
 #endif
+
+Tab5SdMode Tab5SD_MountedMode()
+{
+#if TAB5_SD_IDF
+    if (const auto *card = Tab5SD_Card())
+        return card->host.flags & SDMMC_HOST_FLAG_SPI ? Tab5SdMode::DmaSpi : Tab5SdMode::Native;
+#endif
+    return s_mounted ? Tab5SdMode::ArduinoSpi : Tab5SdMode::None;
+}
+
+bool Tab5SD_Unmount()
+{
+    if (!Tab5SD_CanRetryMount()) return false;
+#if TAB5_SD_IDF
+    if (Tab5SD_Card()) return Tab5SD_UnmountIdf();
+#endif
+    if (s_mounted) {
+        SD.end();
+        SPI.end();
+        s_mounted = false;
+        s_size_mb = 0;
+    }
+    return true;
+}
+
+bool Tab5SD_Restore(Tab5SdMode mode)
+{
+    switch (mode) {
+#if TAB5_SD_NATIVE || TAB5_SD_BENCHMARK
+        case Tab5SdMode::Native: return Tab5SD_MountNative();
+#endif
+#if TAB5_SD_DMA || TAB5_SD_BENCHMARK
+        case Tab5SdMode::DmaSpi: return Tab5SD_MountDma();
+#endif
+        case Tab5SdMode::ArduinoSpi: return mountArduinoSpi();
+        case Tab5SdMode::None: return BoardSD_Init();
+        default: return false;
+    }
+}
