@@ -28,6 +28,7 @@
 #include <freertos/semphr.h>
 
 #include "boot_gui.h"
+#include "firmware_update.h"
 #include "boot_control_values.h"
 #include "board.h"
 #include "board_config.h"
@@ -975,6 +976,17 @@ static void runSettingsScreen(void)
 
         while (next == kStay) {
             BootGUI_ControlPoll();
+            if (BootGUI_RestartPending()) BootGUI_Restart();
+            if (FirmwareUpdateBusy()) {
+                UiTouch ignored;
+                pollUiTouch(&ignored);
+                pressed = Screens::kNoControl;
+                inside = false;
+                scroll_column = -1;
+                FirmwareUpdatePoll();
+                delay(1);
+                continue;
+            }
             if (control_boot_requested) break;
 
             UiTouch t;
@@ -1631,6 +1643,8 @@ static String controlExecute(char *command)
         return String("OK BOOT STATUS ") + control_phase + " " + control_screen +
             " " + (control_restart_at ? "1" : "0");
     }
+    if (!strcmp(command, "UPDATE STATUS")) return FirmwareUpdateStatus();
+    if (FirmwareUpdateBusy()) return "ERR BOOT update_busy";
     if (!strcmp(command, "ENTER")) {
         if (!strcmp(control_screen, "usb")) return "ERR BOOT usb_disk_active";
         if (!strcmp(control_phase, "preboot")) {
@@ -1667,6 +1681,13 @@ static String controlExecute(char *command)
     if (strcmp(control_phase, "preboot")) return "ERR BOOT enter_preboot_first";
     if (control_restart_at || control_boot_requested) return "ERR BOOT transition_pending";
     if (strcmp(control_screen, "settings")) return "ERR BOOT settings_screen_required";
+    if (!strncmp(command, "UPDATE START ", 13))
+        return FirmwareUpdateStart(command + 13);
+    if (!strcmp(command, "UPDATE REBOOT")) {
+        if (!FirmwareUpdateReady()) return "ERR BOOT no_verified_update";
+        control_restart_at = millis() + 1200;
+        return "OK BOOT UPDATE REBOOT";
+    }
     if (!strncmp(command, "SET ", 4)) {
         char *key = command + 4;
         char *hex = strchr(key, ' ');
