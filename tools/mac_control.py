@@ -518,6 +518,39 @@ class MacControl:
                 return result
         return result
 
+    def boot_card(self, action: str, token: str | None = None, confirm: str | None = None) -> dict[str, Any]:
+        def valid_hex(value, length):
+            return value is not None and len(value) == length and all(c in "0123456789abcdefABCDEF" for c in value)
+
+        if action not in {"status", "show", "retry", "back", "cancel", "arm", "erase"}:
+            raise ControlError("unknown SD card action")
+        if action in ("arm", "erase") and not valid_hex(token, 32):
+            raise ControlError("use the card token reported by boot-card status")
+        if action == "erase" and not valid_hex(confirm, 8):
+            raise ControlError("use --confirm and the challenge returned by boot-card arm")
+        if (token is not None and action not in ("arm", "erase")) or (confirm is not None and action != "erase"):
+            raise ControlError("unexpected SD card argument")
+        cmd = " ".join(part for part in ("CARD", action.upper(), token, confirm) if part is not None)
+        fields = self._boot_request(cmd, "CARD").split()
+        if action == "arm":
+            if len(fields) != 7 or fields[4:6] != ["ARMED", token] or not valid_hex(fields[6], 8):
+                raise ControlError("invalid card confirmation response")
+            return {"token": token, "challenge": fields[6]}
+        if action != "status":
+            return {"ok": True}
+        if fields[4:5] != ["STATUS"]:
+            raise ControlError("invalid SD card status")
+        try:
+            result = dict(v.split("=", 1) for v in fields[5:])
+            for key in ("mounted", "format", "bytes", "volume_bytes", "clock_khz", "bus_width", "cluster_bytes",
+                        "partition_lba", "partition_type"):
+                result[key] = int(result[key])
+            for key in ("identity", "layout", "driver", "message"):
+                result[key] = self._boot_decode(result[key])
+            return result
+        except (KeyError, ValueError) as error:
+            raise ControlError("incomplete SD card status") from error
+
     def boot_starter(self, action: str) -> dict[str, Any]:
         actions = {"show": "SHOW", "7": "7", "8": "8", "cancel": "CANCEL", "status": "STATUS"}
         if action not in actions:
@@ -1359,6 +1392,10 @@ def build_parser() -> argparse.ArgumentParser:
     web.add_argument("--control", action="store_true", help="allow guest clicks and key taps")
     subparsers.add_parser("web-close", help="revoke the current Wi-Fi console session")
     subparsers.add_parser("boot-status")
+    card = subparsers.add_parser("boot-card", help="inspect, retry or explicitly erase an SD card in Startup Settings")
+    card.add_argument("action", choices=("status", "show", "retry", "back", "cancel", "arm", "erase"))
+    card.add_argument("token", nargs="?", help="card token returned by status")
+    card.add_argument("--confirm", help="one-time erase challenge from arm")
     starter = subparsers.add_parser("boot-starter", help="set up the startup files on a FAT32 card")
     starter.add_argument("action", choices=("show", "7", "8", "status", "cancel"))
     get = subparsers.add_parser("boot-get", help="read current boot settings (passwords stay private)")
@@ -1426,6 +1463,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command.startswith("boot-"):
                 action = args.command[5:]
                 if action == "status": result = control.boot_status()
+                elif action == "card": result = control.boot_card(args.action, args.token, args.confirm)
                 elif action == "starter": result = control.boot_starter(args.action)
                 elif action == "hit": result = control.boot_hit(args.name)
                 elif action == "get": result = control.boot_get(args.key)

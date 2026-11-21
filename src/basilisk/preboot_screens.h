@@ -46,7 +46,7 @@ enum SettingsControl {
     kDiskList, kCDList, kFolderList,
     kRamFirst, kRamLast = kRamFirst + 3,   /* one radio per kBootRamChoicesMB entry */
     kSoundBox, kBootCDBox, kRotateBox,
-    kWiFiButton, kUsbButton, kStartButton,
+    kWiFiButton, kUsbButton, kStartButton, kSDCardButton,
     kSettingsControlCount
 };
 
@@ -65,7 +65,7 @@ struct SettingsView {
     MediaColumn columns[3];
     int ram_mb;
     bool sound, boot_from_cd, rotate180;
-    bool usb_available, usb_waits_for_update;
+    bool usb_available, usb_waits_for_update, card_available;
     bool needs_setup;
     int wifi_bars;                 /* 0..4 */
     const char *wifi_status;       /* "Connected", "Not connected", ... */
@@ -85,6 +85,21 @@ SettingsLayout LayoutSettings(int width, int height, bool usb_available);
 void PaintSettings(const SettingsLayout &layout, const SettingsView &view);
 /* Control under a point (lists included), or kNoControl. */
 int SettingsControlAt(const SettingsLayout &layout, int x, int y);
+
+/* ---- SD card recovery -------------------------------------------------- */
+
+enum CardControl { kCardBack, kCardRetry, kCardReview, kCardErase, kCardCount };
+enum class CardPage { Inspect, Confirm, Formatting, Complete };
+struct CardView {
+    CardPage page;
+    const char *detail, *identity, *message;
+    bool mounted, can_format;
+    int pressed;
+};
+struct CardLayout { Rect window, detail, identity, message, controls[kCardCount]; };
+CardLayout LayoutCard(int width, int height);
+void PaintCard(const CardLayout &layout, const CardView &view);
+int CardControlAt(const CardLayout &layout, const CardView &view, int x, int y);
 
 /* ---- SD card setup ----------------------------------------------------- */
 

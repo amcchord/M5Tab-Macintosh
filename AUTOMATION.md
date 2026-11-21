@@ -261,6 +261,10 @@ python3 tools/mac_control.py touch up                    # ...and release
   as `settings`, `starter`, `wifi`, `keyboard`, `usb` or `firmware`. Starter setup
   exposes `system8`, `system7`, `wifi`, `settings` and `action` touch targets.
 
+If the Tab5 cannot mount the card, `boot-status` reports `preboot card`. On a mounted card, enter Startup Settings and run `boot-card show`. Then use `boot-card status` to read the card identity, card and volume capacities, layout, and token. `boot-card retry` retries mounting or refreshes the inspection. Each inspection replaces the token.
+
+To erase the entire card, run `boot-card arm TOKEN`, check the identity and capacity, then run `boot-card erase TOKEN --confirm CHALLENGE` with the challenge returned by the first command. `boot-card cancel` dismisses a pending confirmation. `boot-card status` reports progress while formatting. A successful format restarts the board into blank-card setup. On the touchscreen, choose **Format…** and then **Erase Card**. The serial `touch` command cannot press the final erase button. Wi-Fi console sessions cannot issue card commands.
+
 On a fresh card, `boot-status` reports `preboot starter` and `boot-starter status` reports `idle`. Use `boot-enter` to return to Startup Settings for serial Wi-Fi configuration. An active installation must finish or be cancelled before leaving setup.
 
 On the starter screen, `boot-starter 8` or `boot-starter 7` starts installation

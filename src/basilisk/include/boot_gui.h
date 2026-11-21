@@ -29,6 +29,10 @@
  *  a second one.
  */
 bool BootGUI_Init(void);
+// Bring up the UI and USB command queues without reading the card.
+bool BootGUI_PrepareUI(void);
+// Returns when the replacement card mounts. Successful formatting restarts into setup.
+void BootGUI_WaitForCard(void);
 
 // Serial requests are copied through queues and executed by the main task,
 // which also owns the GUI and SD settings. No GUI state crosses task boundaries.

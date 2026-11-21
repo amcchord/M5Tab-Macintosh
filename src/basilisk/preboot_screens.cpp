@@ -12,6 +12,7 @@
 #include "preboot_screens.h"
 #include "boot_control_values.h"
 
+#include <algorithm>
 #include <stdio.h>
 #include <string.h>
 
@@ -200,6 +201,7 @@ SettingsLayout LayoutSettings(int width, int height, bool usb_available)
 
     L.controls[kWiFiButton] = buttonRowRect(c, left, 96);
     if (usb_available) L.controls[kUsbButton] = buttonRowRect(c, left + 108, 108);
+    L.controls[kSDCardButton] = buttonRowRect(c, left + 226, 92);
     L.controls[kStartButton] = buttonRowRect(c, left + usable - 104, 104);
     return L;
 }
@@ -261,6 +263,9 @@ void PaintSettings(const SettingsLayout &L, const SettingsView &v)
                    "Restart to apply firmware update.", kBlack);
         }
     }
+    if (v.card_available && !v.usb_waits_for_update)
+        Button(L.controls[kSDCardButton], "SD Card...",
+               v.pressed == kSDCardButton ? kButtonPressed : kButtonNormal);
     Button(L.controls[kStartButton], v.needs_setup ? "Set Up..." : "Start Up",
            v.pressed == kStartButton ? kButtonPressed : kButtonNormal, true);
     ScreenCorners();
@@ -275,6 +280,56 @@ int SettingsControlAt(const SettingsLayout &L, int x, int y)
         if (r.w > 0 && r.contains(x, y)) return i;
     }
     return kNoControl;
+}
+
+/* ---- SD card recovery -------------------------------------------------- */
+
+CardLayout LayoutCard(int width, int height)
+{
+    CardLayout L = {};
+    const int w = std::min(width - 24, 470), h = 222;
+    L.window = {(width - w)/2, (height + kMenuBarHeight - h)/2, w, h};
+    const Rect c = WindowContent(L.window);
+    const int x = c.x + kMargin, inner = c.w - 2*kMargin;
+    L.detail = {x, c.y + 13, inner, 20};
+    L.identity = {x, c.y + 39, inner, 20};
+    L.message = {x, c.y + 71, inner, 70};
+    L.controls[kCardBack] = buttonRowRect(c, x, 82);
+    L.controls[kCardRetry] = buttonRowRect(c, x + inner - 100, 100);
+    L.controls[kCardReview] = buttonRowRect(c, x + 102, 108);
+    L.controls[kCardErase] = buttonRowRect(c, x + inner - 120, 120);
+    return L;
+}
+
+static bool cardControlEnabled(const CardView &v, int i)
+{
+    if (v.page == CardPage::Confirm) return i == kCardBack || i == kCardErase;
+    return v.page == CardPage::Inspect && (i == kCardRetry ||
+        (i == kCardReview && v.can_format) || (i == kCardBack && v.mounted));
+}
+
+int CardControlAt(const CardLayout &L, const CardView &v, int x, int y)
+{
+    for (int i = 0; i < kCardCount; ++i)
+        if (cardControlEnabled(v, i) && L.controls[i].contains(x, y)) return i;
+    return kNoControl;
+}
+
+void PaintCard(const CardLayout &L, const CardView &v)
+{
+    backdrop("");
+    Window(L.window, v.page == CardPage::Confirm ? "Erase SD Card?" : "SD Card");
+    TextIn(L.detail, v.detail, kBlack);
+    TextIn(L.identity, v.identity, kGray63);
+    WrapText(L.message, v.message, kBlack);
+    const char *labels[] = {v.page == CardPage::Confirm ? "Cancel" : "Back",
+                            v.mounted ? "Refresh" : "Retry Mount", "Format...", "Erase Card"};
+    for (int i = 0; i < kCardCount; ++i) {
+        if (cardControlEnabled(v, i))
+            Button(L.controls[i], labels[i], v.pressed == i ? kButtonPressed : kButtonNormal,
+                   i == kCardRetry || (i == kCardBack && v.page == CardPage::Confirm));
+    }
+    ScreenCorners();
 }
 
 /* ---- SD card setup ----------------------------------------------------- */

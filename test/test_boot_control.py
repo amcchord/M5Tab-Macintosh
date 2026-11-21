@@ -18,6 +18,24 @@ class BootControlTests(unittest.TestCase):
         self.client = mc.MacControl.__new__(mc.MacControl)
         self.client.request = Mock()
 
+    def test_card_requires_separate_identity_and_confirmation(self):
+        token = "01" * 16
+        for action, card, code in (("erase", None, None), ("erase", token, None),
+                                    ("erase", token, "wrong"), ("arm", "bad", None)):
+            with self.assertRaises(mc.ControlError):
+                self.client.boot_card(action, card, code)
+        self.client.request.assert_not_called()
+        self.client.request.return_value = f"@B2 OK BOOT CARD ARMED {token} aabbccdd"
+        self.assertEqual(self.client.boot_card("arm", token)["challenge"], "aabbccdd")
+        self.client.request.return_value = "@B2 OK BOOT CARD ERASE"
+        self.assertEqual(self.client.boot_card("erase", token, "aabbccdd"), {"ok": True})
+        self.client.request.assert_called_with("BOOT CARD ERASE " + token + " aabbccdd", "OK BOOT CARD", timeout=15.0)
+        self.client.request.return_value = (f"@B2 OK BOOT CARD STATUS state=inspect mounted=0 format=1 bytes=4294967296 volume_bytes=1073741824 "
+            f"token={token} clock_khz=20000 bus_width=4 cluster_bytes=32768 partition_lba=2048 "
+            "partition_type=12 layout=6578464154 identity=5344 driver=535049 message=-")
+        status = self.client.boot_card("status")
+        self.assertEqual((status["bytes"], status["layout"], status["identity"]), (1 << 32, "exFAT", "SD"))
+
     def test_starter_status_and_actions(self):
         self.client.request.return_value = '@B2 OK BOOT STARTER working 512 2048 524f4d'
         self.assertEqual(self.client.boot_starter('status'), {

@@ -16,6 +16,7 @@
 
 using namespace PrebootScreens;
 namespace UI = PrebootUI;
+#include "card_recovery_control.inc"
 
 static std::vector<uint16_t> panel;
 
@@ -99,6 +100,16 @@ int main()
         const SettingsLayout sl = LayoutSettings(W, H, true);
         PaintSettings(sl, sv);
         shot("settings");
+        const auto card = LayoutCard(W, H);
+        CardView cv = {CardPage::Inspect, "32768 MiB microSD card   exFAT", "Card ID: SD 01234567",
+                       "Retry after reinserting this card, or format it as FAT32.", false, true, kNoControl};
+        PaintCard(card,cv);
+        shot("card-inspect");
+        cv.page = CardPage::Confirm;
+        cv.message = "Erase every file and partition on this card and create a new FAT32 volume? This cannot be undone.";
+        PaintCard(card,cv);
+        shot("card-confirm");
+        assert(CardControlAt(card,cv,card.controls[kCardReview].x+5,card.controls[kCardReview].y+4)==kNoControl);
         sv.usb_waits_for_update = true;
         PaintSettings(sl, sv);
         shot("settings-firmware-staged");
@@ -226,6 +237,7 @@ int main()
     char fitted[32];
     UI::FitText("A very long CD-ROM image name.iso", 60, fitted, sizeof(fitted));
     assert(UI::TextWidth(fitted) <= 60 && std::strstr(fitted, "..."));
+    CardRecoveryTest::run();
     UI::Release();
     assert(!UI::Active());
     std::puts("preboot ui ok");
