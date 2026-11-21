@@ -251,9 +251,16 @@ void PaintSettings(const SettingsLayout &L, const SettingsView &v)
 
     Button(L.controls[kWiFiButton], "Wi-Fi...",
            v.pressed == kWiFiButton ? kButtonPressed : kButtonNormal);
-    if (v.usb_available)
-        Button(L.controls[kUsbButton], "USB Disk...",
+    if (v.usb_available) {
+        const Rect usb = L.controls[kUsbButton];
+        Button(usb, "USB Disk...", v.usb_waits_for_update ? kButtonDisabled :
                v.pressed == kUsbButton ? kButtonPressed : kButtonNormal);
+        if (v.usb_waits_for_update) {
+            const int left = usb.right() + 10;
+            TextIn({left, usb.y, L.controls[kStartButton].x - left - 8, usb.h},
+                   "Restart to apply firmware update.", kBlack);
+        }
+    }
     Button(L.controls[kStartButton], v.needs_setup ? "Set Up..." : "Start Up",
            v.pressed == kStartButton ? kButtonPressed : kButtonNormal, true);
     ScreenCorners();

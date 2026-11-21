@@ -156,10 +156,27 @@ class BootControlTests(unittest.TestCase):
     def test_firmware_value_parser_rejects_injection_truncation_and_invalid_choices(self):
         code = r'''
 #include "boot_control_values.h"
+#include "boot_media.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 int main() {
+    char disk[64] = "";
+    assert(BootSelectDisk({}, disk, sizeof(disk)) == -1 && !disk[0]);
+    const std::vector<std::string> files = {"/Current.dsk", "/Other.dsk"};
+    assert(BootSelectDisk(files, disk, sizeof(disk)) == 0 && !strcmp(disk, "/Current.dsk"));
+    strcpy(disk, "/Missing.dsk");
+    assert(BootSelectDisk(files, disk, sizeof(disk)) == -1 && !strcmp(disk, "/Missing.dsk"));
+    strcpy(disk, "/Other.dsk");
+    assert(BootSelectDisk(files, disk, sizeof(disk)) == 1);
+    const auto usable = [](const char *path, size_t min, size_t max) {
+        size_t n = !strcmp(path, "/Q650.ROM") ? 1024*1024 : !strcmp(path, "/Current.dsk") ? 512 : 0;
+        return n >= min && n <= max;
+    };
+    assert(BootHasMedia(false, "/Current.dsk", "", usable));
+    assert(!BootHasMedia(false, "/Missing.dsk", "", usable));
+    assert(!BootHasMedia(true, "/Current.dsk", "", usable));
+    assert(BootHasMedia(true, "/Missing.dsk", "/Current.dsk", usable));
     char out[4]; bool b = false; int n = 0;
     assert(BootControlDecode("612062", out, sizeof(out)) && !strcmp(out, "a b"));
     assert(BootControlDecode("-", out, sizeof(out)) && !out[0]);
@@ -188,7 +205,7 @@ int main() {
             source.write_text('#include <initializer_list>\n' + code)
             binary = Path(temp) / 'values'
             subprocess.run(['c++', '-std=c++17', '-Wall', '-Wextra', '-Werror',
-                            '-fsanitize=address,undefined', '-I', str(ROOT / 'src/basilisk/include'),
+                            '-fsanitize=address,undefined', '-I', str(ROOT / 'src/basilisk/include'), '-I', str(ROOT / 'src/basilisk'),
                             str(source), '-o', str(binary)], check=True)
             subprocess.run([str(binary)], check=True)
 

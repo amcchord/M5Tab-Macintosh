@@ -1,11 +1,8 @@
 /*
  * usb_msc.h - Pre-boot "USB Disk" mode.
  *
- * Re-initializes the microSD card through the ESP-IDF sdmmc/sdspi driver
- * (after Arduino's SD wrapper has released it) and hands the raw
- * sdmmc_card_t to TinyUSB's MSC storage backend so a connected host PC
- * sees the card as a standard USB Mass Storage device. Used from the
- * boot GUI's "USB Disk" screen.
+ * The USB host gets raw sectors from the mounted SD card. Startup Settings
+ * must keep filesystem operations idle until USB Disk mode has exited.
  *
  * The OTG controller is shared with the HID host stack used during
  * emulation, but the two are mutually exclusive in time: USB Disk mode
@@ -30,16 +27,14 @@ bool UsbMsc_IsSupported(void);
 /**
  * @brief Enter USB Disk mode.
  *
- * Unmounts the Arduino SD wrapper, reclaims the card via IDF APIs, and
- * starts TinyUSB with the MSC class. Blocks (caller expected to poll) and
- * does not return until @ref UsbMsc_RequestExit is called from another
- * task (the boot GUI's touch loop).
+ * Starts TinyUSB with the mounted card as backing storage and waits for
+ * @ref UsbMsc_RequestExit. A successful exit restarts the Tab5 into Startup
+ * Settings. Waveshare detaches the drive and returns to its caller.
  *
  * @param[out] out_error_msg  On failure, set to a short human-readable
  *                            description (static string). May be NULL.
  * @return true on clean enter+run+exit, false if the USB stack refused to
- *         start. In the failure case the SD is re-mounted via Arduino
- *         before returning so the boot GUI can continue.
+ *         start.
  */
 bool UsbMsc_Enter(const char **out_error_msg);
 
