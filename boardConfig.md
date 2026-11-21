@@ -6,7 +6,7 @@ tree. Pick the PlatformIO env that matches your hardware:
 | Board                                           | env                    | Pin map         |
 |-------------------------------------------------|------------------------|-----------------|
 | M5Stack Tab5                                    | `esp32p4_pioarduino`   | See below       |
-| Waveshare ESP32-P4-WIFI6-Touch-LCD-10.1         | `waveshare_p4_101`     | [docs/waveshare/README.md](docs/waveshare/README.md) |
+| Waveshare ESP32-P4-WIFI6-Touch-LCD-10.1         | `waveshare_p4_101`     | [Waveshare pin map](#waveshare-esp32-p4-wifi6-touch-lcd-101) |
 
 ## M5Stack Tab5
 
@@ -134,7 +134,7 @@ ADB keyboard; no compile-time option or boot setting is required.
 | DATA2 | GPIO41 |
 | DATA3 / SPI CS | GPIO42 |
 
-The standard app uses 10 MHz SPI. A previous 25 MHz build produced intermittent card errors. The P4's four-bit slot 0 and its C6 radio's slot 1 share one controller. Keep the radio running during native SD operation. See the [Tab5 card benchmark](SD_STABILITY.md#benchmarking-the-card) and [M5Stack pin map](https://docs.m5stack.com/en/core/Tab5).
+The Tab5 uses four-bit SDMMC on slot 0, trying 40 MHz first and retrying at 20 MHz. Cards that fail native initialization can use 10 MHz SPI. The C6 radio uses slot 1 and can run alongside the card. [Tab5 card benchmarks](SD_STABILITY.md#benchmarking-the-card) · [M5Stack pin map](https://docs.m5stack.com/en/core/Tab5)
 
 ### Camera (SC2356 2MP)
 | Signal | GPIO |
@@ -303,7 +303,7 @@ M5Unified/M5GFX, which do not support this board):
 - [`lib/esp_lcd_touch/`](lib/esp_lcd_touch/) + [`lib/esp_lcd_touch_gt911/`](lib/esp_lcd_touch_gt911/) - GT911 touch driver
 - [`lib/esp_codec_dev/`](lib/esp_codec_dev/) - ES8311/ES7210 codec abstraction
 
-A small in-tree RGB565 renderer ([`src/board/waveshare/mini_gfx.cpp`](src/board/waveshare/mini_gfx.cpp))
+A small in-tree RGB565 renderer ([`src/board/mini_gfx/mini_gfx.cpp`](src/board/mini_gfx/mini_gfx.cpp))
 provides the drawing primitives the boot GUI needs, plus the landscape->portrait
 coordinate rotation required to drive the panel at its native portrait resolution.
 

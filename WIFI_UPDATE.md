@@ -2,7 +2,7 @@
 
 The standard installation has one application slot. The optional A/B layout has two 6 MiB slots. It can receive a release over Wi-Fi while the current firmware remains available. A USB data cable authorizes each update.
 
-Download the Host Tools ZIP and the matching `-app.bin` for your board, ESP32-P4 revision and firmware profile. Extract Host Tools and put the application file beside `WIFI_UPDATE.md`. Check the downloads against the release’s `SHA256SUMS`. [v5.4 beta 3 downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Choosing a download](RELEASE_NOTES.md#choosing-a-download)
+Download the Host Tools ZIP and the matching `-app.bin` for your board, ESP32-P4 revision and firmware profile. Extract Host Tools and put the application file beside `WIFI_UPDATE.md`. Check the downloads against the release’s `SHA256SUMS`. [v5.4 downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4) · [Choosing a download](RELEASE_NOTES.md#choosing-a-download)
 
 Run the examples from the extracted folder on macOS or Linux. Set `PORT` to the programming USB port and `APP` to the filename you downloaded. The example selects a standard pre-v3 Tab5.
 
@@ -11,7 +11,7 @@ python3 -m venv .venv
 . .venv/bin/activate
 python3 -m pip install -r tools/requirements.txt
 PORT=/dev/cu.usbmodemXXXX
-APP=./M5Tab-Macintosh-v5.4-beta.3-app.bin
+APP=./M5Tab-Macintosh-v5.4-app.bin
 ```
 
 Shut down in Finder. Start the board and tap the Happy Mac splash to enter Startup Settings. On firmware with the updater, check the installed layout. A first installation or an earlier release without the status command can proceed to USB provisioning.

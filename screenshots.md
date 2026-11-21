@@ -26,6 +26,8 @@
 
 ## Card management
 
+The card identifiers are obscured in the two formatting screenshots.
+
 ![SD Card inspection showing the card and its mounted volume](screenshots/Tab5-SD-Card.png)
 
 **SD Card.** Check the card identity, physical capacity, filesystem and volume size before choosing a card action.

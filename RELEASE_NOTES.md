@@ -1,4 +1,6 @@
-# 5.4 beta 3
+# 5.4
+
+The stable firmware uses the same emulator and installer code as 5.4 beta 3. The device and remote console identify this release as 5.4. [Downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4) · [Setup and imaging screenshots](screenshots.md)
 
 ## Getting started on a Tab5
 
@@ -14,6 +16,10 @@ Insert a microSD card and boot. When the ROM or startup disk is missing, **Set U
 - The indexed renderer skips unchanged row runs. A deterministic Finder selection trace used 55% fewer submitted panel bytes at both 1 and 8 bits per pixel, with identical final pixels in the host renderer. [Workload and measurements](EMULATOR_PERFORMANCE.md)
 
 ## Hardware checks
+
+Both stable pre-v3 Tab5 applications were installed over Wi-Fi on an ESP32-P4 v1.3 with its stock C6 radio. The device verified each application in the inactive slot, restarted and reached Mac OS 8.1 Finder. Both displays matched all 921,600 panel pixels. A paired browser displayed the live Macintosh screen, reported firmware 5.4, and completed a timed guest-speed measurement. All 113 host tests passed. The production-silicon Tab5 and both Waveshare profiles were build-tested.
+
+The following setup and performance measurements were made during the beta 3 device tests.
 
 An attached pre-v3 Tab5 formatted a 29,664 MiB spare card as FAT32 with 32 KiB clusters and restarted into **Set Up SD Card**. With Wi-Fi enabled on the formatted card, four-bit SDMMC read a 4 MiB test file at 10,198 KiB/s and wrote it at 1,369 KiB/s including sync. The previous 10 MHz Arduino SPI interface measured 1,759 KiB/s and 920 KiB/s on the same card. Files were checked again after a restart. [Measurements and commands](SD_STABILITY.md)
 
@@ -36,4 +42,4 @@ Choose the firmware for your board and ESP32-P4 revision. The release has separa
 
 Check `SHA256SUMS` and `BUILD-MANIFEST.json` for download hashes, SDK versions, chip limits, and the exact source revision. [USB flashing instructions](README.md#flashing-the-firmware)
 
-Stable v5.3 remains available. Restoring a saved whole-flash backup over USB also restores the previous partition layout. Macintosh disks and saved settings reside on the microSD card. [Stable v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
+The previous stable release was v5.3. Restoring a saved whole-flash backup over USB also restores the previous partition layout. Macintosh disks and saved settings reside on the microSD card. [Download v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)

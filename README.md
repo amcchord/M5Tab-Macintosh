@@ -2,7 +2,7 @@
 
 Run classic Macintosh System 7 through Mac OS 8.1 on an M5Stack Tab5 or Waveshare ESP32-P4-WIFI6-Touch-LCD-10.1. The ESP32-P4 runs Basilisk II. The removable microSD card holds the Macintosh ROM, disks and settings.
 
-**[Download stable v5.4](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4)** · [Flash your board](#flashing-the-firmware) · [Set up a card](#sd-card-setup) · [Release notes](RELEASE_NOTES.md)
+**[Download stable v5.4](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4)** · [Flash your board](#flashing-the-firmware) · [Set up a card](#sd-card-setup) · [Screenshot gallery](screenshots.md) · [Release notes](RELEASE_NOTES.md)
 
 | Mac OS 8.1 on the Tab5 | Finder on the emulated Macintosh |
 | --- | --- |
@@ -57,9 +57,15 @@ A merged flash replaces the bootloader, any installed launcher and the partition
 3. **Set Up SD Card** opens when the ROM or selected startup disk is missing. Tap **Wi-Fi…**, select your network, enter the password, tap **Join**, then return to setup. Choose **Mac OS 8.1** or **System 7.5.3** and tap **Download**.
 4. Leave the card seated while the installer downloads, unpacks and reads back the ROM and disk. Downloads resume from the saved byte after a network interruption. If the automatic retries run out, reconnect and tap **Retry**. Tap **Start Up** after verification.
 
-   | Choose the operating system | Download the selected files | Verify the disk image |
-   | --- | --- | --- |
-   | ![Operating system choices in Set Up SD Card](screenshots/Tab5-Setup.png) | ![Mac OS 8.1 download progress and transfer speed](screenshots/Tab5-Starter-Download.png) | ![Installer verifying the Macintosh disk image on the card](screenshots/Tab5-Imaging.png) |
+   | Choose the operating system | Download over Wi-Fi |
+   | --- | --- |
+   | ![Operating system choices in Set Up SD Card](screenshots/Tab5-Setup.png) | ![Mac OS 8.1 download progress and transfer speed](screenshots/Tab5-Starter-Download.png) |
+
+   | Write the image to the card | Verify the disk image |
+   | --- | --- |
+   | ![Installer writing Macintosh8.dsk at a recorded 65%, reproduced with the firmware renderer](screenshots/Tab5-Installing.png) | ![Tab5 rereading Macintosh8.dsk at 33%](screenshots/Tab5-Imaging.png) |
+
+   The 65% writing screen reproduces a recorded installation using the firmware’s renderer. The other setup images are captures from the Tab5.
 
 ### Prepare a card on your computer
 
