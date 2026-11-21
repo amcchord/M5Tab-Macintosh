@@ -52,6 +52,8 @@ Insert a spare microSD card and start the Tab5. **Set Up SD Card** downloads the
 
 This release adds automatic startup recovery for supported classic HFS disks, faster Tab5 SD access, and a local Wi-Fi console with guest screenshots, speed measurements, and optional mouse and keyboard control. An optional two-slot installation can receive firmware updates over Wi-Fi. [Set up a spare card](#sd-card-setup) · [Enable Wi-Fi updates](WIFI_UPDATE.md)
 
+The Tab5 uses four-bit mode for the whole session when the card supports it. Inside System 7.5.3, a 4 MiB file read about 4.5× faster and wrote and flushed 1.6–2.1× faster than with the previous SPI interface on the same card. [Macintosh disk measurements](SD_STABILITY.md#disk-performance-inside-system-753)
+
 [Download v5.4 beta 3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4-beta.3) · [Release notes and supported hardware](RELEASE_NOTES.md) · [Stable v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
 
 ## v5.3 — Battery, Sleep and Brightness

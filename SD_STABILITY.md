@@ -87,6 +87,21 @@ With the C6 connected for a Wi-Fi scan, 16 KiB file requests on that formatted c
 
 Once an SD card enters SPI mode, returning to the native SD protocol requires removing card power. On the Tab5, socket J2 pin 4 connects directly to the shared SOC_3.3V rail. The ESP32-P4’s LDO4 supplies the SD I/O pads. Releasing it cannot power-cycle the card. Reseat the card with all storage users stopped or fully power down the board, then start with native SDMMC. [M5Stack Tab5 schematic, sheet 2](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1132/Tab5_Schematics_PDF.pdf#page=2) · [Espressif SD mode selection](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32p4/api-reference/peripherals/sdspi_share.html)
 
+The spare card returned two write errors during a long Mac OS 8.1 download while the comparison had forced it into SPI mode. It had enough free space. After the device stopped and the card was reseated, setup mounted it in four-bit mode and resumed the saved download. Setup reports a full card separately from a write or flush error.
+
+### Disk performance inside System 7.5.3
+
+A 68k application on the same Tab5 wrote 4 MiB to its Macintosh startup disk in 256 synchronous 16 KiB requests, closed the file and flushed the volume. It reopened the file for each read pass, checked every byte on the second pass and removed the file. The application also ran a fixed CPU checksum. All three configurations passed.
+
+| Guest operation | Legacy SPI, 10 MHz | Four-bit, before buffer change | Four-bit, release path at 40 MHz |
+| --- | ---: | ---: | ---: |
+| Write, close and flush | 697 KiB/s | 168 KiB/s | 1,474 KiB/s |
+| Read | 1,437 KiB/s | 733 KiB/s | 6,468 KiB/s |
+| Read and verify | 977 KiB/s | 596 KiB/s | 2,089 KiB/s |
+| CPU checksum | 0.419 s | 0.422 s | 0.422 s |
+
+The original four-bit guest path split misaligned transfers into single sectors. The release passes aligned guest memory directly to the driver and groups misaligned requests through a reusable aligned buffer. A second four-bit run after reopening the application measured 6,479 KiB/s reading, 1,105 KiB/s writing and flushing, and 2,097 KiB/s reading and verifying. Against the single SPI run, the four-bit runs delivered about 4.5× the read throughput and 1.6–2.1× the write-and-flush throughput. The CPU checksum took 26–27 guest ticks. [Guest benchmark screen](screenshots/Tab5-System7-Disk-Benchmark.png)
+
 ## Tab5 card recovery
 
 Card inspection reports the hardware identity, capacity, existing volume size, partition type and cluster size. On a legacy Arduino SPI mount it briefly closes and reopens the card to read the hardware identity. Run recovery from preboot with all files closed, USB Disk disconnected and downloads idle.

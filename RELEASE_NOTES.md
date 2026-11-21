@@ -17,7 +17,11 @@ Insert a microSD card and boot. When the ROM or startup disk is missing, **Set U
 
 An attached pre-v3 Tab5 formatted a 29,664 MiB spare card as FAT32 with 32 KiB clusters and restarted into **Set Up SD Card**. With Wi-Fi enabled on the formatted card, four-bit SDMMC read a 4 MiB test file at 10,198 KiB/s and wrote it at 1,369 KiB/s including sync. The previous 10 MHz Arduino SPI interface measured 1,759 KiB/s and 920 KiB/s on the same card. Files were checked again after a restart. [Measurements and commands](SD_STABILITY.md)
 
-The Tab5 received a P4 application over its stock C6 Wi-Fi link, verified the inactive flash slot, and booted it. Interrupted transfers kept the running slot selected. Browser tests covered a color Finder screenshot, a timed guest-speed sample, remote input and session revocation.
+The standard Tab5 build received the 3,250,928-byte USB Debug application over its stock C6 Wi-Fi link and selected the verified copy in 23.6 seconds. The board then restarted into that slot. Cancelling a transfer kept the running slot selected. Browser tests covered a color Finder screenshot, a timed guest-speed sample, remote input and session revocation.
+
+Inside System 7.5.3, two runs on the same card delivered about 4.5× the read throughput and 1.6–2.1× the write-and-flush throughput of the legacy SPI run. Every byte in the 4 MiB file verified. The fixed CPU test took about 0.42 seconds in all runs. [Macintosh benchmark results](SD_STABILITY.md#disk-performance-inside-system-753)
+
+Both downloadable systems reached Finder on the spare card. During the Mac OS 8.1 test, setup was cancelled at 181,413,082 bytes. After a firmware update, setup resumed there, checked the compressed file, expanded it and verified the full 1,048,576,000-byte disk from the card. [Installation and display checks](TAB5_HARDWARE_HANDOFF.md#beta-3-on-a-pre-v3-tab5)
 
 ## Choosing a download
 
