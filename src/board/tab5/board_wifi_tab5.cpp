@@ -18,14 +18,15 @@ extern "C" {
 }
 
 // The pinned Hosted streaming driver grows its two SDIO receive buffers during
-// bursts. Its internal-only allocation can exhaust SRAM while downloading a
-// firmware or disk image. P4 SDMMC can DMA to cache-aligned external memory.
+// bursts and allocates packet buffers from the same heap. TLS and radio traffic
+// can exhaust SRAM during a download. The same memory hook serves both the
+// packet pool and streaming buffers. P4 SDMMC supports external DMA.
 static decltype(g_hosted_osi_funcs._h_malloc_align) originalAlignedAlloc;
 
 static void *allocateRadioBuffer(size_t size, size_t alignment)
 {
     constexpr size_t line = CONFIG_CACHE_L2_CACHE_LINE_SIZE;
-    if (size >= 4096 && size <= SIZE_MAX - (line - 1)) {
+    if (size && size <= SIZE_MAX - (line - 1)) {
         size_t padded = (size + line - 1) & ~(line - 1);
         void *buffer = heap_caps_aligned_alloc(alignment < line ? line : alignment, padded,
                                                MALLOC_CAP_DMA | MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
