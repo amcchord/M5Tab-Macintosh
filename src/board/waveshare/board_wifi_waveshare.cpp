@@ -5,13 +5,12 @@
  * through esp_wifi_remote / esp_hosted, which talk to the ESP32-C6 co-
  * processor over SDIO. The SDIO pin configuration lives in sdkconfig (and
  * in the esp_hosted component defaults) so no explicit WiFi.setPins() is
- * needed. This function is a no-op placeholder kept so the rest of the
- * code can call BoardWifi_Prepare() unconditionally.
+ * needed. Prepare the shared P4 radio buffers before starting Wi-Fi.
  */
 
 #include "board_wifi.h"
 
 extern "C" void BoardWifi_Prepare(void)
 {
-    /* Intentionally empty - esp_wifi_remote / esp_hosted auto-configure. */
+    BoardWifi_PrepareDmaMemory();
 }

@@ -22,6 +22,9 @@ extern "C" {
  */
 void BoardWifi_Prepare(void);
 
+/** Select DMA-capable external memory before starting the P4 SDIO radio. */
+void BoardWifi_PrepareDmaMemory(void);
+
 /**
  * Result of @ref BoardWifi_MaybeUpdateCoprocessorFirmware.
  */
