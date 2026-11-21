@@ -75,6 +75,18 @@ On November 21, 2026, an attached pre-v3 Tab5 mounted a 29,664 MiB microSD card 
 
 With Wi-Fi off, a contiguous 4 MiB file written through the filesystem measured 183 KiB/s including sync. Explicitly preallocating the same size took 462 ms and produced 189 KiB/s end to end. File read-back verified at 795 KiB/s for the ordinary file. The pinned FatFs implementation splits direct reads and writes at cluster boundaries, so this volume's 16 KiB application requests require at least 32 separate card data transfers. Both benchmark files were contiguous. [FatFs read and write paths in ESP-IDF 5.5.4](https://github.com/espressif/esp-idf/blob/v5.5.4/components/fatfs/src/ff.c#L3996-L4003)
 
+After the Tab5 formatted this same card, it contained one full-card FAT32 volume with 32 KiB clusters. With Wi-Fi off, the same file test reached 2,074 KiB/s for synced writes and 11,963 KiB/s for verified reads, gains of 11.3× and 15.0×. Each file was synced, closed and reopened. Every byte also passed a second check after the board restarted.
+
+With the C6 connected for a Wi-Fi scan, 16 KiB file requests on that formatted card gave the following rates. Writes include synchronization. These are individual 4 MiB file runs on a single card.
+
+| Tab5 card interface | Write (KiB/s) | Verified read (KiB/s) |
+| --- | ---: | ---: |
+| Four-bit SDMMC, 40 MHz | 1,369 | 10,198 |
+| Arduino SPI, 10 MHz | 920 | 1,759 |
+| SPI DMA, 10 MHz | 589 | 940 |
+
+The release uses the first two in that order. A card last used in SPI mode can stay in SPI mode through a software restart. Eject and reinsert it while idle, or fully power down the board, to restore four-bit operation.
+
 ## Tab5 card recovery
 
 Card inspection reports the hardware identity, capacity, existing volume size, partition type and cluster size. On a legacy Arduino SPI mount it briefly closes and reopens the card to read the hardware identity. Run recovery from preboot with all files closed, USB Disk disconnected and downloads idle.
