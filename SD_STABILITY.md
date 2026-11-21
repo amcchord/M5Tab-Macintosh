@@ -66,7 +66,7 @@ Build `pio run -e esp32p4_tab5_sd_benchmark` for the pre-v3 Tab5. This standalon
 
 Use the same card and Wi-Fi state to compare modes. Wait for the command to finish before resetting. A card initialized in SPI mode generally stays in that mode until its supply is removed. To test native mode after SPI, restart into the diagnostic, reseat the card while it is idle, then issue `MOUNT NATIVE` first. The card needs a FAT32 filesystem.
 
-Tab5 release builds try four-bit SDMMC first and fall back to the 10 MHz Arduino SPI driver. SPI DMA remains available for diagnostic comparisons. The next driver runs after the previous attempt releases the bus and mount point. USB Disk uses the geometry and drive number of the mounted card. The card uses SDMMC slot 0 and the Wi-Fi coprocessor uses slot 1. [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
+Tab5 release builds try four-bit SDMMC at 40 MHz first. If that mount fails, a 20 MHz native probe checks whether the card responds independently of the filesystem. A responding card gets a 20 MHz four-bit mount attempt. If its filesystem still cannot mount, startup opens card recovery in native mode. A card that fails native initialization can use the 10 MHz Arduino SPI driver. SPI DMA remains available for diagnostic comparisons. The next driver runs after the previous attempt releases the bus and mount point. USB Disk uses the geometry and drive number of the mounted card. The card uses SDMMC slot 0 and the Wi-Fi coprocessor uses slot 1. [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
 
 
 ### Measured effect of FAT cluster size
@@ -85,7 +85,7 @@ With the C6 connected for a Wi-Fi scan, 16 KiB file requests on that formatted c
 | Arduino SPI, 10 MHz | 920 | 1,759 |
 | SPI DMA, 10 MHz | 589 | 940 |
 
-The release uses the first two in that order. A card last used in SPI mode can stay in SPI mode through a software restart. Eject and reinsert it while idle, or fully power down the board, to restore four-bit operation.
+Once an SD card enters SPI mode, returning to the native SD protocol requires removing card power. On the Tab5, socket J2 pin 4 connects directly to the shared SOC_3.3V rail. The ESP32-P4’s LDO4 supplies the SD I/O pads. Releasing it cannot power-cycle the card. Reseat the card with all storage users stopped or fully power down the board, then start with native SDMMC. [M5Stack Tab5 schematic, sheet 2](https://m5stack-doc.oss-cn-shenzhen.aliyuncs.com/1132/Tab5_Schematics_PDF.pdf#page=2) · [Espressif SD mode selection](https://docs.espressif.com/projects/esp-idf/en/v5.5.4/esp32p4/api-reference/peripherals/sdspi_share.html)
 
 ## Tab5 card recovery
 

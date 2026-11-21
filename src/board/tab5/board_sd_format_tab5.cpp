@@ -38,15 +38,11 @@ struct CardOperation {
 class RawCard {
 public:
     sdmmc_card_t card = {};
-    bool open(bool native) {
+    esp_err_t open(bool native) {
         sdmmc_host_t host;
         esp_err_t err;
         if (native) {
-            sdmmc_slot_config_t slot;
-            err = Tab5SD_NativeConfig(host, slot);
-            if (err == ESP_OK) err = sdmmc_host_init();
-            if (err == ESP_OK) err = sdmmc_host_init_slot(host.slot, &slot);
-            native_slot = err == ESP_OK;
+            err = Tab5SD_OpenNativeProbe(card, native_slot);
         } else {
             sdspi_device_config_t device;
             err = Tab5SD_InitSpiBus(host, device);
@@ -54,27 +50,31 @@ public:
             if (err == ESP_ERR_INVALID_STATE) Tab5SD_BlockMounts();
             if (err == ESP_OK) err = sdspi_host_init();
             if (err == ESP_OK) err = sdspi_host_init_device(&device, &spi_device);
-            if (err == ESP_OK) host.slot = spi_device;
+            if (err == ESP_OK) {
+                host.slot = spi_device;
+                err = sdmmc_card_init(&host, &card);
+            }
         }
-        if (err == ESP_OK) err = sdmmc_card_init(&host, &card);
         if (err != ESP_OK) Serial.printf("[SD] Card inspection: %s\n", esp_err_to_name(err));
-        return err == ESP_OK;
+        return err;
     }
     bool close() {
-        if (native_slot && sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0) != ESP_OK) Tab5SD_BlockMounts();
+        Tab5SD_CloseNativeProbe(native_slot);
         if (spi_device != -1 && sdspi_host_remove_device(spi_device) != ESP_OK) Tab5SD_BlockMounts();
         if (spi_bus && spi_bus_free(SDSPI_DEFAULT_HOST) != ESP_OK) Tab5SD_BlockMounts();
-        native_slot = spi_bus = false;
+        spi_bus = false;
         spi_device = -1;
         return Tab5SD_CanRetryMount();
     }
     bool start(Tab5SdMode mode) {
         if (!Tab5SD_CanRetryMount()) return false;
         if (mode == Tab5SdMode::Native || (mode == Tab5SdMode::None && kTryNative)) {
-            if (open(true)) return true;
-            if (!close() || mode == Tab5SdMode::Native) return false;
+            const esp_err_t err = open(true);
+            if (err == ESP_OK) return true;
+            const bool may_try_spi = Tab5SD_MayTrySpi(card, native_slot, err);
+            if (!close() || mode == Tab5SdMode::Native || !may_try_spi) return false;
         }
-        return open(false);
+        return open(false) == ESP_OK;
     }
 private:
     sdspi_dev_handle_t spi_device = -1;

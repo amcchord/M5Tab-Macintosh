@@ -8,7 +8,7 @@
 sdmmc_card_t *Tab5SD_Card();
 bool Tab5SD_UnmountIdf();
 bool Tab5SD_MountDma();
-bool Tab5SD_MountNative();
+bool Tab5SD_MountNative(int max_freq_khz = SDMMC_FREQ_HIGHSPEED);
 #endif
 
 #if TAB5_SD_BENCHMARK

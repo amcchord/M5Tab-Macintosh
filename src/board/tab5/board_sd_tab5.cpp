@@ -134,6 +134,22 @@ extern "C" bool BoardSD_Init(void)
 #endif
 #if TAB5_SD_NATIVE
     if (Tab5SD_MountNative()) return true;
+    if (!Tab5SD_CanRetryMount()) return false;
+
+    // A VFS mount failure can mean exFAT, blank media, or a marginal
+    // high-speed link. Sending SPI CMD0 would lock a native card into SPI
+    // until its power is removed. Check the card independently at 20 MHz.
+    sdmmc_card_t probe = {};
+    bool slot_owned = false;
+    const esp_err_t err = Tab5SD_OpenNativeProbe(probe, slot_owned);
+    const bool may_try_spi = Tab5SD_MayTrySpi(probe, slot_owned, err);
+    Tab5SD_CloseNativeProbe(slot_owned);
+    if (!Tab5SD_CanRetryMount()) return false;
+    if (err == ESP_OK) {
+        Serial.println("[SD] Native card responded; retrying four-bit mount at 20 MHz");
+        return Tab5SD_MountNative(SDMMC_FREQ_DEFAULT);
+    }
+    if (!may_try_spi) return false;
 #endif
 #if TAB5_SD_DMA
     if (Tab5SD_CanRetryMount() && Tab5SD_MountDma()) return true;
@@ -179,7 +195,9 @@ bool Tab5SD_Restore(Tab5SdMode mode)
 {
     switch (mode) {
 #if TAB5_SD_NATIVE || TAB5_SD_BENCHMARK
-        case Tab5SdMode::Native: return Tab5SD_MountNative();
+        case Tab5SdMode::Native:
+            return Tab5SD_MountNative() ||
+                   (Tab5SD_CanRetryMount() && Tab5SD_MountNative(SDMMC_FREQ_DEFAULT));
 #endif
 #if TAB5_SD_DMA || TAB5_SD_BENCHMARK
         case Tab5SdMode::DmaSpi: return Tab5SD_MountDma();
