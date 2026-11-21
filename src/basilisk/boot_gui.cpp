@@ -976,7 +976,11 @@ static void runSettingsScreen(void)
 
         while (next == kStay) {
             BootGUI_ControlPoll();
-            if (BootGUI_RestartPending()) BootGUI_Restart();
+            if (control_restart_at) {
+                if (BootGUI_RestartPending()) BootGUI_Restart();
+                delay(1);
+                continue;
+            }
             if (FirmwareUpdateBusy()) {
                 UiTouch ignored;
                 pollUiTouch(&ignored);
