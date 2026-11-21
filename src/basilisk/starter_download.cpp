@@ -4,7 +4,6 @@
 #include "starter_speed.h"
 #include "board_config.h"
 #include <Arduino.h>
-#include <WiFi.h>
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
 #include <esp_http_client.h>
@@ -137,19 +136,89 @@ Digest checkFile(const char *path, const char *expected, uint32_t size, Scratch 
 
 struct Range {
     char expected[80];
-    bool matched;
+    bool seen, matched;
 };
 esp_err_t onHeader(esp_http_client_event_t *event) {
     if (event->event_id == HTTP_EVENT_ON_HEADER && !strcasecmp(event->header_key, "Content-Range")) {
         Range *range = static_cast<Range *>(event->user_data);
-        range->matched = !strcmp(event->header_value, range->expected);
+        range->matched = !range->seen && !strcmp(event->header_value, range->expected);
+        range->seen = true;
     }
     return ESP_OK;
 }
 
-const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &scratch) {
-    if (pos == a.compressed)
-        return nullptr;
+constexpr uint32_t networkTimeoutMs = 15000;
+struct DownloadResult {
+    const char *error = nullptr;
+    bool retry = false;
+};
+constexpr DownloadResult connectionLost = {"Download interrupted. Reconnect Wi-Fi and retry to resume.", true};
+
+struct HttpClient {
+    esp_http_client_handle_t handle;
+    ~HttpClient() {
+        if (handle)
+            esp_http_client_cleanup(handle);
+    }
+};
+
+DownloadResult receiveFile(esp_http_client_handle_t client, const Asset &a, const char *path,
+                           uint32_t &pos, Scratch &scratch) {
+    FileHandle out(open(path, O_WRONLY | O_CREAT | O_APPEND, 0644));
+    if (out.fd < 0 || lseek(out.fd, 0, SEEK_END) != pos)
+        return {"Could not resume the download on this card."};
+    uint32_t checkpoint = pos, lastByte = millis();
+    portENTER_CRITICAL(&lock);
+    network_speed.start(lastByte);
+    portEXIT_CRITICAL(&lock);
+    DownloadResult result;
+    // Drain available TLS bytes without waiting to fill 32 KiB inside a blocking read.
+    // Buffer short reads for an aligned card write, including the last bytes before a disconnect.
+    esp_http_client_set_timeout_ms(client, 0);
+    while (pos < a.compressed && !cancelled()) {
+        size_t filled = 0, wanted = std::min<uint32_t>(chunk, a.compressed - pos);
+        while (filled < wanted && !cancelled()) {
+            int n = esp_http_client_read(client, (char *)scratch.input + filled, wanted - filled);
+            uint32_t now = millis();
+            if (n == -ESP_ERR_HTTP_EAGAIN && now - lastByte < networkTimeoutMs) {
+                vTaskDelay(1);
+                continue;
+            }
+            if (n <= 0) {
+                result = connectionLost;
+                break;
+            }
+            filled += n;
+            lastByte = now;
+            portENTER_CRITICAL(&lock);
+            network_speed.receivedBytes(n, now);
+            portEXIT_CRITICAL(&lock);
+        }
+        if (filled && !writeAll(out.fd, scratch.input, filled)) {
+            result = {"Could not write the download. Check card space."};
+            break;
+        }
+        pos += filled;
+        progress("Downloading", a, pos, a.compressed);
+        if (pos - checkpoint >= 2 * 1024 * 1024) {
+            if (fsync(out.fd)) {
+                result = {"Could not save download progress to the card."};
+                break;
+            }
+            checkpoint = pos;
+        }
+        if (result.error)
+            break;
+    }
+    portENTER_CRITICAL(&lock);
+    network_speed.stop();
+    portEXIT_CRITICAL(&lock);
+    if (!out.syncClose())
+        return {"Could not finish writing the download."};
+    return result;
+}
+
+DownloadResult downloadAttempt(const Asset &a, const char *path, uint32_t &pos, Scratch &scratch) {
     Range range = {};
     char header[72];
     uint32_t first = a.offset + pos, last = a.offset + a.compressed - 1;
@@ -158,62 +227,71 @@ const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &sc
              (unsigned long)last);
     esp_http_client_config_t cfg = {};
     cfg.url = archiveUrl;
-    cfg.timeout_ms = 15000;
+    cfg.is_async = true;
+    cfg.timeout_ms = 200;
     cfg.disable_auto_redirect = true;
     cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.user_data = &range;
     cfg.event_handler = onHeader;
     cfg.buffer_size = 4096;
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client)
-        return "Could not open the download connection.";
-    progress("Downloading", a, pos, a.compressed);
-    portENTER_CRITICAL(&lock);
-    network_speed.start(millis());
-    portEXIT_CRITICAL(&lock);
-    const char *error = "Could not reach the starter download. Check Wi-Fi and retry.";
-    if (esp_http_client_set_header(client, "Range", header) == ESP_OK &&
-        esp_http_client_open(client, 0) == ESP_OK) {
-        int64_t length = esp_http_client_fetch_headers(client);
-        error = "The starter archive changed or the server declined the requested range.";
-        if (esp_http_client_get_status_code(client) == 206 && range.matched &&
-            length == a.compressed - pos) {
-            FileHandle out(open(path, O_WRONLY | O_CREAT | O_APPEND, 0644));
-            error = nullptr;
-            if (out.fd < 0 || lseek(out.fd, 0, SEEK_END) != pos)
-                error = "Could not resume the download on this card.";
-            uint32_t checkpoint = pos;
-            while (!error && pos < a.compressed && !cancelled()) {
-                int n = esp_http_client_read(client, (char *)scratch.input,
-                                             std::min<uint32_t>(chunk, a.compressed - pos));
-                if (n <= 0) {
-                    error = "Download interrupted. Reconnect Wi-Fi and retry to resume.";
-                    break;
-                }
-                portENTER_CRITICAL(&lock);
-                network_speed.receivedBytes(n, millis());
-                portEXIT_CRITICAL(&lock);
-                if (!writeAll(out.fd, scratch.input, n)) {
-                    error = "Could not write the download. Check card space.";
-                    break;
-                }
-                pos += n;
-                progress("Downloading", a, pos, a.compressed);
-                if (pos - checkpoint >= 2 * 1024 * 1024) {
-                    if (fsync(out.fd))
-                        error = "Could not save download progress to the card.";
-                    checkpoint = pos;
-                }
-            }
-            if (out.fd >= 0 && !out.syncClose())
-                error = "Could not finish writing the download.";
-        }
+    HttpClient client{esp_http_client_init(&cfg)};
+    if (!client.handle || esp_http_client_set_header(client.handle, "Range", header) != ESP_OK)
+        return {"Could not prepare the download connection."};
+    progress("Connecting to download", a, pos, a.compressed);
+    uint32_t started = millis();
+    esp_err_t opened;
+    do {
+        if (cancelled())
+            return {};
+        opened = esp_http_client_open(client.handle, 0);
+        if (opened == ESP_ERR_HTTP_EAGAIN)
+            vTaskDelay(1);
+    } while (opened == ESP_ERR_HTTP_EAGAIN && millis() - started < networkTimeoutMs);
+    if (opened != ESP_OK) {
+        int tlsFlags = 0;
+        esp_http_client_get_and_clear_last_tls_error(client.handle, nullptr, &tlsFlags);
+        if (tlsFlags)
+            return {"The starter server's TLS certificate could not be verified."};
+        if (opened == ESP_ERR_HTTP_EAGAIN || opened == ESP_ERR_HTTP_CONNECT ||
+            opened == ESP_ERR_HTTP_WRITE_DATA)
+            return connectionLost;
+        return {"Could not open the download connection."};
     }
-    portENTER_CRITICAL(&lock);
-    network_speed.stop();
-    portEXIT_CRITICAL(&lock);
-    esp_http_client_cleanup(client);
-    return error;
+
+    started = millis();
+    int64_t length;
+    do {
+        if (cancelled())
+            return {};
+        length = esp_http_client_fetch_headers(client.handle);
+        if (length == -ESP_ERR_HTTP_EAGAIN)
+            vTaskDelay(1);
+    } while (length == -ESP_ERR_HTTP_EAGAIN && millis() - started < networkTimeoutMs);
+    if (length < 0)
+        return connectionLost;
+    if (esp_http_client_get_status_code(client.handle) != 206 || !range.matched ||
+        length != a.compressed - pos)
+        return {"The starter archive changed or the server declined the requested range."};
+    if (cancelled())
+        return {};
+    progress("Downloading", a, pos, a.compressed);
+    return receiveFile(client.handle, a, path, pos, scratch);
+}
+
+const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &scratch) {
+    constexpr unsigned maxRetries = 3;
+    for (unsigned retries = 0; pos < a.compressed && !cancelled(); ++retries) {
+        DownloadResult result = downloadAttempt(a, path, pos, scratch);
+        if (!result.retry || retries == maxRetries || cancelled())
+            return result.error;
+        char action[64];
+        snprintf(action, sizeof(action), "Wi-Fi interrupted. Retrying (%u/%u)", retries + 1, maxRetries);
+        progress(action, a, pos, a.compressed);
+        const uint32_t start = millis(), delayMs = 1000u << retries;
+        while (!cancelled() && millis() - start < delayMs)
+            vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    return nullptr;
 }
 
 const char *expand(const Asset &a, const char *packed, const char *temp, Scratch &s) {

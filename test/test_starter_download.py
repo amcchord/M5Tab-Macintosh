@@ -90,11 +90,64 @@ class StarterDownloadTests(unittest.TestCase):
         self.assertEqual(set(rates[8:]), {40960})
         self.assertEqual(self.target.read_bytes(), self.data)
 
+    @staticmethod
+    def request_offsets(result):
+        return [int(line.split()[1]) - 12345 for line in result.stdout.splitlines() if line.startswith('REQUEST ')]
+
+    def test_automatic_retries_use_the_exact_committed_prefix(self):
+        for mode, offsets in [('recover', [0, 40960, 49152]), ('connect_once', [0, 0]),
+                              ('headers_once', [0, 0]), ('idle_once', [0, 4096])]:
+            with self.subTest(mode=mode):
+                result = self.run_install(mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.request_offsets(result), offsets)
+                self.assertEqual(self.target.read_bytes(), self.data)
+                self.assertFalse(self.packed.exists())
+                self.target.unlink()
+
+    def test_rate_resets_on_automatic_retry(self):
+        result = self.run_install('rate_recover')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        attempts = result.stdout.split('REQUEST ')[1:]
+        self.assertEqual(len(attempts), 2)
+        for attempt in attempts:
+            rates = [int(line.split()[1]) for line in attempt.splitlines() if line.startswith('RATE ')]
+            self.assertEqual(rates[:8], [-1] * 8)
+            self.assertEqual(set(rates[8:]), {40960})
+
+    def test_cancel_in_connect_headers_body_or_backoff_stops_before_reconnect(self):
+        for mode in ('cancel_connect', 'cancel_headers', 'cancel_body', 'cancel_backoff'):
+            with self.subTest(mode=mode):
+                result = self.run_install(mode)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(self.request_offsets(result), [0])
+                self.assertFalse(self.target.exists())
+                if mode == 'cancel_backoff':
+                    self.assertEqual(self.packed.read_bytes(), self.deflate[:40960])
+
+    def test_rejected_resume_and_changed_stage_never_append(self):
+        for mode in ('bad_resume', 'changed_file'):
+            with self.subTest(mode=mode):
+                result = self.run_install(mode)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertEqual(self.request_offsets(result), [0, 40960])
+                self.assertEqual(self.packed.read_bytes(), self.deflate[:40960] + (b'X' if mode == 'changed_file' else b''))
+                self.assertFalse(self.target.exists())
+                self.packed.unlink()
+
+    def test_card_write_failure_is_terminal(self):
+        result = self.run_install('write_error')
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(self.request_offsets(result), [0])
+        self.assertIn('Could not write', result.stdout)
+        self.assertFalse(self.target.exists())
+
     def test_interrupted_and_cancelled_transfers_resume_at_exact_byte(self):
         for mode, code in [('interrupt', 1), ('cancel', 2)]:
             with self.subTest(mode=mode):
                 result = self.run_install(mode)
                 self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(self.request_offsets(result), [0, 4096, 4096, 4096] if mode == 'interrupt' else [0])
                 self.assertFalse(self.target.exists())
                 prefix = self.packed.read_bytes()
                 self.assertEqual(prefix, self.deflate[:4096])
@@ -107,15 +160,14 @@ class StarterDownloadTests(unittest.TestCase):
                 self.target.unlink()
 
     def test_requires_status_range_length_and_space_before_creating_files(self):
-        for mode in ['http200', 'wrong_range', 'wrong_length', 'no_space']:
+        for mode in ['bad_cert', 'http200', 'wrong_range', 'duplicate_range', 'wrong_length', 'no_space']:
             with self.subTest(mode=mode):
                 result = self.run_install(mode)
                 self.assertEqual(result.returncode, 1, result.stderr)
                 self.assertFalse(self.packed.exists())
                 self.assertFalse(self.target.exists())
                 self.assertFalse(self.temp.exists())
-                if mode == 'no_space':
-                    self.assertNotIn('REQUEST', result.stdout)
+                self.assertEqual(self.request_offsets(result), [] if mode == 'no_space' else [0])
 
     def test_invalid_data_never_published(self):
         result = self.run_install(packed_hash='0' * 64)

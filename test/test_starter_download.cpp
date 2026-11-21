@@ -10,6 +10,7 @@ static ssize_t cardWrite(int fd, const void *data, size_t len) {
         assert(p == dictionary_start);
         printf("IMAGE_WRITE %zu\n", len);
     }
+    if (host_mode == "write_error" && len) return -1;
     return write(fd, data, len);
 }
 #define write cardWrite
@@ -49,8 +50,21 @@ int main(int argc, char **argv) {
     assert(argc == 6);
     host_mode = argv[1];
     checkNetworkSpeed();
-    if (host_mode == "timed") host_read_hook = []() {
+    if (host_mode == "timed" || host_mode == "rate_recover") host_read_hook = []() {
         printf("RATE %d\n", (int)StarterDownloadStatus().network_bytes_per_second);
+    };
+    host_delay_hook = []() {
+        const auto status = StarterDownloadStatus();
+        if (strstr(status.message, "Retrying")) {
+            assert(status.network_bytes_per_second < 0);
+            if (host_mode == "cancel_backoff") StarterDownloadCancel();
+            if (host_mode == "changed_file") {
+                host_delay_hook = nullptr;
+                std::ofstream("card/.m5-starter-v1/Test.dsk.deflate", std::ios::app | std::ios::binary) << 'X';
+            }
+        }
+        if (host_mode == "cancel_connect" || host_mode == "cancel_headers" || host_mode == "cancel_body")
+            StarterDownloadCancel();
     };
     std::ifstream source(argv[2], std::ios::binary);
     payload.assign(std::istreambuf_iterator<char>(source), {});

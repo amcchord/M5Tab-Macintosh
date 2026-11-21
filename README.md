@@ -631,7 +631,7 @@ If the card already has a FAT32 volume with at least **1.2 GiB free**, insert it
 2. Select **Mac OS 8.1** or **System 7** and choose **Download**. The screen shows the filename, percentage and recent download speed. Keep the device powered while it downloads, expands and verifies the files.
 3. Choose **Start Up** after verification. **Settings...** lets you use an existing image on the card instead.
 
-An interrupted download can be retried. A different file already present at a starter filename is kept. To use that file, select it in Settings. To install the starter copy, move the existing file elsewhere first.
+If Wi-Fi drops, the installer automatically retries up to three times per file, resuming at the last byte saved on the card. If it still stops, reconnect to Wi-Fi and tap **Retry** to continue. A different file already present at a starter filename is kept. To use that file, select it in Settings. To install the starter copy, move the existing file elsewhere first.
 
 ![Tab5 downloading Mac OS 8.1 at 273.2 KiB/s](screenshots/Tab5-Starter-Download.png)
 
