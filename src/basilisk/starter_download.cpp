@@ -210,7 +210,7 @@ const char *expand(const Asset &a, const char *packed, const char *temp, Scratch
     if (in.fd < 0 || out.fd < 0)
         return "Could not open the installation files.";
     tinfl_init(&s.inflater);
-    uint32_t loaded = 0, written = 0;
+    uint32_t loaded = 0, decoded = 0;
     size_t avail = 0, at = 0, ring = 0;
     progress("Installing", a, 0, a.size);
     while (!cancelled()) {
@@ -226,23 +226,28 @@ const char *expand(const Asset &a, const char *packed, const char *temp, Scratch
         tinfl_status status =
             tinfl_decompress(&s.inflater, s.input + at, &consumed, s.output, s.output + ring, &produced,
                              loaded < a.compressed ? TINFL_FLAG_HAS_MORE_INPUT : 0);
-        if (status < 0 || produced > a.size - written ||
+        if (status < 0 || produced > a.size - decoded ||
             (!produced && !consumed && status != TINFL_STATUS_DONE))
             return "Invalid compressed starter file.";
-        if (!writeAll(out.fd, s.output + ring, produced))
-            return "Could not write the disk image. Check card space.";
         at += consumed;
         avail -= consumed;
-        written += produced;
-        ring = (ring + produced) % TINFL_LZ_DICT_SIZE;
-        progress("Installing", a, written, a.size);
-        if (status == TINFL_STATUS_DONE) {
-            if (loaded != a.compressed || avail || written != a.size)
-                return "Starter file size does not match.";
-            return out.syncClose() ? nullptr : "Could not finish writing the disk image.";
+        decoded += produced;
+        ring += produced;
+        const bool done = status == TINFL_STATUS_DONE;
+        if (done && (loaded != a.compressed || avail || decoded != a.size))
+            return "Starter file size does not match.";
+        // Keep partial output in the inflater's existing dictionary until
+        // it can be written as one aligned card transfer.
+        if (ring == sizeof(s.output) || (done && ring)) {
+            if (!writeAll(out.fd, s.output, ring))
+                return "Could not write the disk image. Check card space.";
+            ring = 0;
+            progress("Installing", a, decoded, a.size);
+            if (!(decoded % (1024 * 1024)))
+                vTaskDelay(1);
         }
-        if (!(written % (1024 * 1024)))
-            vTaskDelay(1);
+        if (done)
+            return out.syncClose() ? nullptr : "Could not finish writing the disk image.";
     }
     return nullptr;
 }

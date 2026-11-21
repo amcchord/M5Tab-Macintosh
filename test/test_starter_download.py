@@ -59,6 +59,24 @@ class StarterDownloadTests(unittest.TestCase):
                                packed_hash or sha(compressed), final_hash or sha(self.data)],
                               cwd=self.root, capture_output=True, text=True)
 
+    def test_fragmented_inflater_writes_full_aligned_blocks_and_one_tail(self):
+        block = 32768
+        for size in (block * 3, block * 3 + 451, block - 1):
+            with self.subTest(size=size):
+                data = self.data[:size]
+                compressor = zlib.compressobj(6, wbits=-15)
+                packed = compressor.compress(data) + compressor.flush()
+                result = self.run_install('fragmented', packed=packed, size=size, final_hash=sha(data))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                writes = [int(line.split()[1]) for line in result.stdout.splitlines()
+                          if line.startswith('IMAGE_WRITE ')]
+                expected = [block] * (size // block)
+                if size % block:
+                    expected.append(size % block)
+                self.assertEqual(writes, expected)
+                self.assertEqual(self.target.read_bytes(), data)
+                self.target.unlink()
+
     def test_interrupted_and_cancelled_transfers_resume_at_exact_byte(self):
         for mode, code in [('interrupt', 1), ('cancel', 2)]:
             with self.subTest(mode=mode):

@@ -44,6 +44,7 @@ inline int xTaskCreatePinnedToCore(void (*fn)(void *), const char *, int, void *
 }
 
 constexpr int TINFL_LZ_DICT_SIZE = 32768, TINFL_FLAG_HAS_MORE_INPUT = 2, TINFL_STATUS_DONE = 0;
+inline std::string host_mode;
 using tinfl_decompressor = z_stream;
 using tinfl_status = int;
 inline void tinfl_init(z_stream *s) {
@@ -54,6 +55,10 @@ inline int tinfl_decompress(z_stream *s, unsigned char *src, size_t *n, unsigned
                             unsigned char *dest, size_t *out, int) {
     assert(dest == base + s->total_out % TINFL_LZ_DICT_SIZE);
     assert(*out == TINFL_LZ_DICT_SIZE - size_t(dest - base));
+    if (host_mode == "fragmented") {
+        *n = std::min(*n, size_t(379));
+        *out = std::min(*out, size_t(247));
+    }
     s->next_in = src;
     s->avail_in = *n;
     s->next_out = dest;
@@ -84,7 +89,7 @@ struct esp_http_client_config_t {
     int (*event_handler)(esp_http_client_event_t *);
 };
 constexpr auto esp_crt_bundle_attach = nullptr;
-inline std::string host_mode;
+
 inline std::vector<uint8_t> payload;
 inline unsigned asset_offset = 12345;
 struct HostClient {
