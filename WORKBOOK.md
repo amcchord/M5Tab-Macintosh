@@ -718,3 +718,11 @@ UART/Waveshare, production P4 silicon, and long-duration soak tests were not
 exercised on hardware. Request replay protection assumes one serialized client and caches
 only the last tagged request. Hardware validation on those other targets and
 longer soak tests remain follow-up work.
+
+## v5.4 beta 3 hardware and startup work — 2026-11-21
+
+The Tab5 release uses four-bit SDMMC for disk images, startup setup and USB Disk. Startup Settings can inspect and explicitly format a card. The blank-card installer uses the project's existing HTTPS archive, authenticates each selected range and verifies the expanded ROM and system disk on the card. The UI reports recent network throughput. Supported Mac OS versions receive the HFS startup check, and the published System 7.5.3 starter has a metadata-specific repair. [Release notes](RELEASE_NOTES.md) · [System 7.5.3 disk evidence](HFS_STARTER7.md)
+
+Tests on a pre-v3 Tab5 covered the original and spare cards, both 8.1 recovery disks, a real whole-card format, simultaneous native SD and Wi-Fi, and verified boot-slot changes. The original card's settings and PRAM were restored and all four disposable images removed. Same-card before/after file rates and the three-interface comparison are in [SD_STABILITY.md](SD_STABILITY.md). The physical firmware backup and test evidence are under the control checkout's ignored `artifacts/tab5-boot-and-web/` directory.
+
+The Wi-Fi browser console runs on the P4 using the original C6 radio firmware. The optional network-split C6 diagnostics build is separate. Beta 3 also includes host utilities and application-only images for the USB-authorized Wi-Fi updater. [Browser console](AUTOMATION.md#wi-fi-console) · [Wi-Fi updates](WIFI_UPDATE.md) · [C6 diagnostics](radio/tab5-c6/README.md)
