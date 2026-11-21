@@ -19,9 +19,17 @@
 #endif
 #include "sys.h"
 
+#if (defined(BOARD_M5STACK_TAB5) && TAB5_SD_NATIVE) || defined(DISK_IMAGE_HOST_TEST)
+#include "native_guest_image.h"
+#endif
+
 // File handle structure - minimal with dirty tracking
 struct file_handle {
+#ifdef TAB5_NATIVE_GUEST_IMAGE
+    NativeGuestImage file;
+#else
     File file;
+#endif
     bool is_open;
     bool read_only;
     bool is_floppy;
@@ -162,6 +170,9 @@ void SysExit(void)
     // Flush all open files
     Sys_periodic_flush();
     sd_initialized = false;
+#ifdef TAB5_NATIVE_GUEST_IMAGE
+    NativeGuestImage::releaseTransferBuffer();
+#endif
 }
 
 /*
@@ -229,17 +240,20 @@ void *Sys_open(const char *name, bool read_only, bool is_cdrom, bool startup)
     
     if (startup && !fh->read_only) Sys_repair_hfs7_starter(name);
 
-    // Open file
-    if (fh->read_only) {
-        fh->file = SD_FS.open(name, FILE_READ);
-    } else {
-        fh->file = SD_FS.open(name, "r+b");
-        if (!fh->file) {
-            fh->file = SD_FS.open(name, FILE_READ);
-            fh->read_only = true;
-        }
+    // The native driver needs direct access to our aligned packet buffer.
+    auto openImage = [&](bool readonly) {
+#ifdef TAB5_NATIVE_GUEST_IMAGE
+        fh->file.open(name, readonly);
+#else
+        fh->file = SD_FS.open(name, readonly ? FILE_READ : "r+b");
+#endif
+    };
+    openImage(fh->read_only);
+    if (!fh->file && !fh->read_only) {
+        fh->read_only = true;
+        openImage(true);
     }
-    
+
     if (!fh->file) {
         delete fh;
         return NULL;

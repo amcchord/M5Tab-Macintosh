@@ -1,6 +1,7 @@
 """Exercise the production guest disk backend and FatFs USB transfer path."""
 from pathlib import Path
 import json
+import os
 import struct
 import subprocess
 import sys
@@ -59,6 +60,16 @@ class StorageTests(unittest.TestCase):
                     if mode == "write":
                         expected[2048:2050] = bytes.fromhex("dead")
                     self.assertEqual(path.read_bytes(), expected)
+
+    def test_native_partial_guest_transfers(self):
+        disk = self.work / "short.dsk"
+        disk.write_bytes(bytes(2048))
+        proc = subprocess.run([self.work / "image", disk, "native_transfers"],
+                              capture_output=True, env={**os.environ, "TAB5_TEST_NATIVE": "1"})
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        data = bytearray((i * 19 + i // 257) % 256 for i in range(16384 + 291))
+        data[513:513 + 993] = data[21:21 + 993]
+        self.assertEqual(disk.read_bytes(), data)
 
     def test_multisector_usb_transfers(self):
         subprocess.run([self.work / "usb"], check=True)
@@ -145,7 +156,8 @@ class StorageTests(unittest.TestCase):
 
         prefix = bytes(8 * 512)
         path.write_bytes(prefix + disk)
-        for mode, expected, action in [("readonly", "0000", "read"), ("open", "0900", "guest_write")]:
-            subprocess.run([self.work / "image", path, mode, str(len(prefix)), expected, action],
-                           check=True, capture_output=True)
+        for env in ({}, {"TAB5_TEST_NATIVE": "1"}):
+            for mode, expected, action in [("readonly", "0000", "read"), ("open", "0900", "guest_write")]:
+                subprocess.run([self.work / "image", path, mode, str(len(prefix)), expected, action],
+                               check=True, capture_output=True, env={**os.environ, **env})
         self.assertEqual(path.read_bytes(), prefix + disk)
