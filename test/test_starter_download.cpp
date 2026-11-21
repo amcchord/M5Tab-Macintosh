@@ -12,9 +12,13 @@ int main(int argc, char **argv) {
     if (host_mode == "no_space") host_free = 1;
     Asset fixture = {"Test.dsk", asset_offset, (uint32_t)payload.size(),
                      (uint32_t)strtoul(argv[3], nullptr, 10), argv[4], argv[5]};
-    Scratch scratch;
+    Scratch *scratch = Scratch::allocate();
+    assert(scratch);
+    assert(reinterpret_cast<uintptr_t>(scratch->input) % CONFIG_CACHE_L2_CACHE_LINE_SIZE == 0);
+    assert(reinterpret_cast<uintptr_t>(scratch->output) % CONFIG_CACHE_L2_CACHE_LINE_SIZE == 0);
     const char *err = prepareStage();
-    if (!err) err = install(fixture, scratch);
+    if (!err) err = install(fixture, *scratch);
+    free(scratch);
     if (cancelled()) { puts("cancelled"); return 2; }
     if (err) { puts(err); return 1; }
     return 0;

@@ -85,8 +85,16 @@ bool writeAll(int fd, const unsigned char *data, size_t n) {
 }
 
 struct Scratch {
-    unsigned char input[chunk], output[TINFL_LZ_DICT_SIZE];
+    // P4 SDMMC splits misaligned PSRAM I/O into individual 512-byte
+    // transfers. Both streaming buffers start on an external cache line.
+    alignas(CONFIG_CACHE_L2_CACHE_LINE_SIZE) unsigned char input[chunk];
+    alignas(CONFIG_CACHE_L2_CACHE_LINE_SIZE) unsigned char output[TINFL_LZ_DICT_SIZE];
     tinfl_decompressor inflater;
+
+    static Scratch *allocate() {
+        return static_cast<Scratch *>(heap_caps_aligned_alloc(
+            alignof(Scratch), sizeof(Scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
 };
 
 enum class Digest { Match, Different, Error };
@@ -325,8 +333,7 @@ const char *prepareStage() {
 
 void worker(void *choice) {
     const Asset &os = choice == &os7 ? os7 : os8;
-    auto *s =
-        static_cast<Scratch *>(heap_caps_malloc(sizeof(Scratch), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    auto *s = Scratch::allocate();
     const char *error = s ? prepareStage() : "Insufficient memory for installation.";
     if (!error)
         error = install(rom, *s);

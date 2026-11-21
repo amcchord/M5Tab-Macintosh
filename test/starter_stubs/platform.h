@@ -33,7 +33,11 @@ inline void portEXIT_CRITICAL(portMUX_TYPE *) {}
 inline void vTaskDelay(int) {}
 inline void vTaskDelete(void *) {}
 constexpr int MALLOC_CAP_8BIT = 1, MALLOC_CAP_SPIRAM = 2, pdPASS = 1;
-inline void *heap_caps_malloc(size_t n, int) { return malloc(n); }
+constexpr size_t CONFIG_CACHE_L2_CACHE_LINE_SIZE = 128;
+inline void *heap_caps_aligned_alloc(size_t alignment, size_t n, int) {
+    void *buffer = nullptr;
+    return posix_memalign(&buffer, alignment, n) == 0 ? buffer : nullptr;
+}
 inline int xTaskCreatePinnedToCore(void (*fn)(void *), const char *, int, void *arg, int, void *, int) {
     fn(arg);
     return pdPASS;
