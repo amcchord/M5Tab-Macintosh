@@ -617,6 +617,8 @@ The emulator works best with **Macintosh Quadra** series ROMs:
 
 ---
 
+The [Wi-Fi console](AUTOMATION.md#wi-fi-console) provides browser screenshots, guest-speed measurements and optional mouse and keyboard input on firmware built from this source.
+
 ## Getting Started
 
 ### Prerequisites

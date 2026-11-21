@@ -57,8 +57,8 @@ On POSIX hosts the client requests exclusive serial ownership. Keep one
 protocol version, and `last_screenshot_stats` reports the serial transfer mode,
 compressed payload bytes, capture/total seconds, and block retries.
 
-Mouse and keyboard commands always remain on serial because they are tiny,
-ordered, and recoverable with `release-all`. On Tab5 the serial device is native
+The host CLI sends mouse and keyboard commands over serial and supports
+`release-all` for held inputs. On Tab5 the serial device is native
 USB/JTAG, so changing the nominal baud rate does not make bulk transfers faster.
 The emulator CPU remains on core 1; serial input, HTTP serving, compression, and
 frame capture run in dedicated tasks on core 0. A capture can contain a small
@@ -119,6 +119,27 @@ Named keys include `return`, `tab`, `space`, `delete`, `escape`, `control`,
 `command`, `shift`, `option`, and the arrow keys. Numeric ADB keycodes are also
 accepted. `release-all` is the recovery command if a client disconnects while a
 key or mouse button is held.
+
+## Wi-Fi console
+
+Connect the Tab5 to your trusted Wi-Fi network in Startup Settings, start the guest, and pair a browser over USB. Run one of these commands on the attached computer.
+
+```sh
+python3 tools/mac_control.py --no-reset web-open
+python3 tools/mac_control.py --no-reset web-open --control
+```
+
+Open the complete link printed by the command in a browser on that network. When several serial devices are connected, add `--port /dev/cu.usbmodem…` before `web-open`. View mode shows a color screenshot, firmware version, uptime and free memory. **Measure for 15 s** reports guest instructions per second for the workload currently running. It uses two samples from the emulator's five-second reporting intervals and shows the actual elapsed device time. **Refresh screen** takes a new snapshot. In control mode, click the screenshot to click in the guest, or tap Return, Escape or Delete.
+
+The URL contains a private 128-bit session key. The browser removes it from the address bar after opening the link. Use the original link if you reload the page. HTTP on this port is unencrypted. Pairing again replaces the previous key. Access expires after 30 minutes, a Wi-Fi disconnect, emulator exit or reset. To revoke access from the attached computer, run `python3 tools/mac_control.py --no-reset web-close`. The existing USB protocol and its per-boot framebuffer fallback keep their own sessions.
+
+### Where the console runs
+
+The Tab5's ESP32-C6 provides Wi-Fi over SDIO. The existing ESP-Hosted configuration runs the TCP/IP stack and this web server on the ESP32-P4. Screenshot compression runs in the P4 network task on core 0. Core 1 runs the Mac. The browser decodes the indexed image. [M5Stack Tab5 hardware](https://docs.m5stack.com/en/core/Tab5) · [ESP-Hosted architecture](https://github.com/espressif/esp-hosted-mcu/blob/main/docs/architecture.md)
+
+Moving the server onto the C6 would require matched P4 and C6 builds. Espressif's Network Split example lets the two processors share an IP and route selected ports to the C6. Custom RPC can carry bounded commands and responses over SDIO. A port would need to stream the P4 framebuffer across that link and preserve ordinary Macintosh networking. The stock Tab5 build leaves the C6 image in place. [Network Split example](https://github.com/espressif/esp-hosted-mcu/tree/main/examples/network_split/station) · [Peer data transfer](https://github.com/espressif/esp-hosted-mcu/tree/main/examples/peer_data_transfer)
+
+P4 firmware updates currently use USB. The shipped 16 MiB flash layout has one 6 MiB factory application. Wi-Fi updates with rollback require a migration to two application slots and an OTA data partition, followed by testing rollback on failed first boot. The separate Waveshare radio updater writes its C6 firmware, whereas a Macintosh firmware update targets the P4. [Partition layout](partitions.csv) · [Espressif OTA guide](https://docs.espressif.com/projects/esp-idf/en/stable/esp32p4/api-reference/system/ota.html)
 
 ## Preboot configuration
 

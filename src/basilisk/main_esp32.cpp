@@ -132,6 +132,7 @@ static void reportIPSStats(uint32 current_time)
             }
         }
         
+        AutomationPublishCpuSample(ips_total_instructions);
         ips_last_instructions = ips_total_instructions;
         ips_last_report_time = current_time;
 

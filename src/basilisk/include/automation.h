@@ -9,11 +9,13 @@
 #define AUTOMATION_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+void AutomationPublishCpuSample(uint64_t count);
 bool AutomationInit(void);
 bool AutomationStartSerial(void);
 void AutomationExit(void);
