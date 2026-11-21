@@ -633,6 +633,8 @@ If the card already has a FAT32 volume with at least **1.2 GiB free**, insert it
 
 An interrupted download can be retried. A different file already present at a starter filename is kept. To use that file, select it in Settings. To install the starter copy, move the existing file elsewhere first.
 
+![Tab5 downloading Mac OS 8.1 at 273.2 KiB/s](screenshots/Tab5-Starter-Download.png)
+
 #### Prepare a card on your computer
 
 Download a ready-to-use SD card image with Mac OS pre-installed:
