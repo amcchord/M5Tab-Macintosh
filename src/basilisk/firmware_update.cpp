@@ -3,6 +3,7 @@
 #include "board_config.h"
 #include <WiFi.h>
 #include <algorithm>
+#include <sdkconfig.h>
 #include <esp_app_desc.h>
 #include <esp_app_format.h>
 #include <esp_chip_info.h>
@@ -15,11 +16,20 @@
 namespace {
 constexpr uint32_t SlotSize = 0x600000;
 constexpr size_t DescriptorOffset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t) + sizeof(esp_app_desc_t);
+struct TargetDescriptor {
+    char board[40];
+    uint16_t sdk_min_revision;
+    uint16_t format;
+};
 #if defined(BOARD_M5STACK_TAB5)
-const char board_tag[] __attribute__((section(".rodata_custom_desc"), used)) = "M5Tab-Macintosh/Tab5/1";
+#define M5TAB_OTA_BOARD "M5Tab-Macintosh/Tab5/1"
 #elif defined(BOARD_WAVESHARE_P4_101)
-const char board_tag[] __attribute__((section(".rodata_custom_desc"), used)) = "M5Tab-Macintosh/Waveshare-P4-10.1/1";
+#define M5TAB_OTA_BOARD "M5Tab-Macintosh/Waveshare-P4-10.1/1"
 #endif
+// pioarduino application image headers can report min revision 0 on both
+// SDKs. Encode the silicon requirement from the SDK actually compiled.
+const TargetDescriptor board_tag __attribute__((section(".rodata_custom_desc"), used)) =
+    {M5TAB_OTA_BOARD, CONFIG_ESP32P4_REV_MIN_FULL, 1};
 
 struct Transfer {
     enum Phase { Idle, Connect, Download, Verify, Ready, Failed } phase = Idle;
@@ -75,11 +85,15 @@ bool compatible(const uint8_t *data) {
     esp_chip_info(&chip);
     if (header.magic != ESP_IMAGE_HEADER_MAGIC || header.chip_id != ESP_CHIP_ID_ESP32P4 ||
         !header.hash_appended || header.min_chip_rev_full > chip.revision ||
-        (header.max_chip_rev_full && chip.revision > header.max_chip_rev_full) ||
-        (header.min_chip_rev_full >= 300) != (chip.revision >= 300)) return false;
+        (header.max_chip_rev_full && chip.revision > header.max_chip_rev_full)) return false;
     uint32_t magic;
     memcpy(&magic, data + sizeof(header) + sizeof(esp_image_segment_header_t), sizeof(magic));
-    return magic == ESP_APP_DESC_MAGIC_WORD && !memcmp(data + DescriptorOffset, board_tag, sizeof(board_tag));
+    TargetDescriptor candidate;
+    memcpy(&candidate, data + DescriptorOffset, sizeof(candidate));
+    return magic == ESP_APP_DESC_MAGIC_WORD && candidate.format == board_tag.format &&
+           !memcmp(candidate.board, board_tag.board, sizeof(candidate.board)) &&
+           candidate.sdk_min_revision <= chip.revision &&
+           (candidate.sdk_min_revision >= 300) == (chip.revision >= 300);
 }
 
 bool valid_url(const char *s) {
