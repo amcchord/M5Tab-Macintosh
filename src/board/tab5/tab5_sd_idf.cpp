@@ -73,7 +73,7 @@ static constexpr esp_vfs_fat_mount_config_t mount_options = {
     .max_files = 5,
 };
 
-const sdmmc_card_t *Tab5SD_Card()
+sdmmc_card_t *Tab5SD_Card()
 {
     return mounted_card;
 }

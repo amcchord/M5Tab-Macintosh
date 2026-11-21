@@ -18,9 +18,9 @@ void loop() {
         const char *err = BoardSD_InspectCard(&info);
         if (err) { Serial.printf("ERR %s\n", err); return; }
         Serial.printf("OK driver=%s width=%u clock_khz=%u bytes=%llu id=%s layout=%s "
-                      "partition_type=%02x partition_lba=%u volume_bytes=%llu cluster_bytes=%u format_supported=%d token=%s\n",
+                      "partitions=%u partition_type=%02x partition_lba=%u volume_bytes=%llu cluster_bytes=%u format_supported=%d token=%s\n",
                       info.driver, info.bus_width, info.clock_khz, (unsigned long long)info.capacity_bytes,
-                      info.identity, info.layout, info.partition_type, info.partition_lba,
+                      info.identity, info.layout, info.partition_count, info.partition_type, info.partition_lba,
                       (unsigned long long)info.volume_bytes, info.cluster_bytes,
                       info.format_supported, info.token);
     } else if (line.startsWith("ERASE FAT32 ")) {

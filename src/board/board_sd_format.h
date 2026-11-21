@@ -22,6 +22,7 @@ typedef struct {
     char driver[20];
     char identity[48];
     char token[33];
+    uint8_t partition_count;
 } BoardSdCardInfo;
 
 // NULL means success. Errors point to static strings suitable for the UI.
