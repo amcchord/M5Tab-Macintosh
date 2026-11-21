@@ -2,18 +2,15 @@
 #include <cassert>
 #include <cstdint>
 #include "diskio.h"
+#include "board_sd.h"
 
 struct Console {
     template<typename... Args> void printf(const char *, Args...) {}
     void println(const char *) {}
     void flush() {}
 } Serial;
-struct Card {
-    unsigned sectorSize() const { return 512; }
-    unsigned numSectors() const { return 1024; }
-protected:
-    uint8_t _pdrv = 0;
-} SD_FS;
+static BoardSdMedia card = {512, 1024, 2};
+BoardSdMedia BoardSD_Media() { return card; }
 
 static bool class_ok = true, bus_ok = true, media_present, power = true;
 static unsigned waits, restarts;
@@ -34,7 +31,10 @@ struct USBMSC {
     template<typename T> void onStartStop(T) {}
     void mediaPresent(bool state) { media_present = state; }
     void isWritable(bool) {}
-    bool begin(unsigned, unsigned) { return class_ok; }
+    bool begin(unsigned sectors, unsigned size) {
+        assert(sectors == card.sectors && size == card.sector_size);
+        return class_ok;
+    }
     void end() { media_present = false; }
 };
 struct {
@@ -62,6 +62,9 @@ void vTaskDelay(unsigned) {
 int main() {
     assert(UsbMsc_IsSupported());
     const char *error = nullptr;
+    card.drive = 0xff;
+    assert(!UsbMsc_Enter(&error) && error && power && !media_present);
+    card.drive = 2;
     class_ok = false;
     assert(!UsbMsc_Enter(&error) && error && power && !media_present);
     class_ok = true; bus_ok = false; error = nullptr;

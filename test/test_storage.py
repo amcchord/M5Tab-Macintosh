@@ -29,7 +29,7 @@ class StorageTests(unittest.TestCase):
     def test_usb_mode_exit_and_failed_start(self):
         includes = self.work / "usb-includes"
         includes.mkdir()
-        for include in ("Arduino.h", "board_sd.h", "board_config.h", "sdkconfig.h",
+        for include in ("Arduino.h", "SD.h", "SD_MMC.h", "sdkconfig.h",
                         "M5Unified.h", "USB.h", "USBMSC.h"):
             (includes / include).touch()
         for board in ("BOARD_M5STACK_TAB5", "BOARD_WAVESHARE_P4_101"):
@@ -38,7 +38,7 @@ class StorageTests(unittest.TestCase):
                 subprocess.run(["c++", "-std=c++17", "-fsanitize=address,undefined",
                                 "-DSOC_USB_OTG_SUPPORTED=1", "-DCONFIG_TINYUSB_MSC_ENABLED=1",
                                 "-D" + board, "-I" + str(includes), "-Itest/storage_stubs",
-                                "-Isrc/basilisk/include", "test/test_usb_mode.cpp", "-o", str(binary)],
+                                "-Isrc/board", "-Isrc/basilisk/include", "test/test_usb_mode.cpp", "-o", str(binary)],
                                cwd=ROOT, check=True)
                 subprocess.run([binary], check=True)
 
