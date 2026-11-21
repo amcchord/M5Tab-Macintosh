@@ -9,11 +9,19 @@ inline uint32_t le32(const uint8_t *p) { return le16(p) | (uint32_t)le16(p + 2) 
 
 inline bool signature(const uint8_t *b) { return b[510] == 0x55 && b[511] == 0xaa; }
 
+inline uint64_t volumeBytes(const uint8_t *b) {
+    if (!memcmp(b + 3, "EXFAT   ", 8))
+        return (le32(b + 72) | ((uint64_t)le32(b + 76) << 32)) * 512;
+    return (uint64_t)(le16(b + 19) ? le16(b + 19) : le32(b + 32)) * 512;
+}
+
 inline const char *volume(const uint8_t *b, uint32_t extent, uint32_t &cluster) {
     cluster = 0;
     if (!signature(b)) return nullptr;
     if (!memcmp(b + 3, "EXFAT   ", 8)) {
-        if (b[108] == 9 && b[109] <= 16) cluster = 512U << b[109];
+        const uint64_t sectors = le32(b + 72) | ((uint64_t)le32(b + 76) << 32);
+        if (b[108] != 9 || b[109] > 16 || !sectors || sectors > extent) return nullptr;
+        cluster = 512U << b[109];
         return "exFAT";
     }
     const unsigned spc = b[13], reserved = le16(b + 14), fats = b[16];

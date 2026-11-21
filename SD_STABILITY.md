@@ -66,7 +66,7 @@ Build `pio run -e esp32p4_tab5_sd_benchmark` for the pre-v3 Tab5. This standalon
 
 Use the same card and Wi-Fi state to compare modes. Wait for the command to finish before resetting. A card initialized in SPI mode generally stays in that mode until its supply is removed. To test native mode after SPI, restart into the diagnostic, reseat the card while it is idle, then issue `MOUNT NATIVE` first. The card needs a FAT32 filesystem.
 
-For an emulator integration build, add `-DTAB5_SD_NATIVE=1`, `-DTAB5_SD_DMA=1`, or both to the Tab5 environment's existing build flags. The mount order is four-bit SDMMC when enabled, SPI DMA when enabled, then Arduino SPI. The next driver runs only when the previous attempt releases the bus and mount point. A resource still owned by another driver requires a restart. USB Disk uses the geometry and drive number of the mounted card. Native mode shares the host controller with the C6 and needs device testing with Wi-Fi after both a cold start and a software restart. The pin map and slot configuration follow [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
+Tab5 release builds try four-bit SDMMC first, SPI DMA second, and Arduino SPI last. The next driver runs after the previous attempt releases the bus and mount point. USB Disk uses the geometry and drive number of the mounted card. The card uses SDMMC slot 0 and the Wi-Fi coprocessor uses slot 1. [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
 
 
 ### Measured effect of FAT cluster size
@@ -74,3 +74,11 @@ For an emulator integration build, add `-DTAB5_SD_NATIVE=1`, `-DTAB5_SD_DMA=1`, 
 On November 21, 2026, an attached pre-v3 Tab5 mounted a 29,664 MiB microSD card in four-bit mode at 40 MHz. A 252 MiB FAT32 volume on the card used 512-byte clusters. The aligned 16 KiB raw reads measured 10,597 KiB/s with Wi-Fi off and 10,595 KiB/s after starting the C6 and scanning. Both live bus measurements showed 40 MHz and four data lines.
 
 With Wi-Fi off, a contiguous 4 MiB file written through the filesystem measured 183 KiB/s including sync. Explicitly preallocating the same size took 462 ms and produced 189 KiB/s end to end. File read-back verified at 795 KiB/s for the ordinary file. The pinned FatFs implementation splits direct reads and writes at cluster boundaries, so this volume's 16 KiB application requests require at least 32 separate card data transfers. Both benchmark files were contiguous. [FatFs read and write paths in ESP-IDF 5.5.4](https://github.com/espressif/esp-idf/blob/v5.5.4/components/fatfs/src/ff.c#L3996-L4003)
+
+## Tab5 card recovery
+
+Card inspection reports the hardware identity, capacity, existing volume size, partition type and cluster size. On a legacy Arduino SPI mount it briefly closes and reopens the card to read the hardware identity. Run recovery from preboot with all files closed, USB Disk disconnected and downloads idle.
+
+Formatting erases **all partitions and files** on the confirmed card. Each inspection issues a new confirmation. The formatter reopens the card and checks its identity, capacity and first sector before writing. It creates one full-size MBR FAT32 partition with two FATs and aligns the data area to 1 MiB. Cards with 512-byte sectors from 64 MiB through the SDK's 32-bit sector limit are supported. A 2 GiB card gets 16 KiB clusters. A 29 GiB or larger card gets 32 KiB clusters. The formatter rereads the partition and boot sector and remounts the filesystem.
+
+The stand-alone pre-v3 diagnostic builds with `pio run -e esp32p4_tab5_card_format`. Send `INSPECT` over USB-C serial to read the card information. After approving the erasure, send `ERASE FAT32 <token>` using the token from that inspection. A different card, a changed first sector or a restart requires a fresh inspection.

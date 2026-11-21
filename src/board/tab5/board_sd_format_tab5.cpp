@@ -106,21 +106,38 @@ const char *inspect(sdmmc_card_t &card, BoardSdCardInfo &info, Identity &id) {
     strcpy(id.cid, info.identity);
     id.first_crc = esp_rom_crc32_le(0, b, sizeof(b));
     const char *layout = volume(b, sectors, info.cluster_bytes);
-    if (layout) info.volume_bytes = info.capacity_bytes;
+    if (layout) info.volume_bytes = volumeBytes(b);
     if (!layout && signature(b)) {
-        for (unsigned i = 0; i < 4; ++i) {
-            const uint8_t *entry = b + 446 + i * 16;
+        uint8_t entries[4][16];
+        memcpy(entries, b + 446, sizeof(entries));
+        unsigned priority = 0;
+        for (const auto &entry : entries) {
             const uint32_t start = le32(entry + 8), size = le32(entry + 12);
-            if (!entry[4] || !start || start >= sectors || !size || size > sectors - start) continue;
-            info.volume_bytes = (uint64_t)size * 512;
-            info.partition_lba = start;
-            info.partition_type = entry[4];
-            if (entry[4] == 0xee) { layout = "GPT"; break; }
+            if (!entry[4] || !start || start >= sectors || !size) continue;
+            if (entry[4] == 0xee && start == 1) {
+                info.partition_type = entry[4];
+                info.partition_lba = start;
+                info.partition_count = 1;
+                layout = "GPT";
+                break;
+            }
+            if (size > sectors - start) continue;
+            ++info.partition_count;
+            // FatFs picks the first supported FAT volume, which may follow
+            // a Linux or exFAT partition. Keep its filesystem and geometry.
+            if (priority == 3) continue;
             if (sdmmc_read_sectors(&card, b, start, 1) != ESP_OK)
                 return "Could not read the card partition.";
-            layout = volume(b, size, info.cluster_bytes);
-            if (!layout) layout = "Other partition";
-            break;
+            uint32_t cluster_bytes = 0;
+            const char *candidate = volume(b, size, cluster_bytes);
+            const unsigned rank = !candidate ? 1 : !strcmp(candidate, "exFAT") ? 2 : 3;
+            if (rank <= priority) continue;
+            priority = rank;
+            info.volume_bytes = candidate ? volumeBytes(b) : (uint64_t)size * 512;
+            info.partition_lba = start;
+            info.partition_type = entry[4];
+            info.cluster_bytes = cluster_bytes;
+            layout = candidate ? candidate : "Other partition";
         }
     }
     snprintf(info.layout, sizeof(info.layout), "%s", layout ? layout : "Unknown or blank");
@@ -145,10 +162,16 @@ const char *format(sdmmc_card_t &card) {
         // partition scanner after an explicitly requested conversion to MBR.
         const uint32_t headers[] = {1, sectors - 1};
         for (uint32_t sector : headers) {
-            if (disk_read(drive, work, sector, 1) != RES_OK) { err = "Could not read partition headers."; break; }
+            if (disk_read(drive, work, sector, 1) != RES_OK) {
+                err = "Could not read partition headers.";
+                break;
+            }
             if (memcmp(work, "EFI PART", 8)) continue;
             memset(work, 0, 512);
-            if (disk_write(drive, work, sector, 1) != RES_OK) { err = "Could not clear the old GPT."; break; }
+            if (disk_write(drive, work, sector, 1) != RES_OK) {
+                err = "Could not clear the old GPT.";
+                break;
+            }
         }
         if (!err) {
             char path[] = {(char)('0' + drive), ':', 0};
@@ -180,8 +203,8 @@ extern "C" const char *BoardSD_InspectCard(BoardSdCardInfo *out)
     const Tab5SdMode mode = Tab5SD_MountedMode();
     const char *err;
 #if TAB5_SD_IDF
-    if (const auto *mounted = Tab5SD_Card()) {
-        err = inspect(*const_cast<sdmmc_card_t *>(mounted), *out, inspected);
+    if (auto *mounted = Tab5SD_Card()) {
+        err = inspect(*mounted, *out, inspected);
     } else
 #endif
     {
