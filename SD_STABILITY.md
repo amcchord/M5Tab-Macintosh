@@ -52,3 +52,17 @@ mounted FatFs drive. A partial-sector write reads and preserves the surrounding
 bytes. The handoff includes separate procedures for checking guest disk
 behavior and benchmarking USB copies after eject and remount.
 [Tab5 hardware handoff](TAB5_HARDWARE_HANDOFF.md)
+
+## Benchmarking the card
+
+Build `pio run -e esp32p4_tab5_sd_benchmark` for the pre-v3 Tab5. This standalone firmware uses the USB Debug SDK and the emulator's board and card drivers. The card stays idle until the first mount command over USB-C serial at 115200 baud.
+
+1. Send `MOUNT SPI` for the release driver, `MOUNT DMA` for Espressif's SDSPI DMA driver, or `MOUNT NATIVE` for four-bit SDMMC. Both SPI drivers use 10 MHz. Native mode requests up to 40 MHz. The log reports the selected driver, clock and card geometry. A diagnostic mount failure ends that test.
+2. Optionally send `WIFI` to start the C6 link and scan for networks. Leave Wi-Fi running through the timed transfers. Send `WIFI` afterwards to check that it can still scan.
+3. Send `WRITE 82f731a0`, using a fresh eight-digit hexadecimal ID for each run. The test exclusively creates `/SDB82f731a0.tmp` on the card, writes 4 MiB in 16 KiB chunks, calls `fsync`, closes the file, then reopens and checks every byte and the length. It reports separate write and read times including pattern generation and verification.
+4. Send `RESET`, select a driver again, then send `CHECK 82f731a0` to verify the saved file. For cold verification, power cycle the card and board before selecting the driver.
+5. Send `CLEAN 82f731a0` to verify the entire file again and remove it. A partial write, wrong ID or mismatched data leaves the file in place for inspection.
+
+Use the same card and Wi-Fi state to compare modes. Wait for the command to finish before resetting. A card initialized in SPI mode generally stays in that mode until its supply is removed. To test native mode after SPI, restart into the diagnostic, reseat the card while it is idle, then issue `MOUNT NATIVE` first. The card needs a FAT32 filesystem.
+
+For an emulator integration build, add `-DTAB5_SD_DMA=1` or `-DTAB5_SD_NATIVE=1` to the Tab5 environment's existing build flags. Either build tries its selected driver at startup and falls back to Arduino SPI if mounting fails. USB Disk uses the geometry and drive number of the mounted card. Native mode shares the host controller with the C6 and needs device testing with Wi-Fi after both a cold start and a software restart. The pin map and slot configuration follow [M5Stack's board driver](https://github.com/m5stack/M5Tab5-UserDemo/blob/main/platforms/tab5/components/m5stack_tab5/m5stack_tab5.c).
