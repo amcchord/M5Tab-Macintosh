@@ -83,7 +83,7 @@ This keeps one connection open, checks ping and both screenshot modes, writes
 JSON timings/failures and PNG evidence, and exits nonzero if any sample fails.
 It forces serial transport so WiFi cannot hide a USB regression. Serial service
 starts after SD/configuration initialization, before the settings screen. A
-fatal board, SD, or ROM setup error before that point remains outside the API.
+board or SD mount failure before that point remains outside the API. A mounted card missing startup media opens the SD card setup screen.
 
 For the pre-v3 Tab5 used for serial development, an opt-in build profile uses
 Arduino 3.3.8 / ESP-IDF 5.5.4, matching its previous working firmware:
@@ -237,7 +237,16 @@ python3 tools/mac_control.py touch up                    # ...and release
   `bootcd`, `rotate`, `wifi`, `usb`, `start`. Wi-Fi: `networks`, `password`,
   `scan`, `back`, `join`. Keyboard: `key:<character>`, `shift`, `delete`,
   `space`, `ok`, `cancel`. USB Disk: `done`. `boot-status` reports the screen
-  as `settings`, `wifi`, `keyboard`, `usb` or `firmware`.
+  as `settings`, `starter`, `wifi`, `keyboard`, `usb` or `firmware`. Starter setup
+  exposes `system8`, `system7`, `wifi`, `settings` and `action` touch targets.
+
+On the starter screen, `boot-starter 8` or `boot-starter 7` starts installation
+after Wi-Fi is connected. `boot-starter status` returns the stage message,
+completed bytes, and total bytes for that stage. `boot-starter cancel` requests
+cancellation. Wait for a terminal state before leaving the installer. A
+successful `boot-start` selects the verified image and starts the emulator.
+Use `boot-starter show` from Startup Settings to inspect the installer on a
+populated card. Opening the screen leaves the card contents intact.
 
 `tools/preboot_screenshots.py OUTPUT [--panel] [--usb] [--boot]` walks every
 screen this way and writes one PNG per step (plus `-panel.png` readbacks with

@@ -18,6 +18,17 @@ class BootControlTests(unittest.TestCase):
         self.client = mc.MacControl.__new__(mc.MacControl)
         self.client.request = Mock()
 
+    def test_starter_status_and_actions(self):
+        self.client.request.return_value = '@B2 OK BOOT STARTER working 512 2048 524f4d'
+        self.assertEqual(self.client.boot_starter('status'), {
+            'state': 'working', 'completed': 512, 'total': 2048, 'message': 'ROM'})
+        self.client.request.return_value = '@B2 OK BOOT STARTER DOWNLOAD'
+        self.assertEqual(self.client.boot_starter('7'), {'ok': True})
+        self.client.request.assert_called_with('BOOT STARTER 7', 'OK BOOT STARTER', timeout=15.0)
+        self.client.request.return_value = '@B2 OK BOOT STARTER working X 2048 -'
+        with self.assertRaises(mc.ControlError):
+            self.client.boot_starter('status')
+
     def test_strings_round_trip_spaces_equals_and_unicode(self):
         value = '/Mac OS 8 = café.hfv'
         self.client.boot_set('disk', value)

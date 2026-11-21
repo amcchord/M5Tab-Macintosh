@@ -518,6 +518,21 @@ class MacControl:
                 return result
         return result
 
+    def boot_starter(self, action: str) -> dict[str, Any]:
+        actions = {"show": "SHOW", "7": "7", "8": "8", "cancel": "CANCEL", "status": "STATUS"}
+        if action not in actions:
+            raise ControlError("unknown starter action")
+        fields = self._boot_request("STARTER " + actions[action], "STARTER").split()
+        if action != "status":
+            return {"ok": True}
+        if len(fields) != 8 or fields[4] not in {"idle", "working", "done", "failed", "cancelled"}:
+            raise ControlError("invalid starter download status")
+        try:
+            return {"state": fields[4], "completed": int(fields[5]), "total": int(fields[6]),
+                    "message": self._boot_decode(fields[7])}
+        except ValueError as exc:
+            raise ControlError("invalid starter download progress") from exc
+
     def boot_action(self, action: str) -> None:
         commands = {"save": "SAVE", "reload": "RELOAD", "rescan": "RESCAN",
                     "wifi-connect": "WIFI CONNECT", "wifi-disconnect": "WIFI DISCONNECT"}
@@ -1341,6 +1356,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("info")
     subparsers.add_parser("boot-status")
+    starter = subparsers.add_parser("boot-starter", help="set up the startup files on a FAT32 card")
+    starter.add_argument("action", choices=("show", "7", "8", "status", "cancel"))
     get = subparsers.add_parser("boot-get", help="read current boot settings (passwords stay private)")
     get.add_argument("key", nargs="?", choices=BOOT_READ_SETTINGS)
     setting = subparsers.add_parser("boot-set", help="change a setting in preboot; save/start persists it")
@@ -1406,6 +1423,7 @@ def main(argv: list[str] | None = None) -> int:
             if args.command.startswith("boot-"):
                 action = args.command[5:]
                 if action == "status": result = control.boot_status()
+                elif action == "starter": result = control.boot_starter(args.action)
                 elif action == "hit": result = control.boot_hit(args.name)
                 elif action == "get": result = control.boot_get(args.key)
                 elif action == "set": result = control.boot_set(args.key, args.value)

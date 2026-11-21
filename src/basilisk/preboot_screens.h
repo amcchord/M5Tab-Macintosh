@@ -66,6 +66,7 @@ struct SettingsView {
     int ram_mb;
     bool sound, boot_from_cd, rotate180;
     bool usb_available;
+    bool needs_setup;
     int wifi_bars;                 /* 0..4 */
     const char *wifi_status;       /* "Connected", "Not connected", ... */
     const char *wifi_detail;       /* SSID and address, or a hint */
@@ -84,6 +85,23 @@ SettingsLayout LayoutSettings(int width, int height, bool usb_available);
 void PaintSettings(const SettingsLayout &layout, const SettingsView &view);
 /* Control under a point (lists included), or kNoControl. */
 int SettingsControlAt(const SettingsLayout &layout, int x, int y);
+
+/* ---- SD card setup ----------------------------------------------------- */
+
+enum StarterControl { kStarter8, kStarter7, kStarterSettings, kStarterWiFi, kStarterAction, kStarterCount };
+
+struct StarterLayout {
+    Rect window, body, status, progress, network;
+    Rect controls[kStarterCount];
+};
+struct StarterView {
+    const char *clock, *status, *network, *action;
+    int pressed, percent;   /* -1 if total size is unknown */
+    bool system7, working, action_enabled;
+};
+StarterLayout LayoutStarter(int width, int height);
+void PaintStarter(const StarterLayout &layout, const StarterView &view);
+int StarterControlAt(const StarterLayout &layout, int x, int y);
 
 /* ---- Wi-Fi ------------------------------------------------------------- */
 
