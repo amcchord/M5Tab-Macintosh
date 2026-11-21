@@ -633,9 +633,20 @@ Download a ready-to-use SD card image with Mac OS pre-installed:
 
 **[📥 Download sdCard.zip](https://www.mcchord.net/static/sdCard.zip)**
 
-1. Format your microSD card as **FAT32**
-2. Extract the ZIP contents to the **root** of the SD card
+1. Use a **FAT32** microSD card.
+2. Extract the ZIP and copy the **contents of the `sdCard` folder** to the root of the card. Check that `Q650.ROM` is at the root.
 3. Insert into Tab5 and boot
+
+**Using v5.4 beta 2?** Both Macintosh disks in the starter download checked on November 21, 2026 have their HFS clean-shutdown flag cleared. On a Tab5, a copy of a previously used Mac OS 8.1 disk with this flag showed a flashing question-mark floppy on beta 2. It booted on v5.3. After choosing **Special → Shut Down** in Finder on v5.3, the same copy booted on beta 2. Keep the original image when trying this procedure.
+
+To check a downloaded ZIP or a disk image on your computer, run the following from the project folder with the image closed in any emulator.
+
+```sh
+python3 tools/check_startup_disk.py sdCard.zip
+python3 tools/check_startup_disk.py /Volumes/TAB5/Macintosh8.dsk
+```
+
+The tool reads the primary classic HFS header. It exits with 0 when all checked volumes are marked cleanly unmounted, 1 when a volume has an unclean or inconsistent flag, and 2 when any image could not be checked. A clean flag alone cannot establish filesystem integrity or bootability.
 
 #### Manual Setup
 

@@ -30,6 +30,12 @@ The pre-v3 standard and USB Debug applications both ran on an ESP32-P4 v1.3 Tab5
 - The standard application completed Speedometer 4.02 with a Performance Rating of 0.908. CPU was 0.802, Graphics 0.810, Disk 0.900 and Math 10.134. There was no matched baseline run.
 - The release uses the existing translation. The host differential comparison with a patched Quadra 650 ROM passed 131,824 runs with zero failures. New workload profiling, a device differential self-test and training-versus-holdout timings remain open.
 
+## Starter download and Finder display check — 2026-11-21
+
+The public `sdCard.zip` download matched the local archive byte for byte by SHA-256 (`1417a88acb433927d6a6ea7dd487ddbf6fe9a6f2afbb879eac49f16dbfb373e8`). Both `Macintosh7.dsk` and `Macintosh8.dsk` have primary HFS volume flags of `0x0000`. The saved image from the beta 2 hardware test also has those flags. Only that last image has the recorded beta 2 boot failure. The [startup disk checker](tools/check_startup_disk.py) reads the primary header from an offline image or ZIP. Before replacing the starter download, boot copies of both images, shut down in Finder, recheck their headers and cold-boot each on the Tab5.
+
+With Finder running on the attached Tab5, 2 of 30 panel checks showed differences with the Control Strip open, 0 of 30 with it collapsed, and 2 of 30 after reopening it. All four first differences were inside the strip at guest rows 337–338. Each check compared 921,600 panel pixels. The guest continues drawing during this comparison. Collapse the strip for a quiet Finder baseline and record its state when comparing builds. This test used the running firmware and ended in the original boot session with the strip open. Private captures are under `artifacts/startup-disk-check/` in the control checkout.
+
 ## Get the exact checkout and record the baseline
 
 ```sh
