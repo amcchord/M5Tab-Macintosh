@@ -1,6 +1,7 @@
 // Install only the selected members of the project's existing starter ZIP.
 // The byte ranges and both digests pin the compressed and installed bytes.
 #include "starter_download.h"
+#include "starter_speed.h"
 #include "board_config.h"
 #include <Arduino.h>
 #include <WiFi.h>
@@ -47,6 +48,7 @@ constexpr Asset os8 = {"Macintosh8.dsk",
 
 portMUX_TYPE lock = portMUX_INITIALIZER_UNLOCKED;
 StarterDownloadInfo info = {};
+StarterNetworkSpeed network_speed;
 bool interrupted = false;
 void progress(const char *action, const Asset &asset, uint32_t completed, uint32_t total) {
     char line[sizeof(info.message)];
@@ -166,6 +168,9 @@ const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &sc
     if (!client)
         return "Could not open the download connection.";
     progress("Downloading", a, pos, a.compressed);
+    portENTER_CRITICAL(&lock);
+    network_speed.start(millis());
+    portEXIT_CRITICAL(&lock);
     const char *error = "Could not reach the starter download. Check Wi-Fi and retry.";
     if (esp_http_client_set_header(client, "Range", header) == ESP_OK &&
         esp_http_client_open(client, 0) == ESP_OK) {
@@ -185,6 +190,9 @@ const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &sc
                     error = "Download interrupted. Reconnect Wi-Fi and retry to resume.";
                     break;
                 }
+                portENTER_CRITICAL(&lock);
+                network_speed.receivedBytes(n, millis());
+                portEXIT_CRITICAL(&lock);
                 if (!writeAll(out.fd, scratch.input, n)) {
                     error = "Could not write the download. Check card space.";
                     break;
@@ -201,6 +209,9 @@ const char *download(const Asset &a, const char *path, uint32_t pos, Scratch &sc
                 error = "Could not finish writing the download.";
         }
     }
+    portENTER_CRITICAL(&lock);
+    network_speed.stop();
+    portEXIT_CRITICAL(&lock);
     esp_http_client_cleanup(client);
     return error;
 }
@@ -360,6 +371,7 @@ void worker(void *choice) {
 StarterDownloadInfo StarterDownloadStatus() {
     portENTER_CRITICAL(&lock);
     StarterDownloadInfo result = info;
+    result.network_bytes_per_second = network_speed.bytesPerSecond(millis());
     portEXIT_CRITICAL(&lock);
     return result;
 }
