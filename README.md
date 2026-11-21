@@ -639,6 +639,8 @@ Download a ready-to-use SD card image with Mac OS pre-installed:
 
 **Using v5.4 beta 2?** Both Macintosh disks in the starter download checked on November 21, 2026 have their HFS clean-shutdown flag cleared. On a Tab5, a copy of a previously used Mac OS 8.1 disk with this flag showed a flashing question-mark floppy on beta 2. It booted on v5.3. After choosing **Special → Shut Down** in Finder on v5.3, the same copy booted on beta 2. Keep the original image when trying this procedure.
 
+Current source builds automatically hand an unclean classic HFS startup disk to the guest's File Manager for checking when the System file identifies Mac OS 7.6, 7.6.1, 8.0 or 8.1. The ROM sees the boot-volume check flags in memory. Mac OS owns any subsequent repairs and clears the flags on a clean shutdown. Earlier systems, including the 7.5.3 starter disk, use their original mount checks. Read-only disks, HFS Plus volumes, unrecognized or damaged boot metadata and a System resource map outside the first three extents also use the original mount path. [Apple's description of the boot-volume flags](https://developer.apple.com/library/archive/technotes/tn/tn1150.html#VolumeHeader)
+
 To check a downloaded ZIP or a disk image on your computer, run the following from the project folder with the image closed in any emulator.
 
 ```sh
