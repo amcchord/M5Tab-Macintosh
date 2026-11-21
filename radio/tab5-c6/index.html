@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tab5 radio</title>
+<style>
+body { font: 1rem/1.5 system-ui,sans-serif; margin: 2rem auto; max-width: 34rem; padding: 0 1rem }
+table { border-collapse: collapse; width: 100% }
+th,td { border-bottom: 1px solid #aaa; padding: .5rem 0; text-align: left }
+button { font: inherit; margin: 1rem 0 }
+</style>
+<h1>Tab5 radio</h1>
+<table>
+<tr><th scope="row">C6 uptime</th><td id="uptime">…</td></tr>
+<tr><th scope="row">C6 free memory</th><td id="heap">…</td></tr>
+<tr><th scope="row">P4 SDIO link</th><td id="link">…</td></tr>
+<tr><th scope="row">P4 power saving</th><td id="sleep">…</td></tr>
+</table>
+<p id="connection" role="status"></p>
+<button id="run">Test 64 KiB download</button>
+<output id="result"></output>
+<p><a href="/status">Status JSON</a></p>
+<script>
+const byId = id => document.getElementById(id);
+async function refreshStatus() {
+  try {
+    const response = await fetch('/status', {cache: 'no-store'});
+    if (!response.ok) throw Error();
+    const data = await response.json();
+    byId('uptime').textContent = data.uptime_s + ' s';
+    byId('heap').textContent = data.free_heap_bytes + ' bytes';
+    byId('link').textContent = data.p4_sdio_open ? 'Open' : 'Closed';
+    byId('sleep').textContent = data.p4_power_save ? 'On' : 'Off';
+    byId('connection').textContent = '';
+  } catch {
+    byId('connection').textContent = 'Radio unavailable. Retrying…';
+  } finally {
+    setTimeout(refreshStatus, 5000);
+  }
+}
+byId('run').onclick = async () => {
+  const button = byId('run'), result = byId('result');
+  button.disabled = true;
+  result.textContent = 'Measuring…';
+  try {
+    const start = performance.now();
+    const response = await fetch('/transfer', {cache: 'no-store'});
+    if (!response.ok) throw Error();
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const seconds = (performance.now() - start) / 1000;
+    if (bytes.length !== 65536 || !bytes.every((v, i) => v === (i & 255)))
+      throw Error();
+    result.textContent = (64 / seconds).toFixed(1) + ' KiB/s · 64 KiB verified';
+  } catch {
+    result.textContent = 'Transfer failed';
+  } finally {
+    button.disabled = false;
+  }
+};
+refreshStatus();
+</script>
+</html>
