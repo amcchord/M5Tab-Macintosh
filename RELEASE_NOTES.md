@@ -2,7 +2,7 @@
 
 ## Getting started on a Tab5
 
-Insert a microSD card and boot. When the ROM or startup disk is missing, **Set Up SD Card** opens. Join Wi-Fi, choose Mac OS 8.1 or System 7.5.3, and tap **Download**. The installer needs 1.2 GiB free. It checks the download and reads back the expanded files before offering **Start Up**. Interrupted downloads can resume. Existing files with different contents are preserved. [Setup instructions](README.md#sd-card-setup)
+Insert a microSD card and boot. When the ROM or startup disk is missing, **Set Up SD Card** opens. Join Wi-Fi, choose Mac OS 8.1 or System 7.5.3, and tap **Download**. The installer needs 1.2 GiB free. The screen shows recent Wi-Fi download speed. The installer checks the compressed data and reads back the expanded files before offering **Start Up**. Interrupted downloads can resume. Existing files with different contents are preserved. [Setup instructions](README.md#sd-card-setup)
 
 **SD Card** in Startup Settings shows the mounted filesystem and card size. Formatting requires confirmation and erases the entire card, including other partitions. The Tab5 creates a FAT32 volume suitable for Macintosh disk images. [Storage and benchmarks](SD_STABILITY.md)
 
@@ -12,6 +12,12 @@ Insert a microSD card and boot. When the ROM or startup disk is missing, **Set U
 - Pair a browser over USB for color screenshots, memory and firmware status, and a timed guest-speed measurement. Optional control supports mouse clicks, double-clicks and typing. The stock ESP32-C6 carries Wi-Fi traffic. The ESP32-P4 serves the console. [Browser controls](AUTOMATION.md#wi-fi-console)
 - The optional two-slot flash layout supports USB-authorized firmware updates over Wi-Fi. The P4 verifies the application against the selected board, silicon revision and SHA-256 and reads back the inactive slot before selecting it. [Setup, updates and rollback](WIFI_UPDATE.md)
 - The indexed renderer skips unchanged row runs. A deterministic Finder selection trace used 55% fewer submitted panel bytes at both 1 and 8 bits per pixel, with identical final pixels in the host renderer. [Workload and measurements](EMULATOR_PERFORMANCE.md)
+
+## Hardware checks
+
+An attached pre-v3 Tab5 formatted a 29,664 MiB spare card as FAT32 with 32 KiB clusters and restarted into **Set Up SD Card**. With Wi-Fi enabled on the formatted card, four-bit SDMMC read a 4 MiB test file at 10,198 KiB/s and wrote it at 1,369 KiB/s including sync. The previous 10 MHz Arduino SPI interface measured 1,759 KiB/s and 920 KiB/s on the same card. Files were checked again after a restart. [Measurements and commands](SD_STABILITY.md)
+
+The Tab5 received a P4 application over its stock C6 Wi-Fi link, verified the inactive flash slot, and booted it. Interrupted transfers kept the running slot selected. Browser tests covered a color Finder screenshot, a timed guest-speed sample, remote input and session revocation.
 
 ## Choosing a download
 

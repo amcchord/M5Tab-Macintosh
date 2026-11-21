@@ -630,7 +630,7 @@ When the Tab5 cannot mount a card, **SD Card** shows the card identity, capacity
 With firmware built from this source, insert a FAT32 microSD card with at least **1.2 GiB free** and start the device. If the ROM or selected startup image is missing, **Set Up SD Card** opens.
 
 1. Choose **Wi-Fi...**, join a network, and return to setup.
-2. Select **Mac OS 8.1** or **System 7** and choose **Download**. Keep the device powered while it downloads, expands and verifies the files.
+2. Select **Mac OS 8.1** or **System 7** and choose **Download**. The screen shows the filename, percentage and recent download speed. Keep the device powered while it downloads, expands and verifies the files.
 3. Choose **Start Up** after verification. **Settings...** lets you use an existing image on the card instead.
 
 An interrupted download can be retried. A different file already present at a starter filename is kept. To use that file, select it in Settings. To install the starter copy, move the existing file elsewhere first.
