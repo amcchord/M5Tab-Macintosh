@@ -15,7 +15,10 @@ Import("env")
 
 
 def translated_code(env, node):
-    return env.Object(node, CCFLAGS=env["CCFLAGS"] + ["-fno-jump-tables", "-fno-toplevel-reorder"])
+    return env.Object(
+        node,
+        CCFLAGS=env["CCFLAGS"] + ["-fno-jump-tables", "-fno-toplevel-reorder", "-fno-stack-protector"],
+    )
 
 
 env.AddBuildMiddleware(translated_code, "*/aot_rom_generated.cpp")

@@ -64,9 +64,13 @@ PATCH_OPCODES = ([0x7300 + i for i in range(256)] + [0x7500 + i for i in range(2
 ALLOWED_CALLS = {
     "get_long", "get_word", "get_byte", "put_long", "put_word", "put_byte",
     "get_disp_ea_020", "cctrue", "m68k_dreg", "m68k_areg",
+    "m68k_dreg_w_set", "m68k_dreg_b_set",
     "SET_CFLG", "SET_ZFLG", "SET_NFLG", "SET_VFLG", "SET_XFLG",
-    "SET_CFLG_ALWAYS", "SET_NFLG_ALWAYS", "if", "while", "for", "switch",
-    "AOT_MULL", "AOT_EXCEPTION", "AOT_PC",
+    "SET_CFLG_ALWAYS", "SET_NFLG_ALWAYS",
+    "GET_CFLG", "GET_ZFLG", "GET_NFLG", "GET_VFLG", "GET_XFLG",
+    "CLEAR_CZNV", "SET_CZNV_ZN", "SET_CZNV_ALL", "COPY_CARRY",
+    "if", "while", "for", "switch",
+    "AOT_MULL", "AOT_EXCEPTION", "AOT_PC", "AOT_TOOLBOX_TRAP",
 }
 FORBIDDEN_WORDS = re.compile(r"\b(goto|return|regs\s*\.\s*(?!regs\b)\w+|regflags|currprefs|abort)\b")
 CALL = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
@@ -158,15 +162,12 @@ def parse_cpuemu(path: Path) -> dict[str, tuple[str, str]]:
     name = comment = None
     body: list[str] = []
     skipping = 0   # 0: emit, 1: inside #else of the opcode-layout conditional
+    depth = 0
     for line in path.read_text().splitlines():
         if name is None:
             m = header.match(line)
             if m:
-                name, comment, body, skipping = m.group(1), m.group(2), [], 0
-            continue
-        if line == "}":
-            handlers[name] = (comment, "\n".join(body[1:]))   # drop the opening brace
-            name = None
+                name, comment, body, skipping, depth = m.group(1), m.group(2), [], 0, 0
             continue
         if line.startswith("#ifdef HAVE_GET_WORD_UNSWAPPED"):
             skipping = 0
@@ -181,6 +182,10 @@ def parse_cpuemu(path: Path) -> dict[str, tuple[str, str]]:
             raise SystemExit(f"unexpected preprocessor line in {name}: {line}")
         if not skipping:
             body.append(line)
+            depth += line.count("{") - line.count("}")
+            if depth == 0 and len(body) > 1:
+                handlers[name] = (comment, "\n".join(body[1:-1]))   # drop opening/closing braces
+                name = None
     return handlers
 
 
@@ -271,6 +276,28 @@ def register_use(code: str) -> tuple[frozenset, frozenset] | None:
         uses.add(index)
         if ASSIGNMENT.match(code, position):
             writes.add(index)
+    for m in re.finditer(r"m68k_dreg_(?:w|b)_set\s*\(\s*regs\s*,", code):
+        depth, position = 1, m.end()
+        comma = None
+        while depth and position < len(code):
+            ch = code[position]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                comma = position
+                break
+            position += 1
+        if comma is None:
+            return None
+        index = evaluate(code[m.end():comma], names)
+        if index is None or not 0 <= index <= 7:
+            return None
+        uses.add(index)
+        writes.add(index)
     # Index registers of indexed addressing modes.
     for m in re.finditer(r"get_disp_ea_020\s*\(", code):
         tail = code[m.end():]
@@ -281,6 +308,303 @@ def register_use(code: str) -> tuple[frozenset, frozenset] | None:
     return frozenset(uses), frozenset(writes)
 
 
+FLAGS = ("c", "z", "n", "v", "x")
+CZNV = frozenset({"c", "z", "n", "v"})
+ALL_FLAGS = frozenset(FLAGS)
+CC_FLAG_READS = {
+    0: frozenset(),
+    1: frozenset(),
+    2: frozenset({"c", "z"}),
+    3: frozenset({"c", "z"}),
+    4: frozenset({"c"}),
+    5: frozenset({"c"}),
+    6: frozenset({"z"}),
+    7: frozenset({"z"}),
+    8: frozenset({"v"}),
+    9: frozenset({"v"}),
+    10: frozenset({"n"}),
+    11: frozenset({"n"}),
+    12: frozenset({"n", "v"}),
+    13: frozenset({"n", "v"}),
+    14: frozenset({"z", "n", "v"}),
+    15: frozenset({"z", "n", "v"}),
+}
+FLAG_TOKEN = re.compile(r'[A-Za-z_]\w*|\d+|[{ }();,]')
+
+
+@dataclass(frozen=True)
+class FlagEffect:
+    reads: frozenset = frozenset()
+    must_w: frozenset = frozenset()
+    may_w: frozenset = frozenset()
+    exits: bool = False
+    exc_unwritten: frozenset = frozenset()
+    has_mull: bool = False
+
+
+EMPTY_EFFECT = FlagEffect()
+
+
+def compose_seq(a: FlagEffect, b: FlagEffect) -> FlagEffect:
+    if a.exits:
+        return a
+    return FlagEffect(
+        reads=a.reads | (b.reads - a.must_w),
+        must_w=a.must_w | b.must_w,
+        may_w=a.may_w | b.may_w,
+        exits=b.exits,
+        exc_unwritten=a.exc_unwritten | (b.exc_unwritten - a.must_w),
+        has_mull=a.has_mull or b.has_mull,
+    )
+
+
+def compose_branch(cond_reads: frozenset, t: FlagEffect, e: FlagEffect) -> FlagEffect:
+    reads = cond_reads | t.reads | e.reads
+    may_w = t.may_w | e.may_w
+    exc_unwritten = t.exc_unwritten | e.exc_unwritten
+    has_mull = t.has_mull or e.has_mull
+    if t.exits and e.exits:
+        return FlagEffect(reads, frozenset(), may_w, True, exc_unwritten, has_mull)
+    if t.exits:
+        return FlagEffect(reads, e.must_w, may_w, False, exc_unwritten, has_mull)
+    if e.exits:
+        return FlagEffect(reads, t.must_w, may_w, False, exc_unwritten, has_mull)
+    return FlagEffect(reads, t.must_w & e.must_w, may_w, False, exc_unwritten, has_mull)
+
+
+def analyze_code_flags(code: str) -> FlagEffect:
+    """Compute exact intra-instruction flag read/write summary over C++ body."""
+    tokens = [t for t in FLAG_TOKEN.findall(code) if not t.isspace()]
+    n = len(tokens)
+
+    def read_parens(idx: int) -> tuple[list[str], int]:
+        if idx >= n or tokens[idx] != "(":
+            return [], idx
+        depth = 1
+        start = idx + 1
+        i = start
+        while i < n and depth:
+            if tokens[i] == "(":
+                depth += 1
+            elif tokens[i] == ")":
+                depth -= 1
+                if depth == 0:
+                    return tokens[start:i], i + 1
+            i += 1
+        return tokens[start:], n
+
+    def expr_reads(expr: list[str]) -> frozenset:
+        reads = set()
+        i = 0
+        while i < len(expr):
+            tok = expr[i]
+            if tok in ("GET_CFLG", "GET_ZFLG", "GET_NFLG", "GET_VFLG", "GET_XFLG"):
+                reads.add(tok[4].lower())
+            elif tok == "cctrue" and i + 1 < len(expr) and expr[i + 1] == "(":
+                j = i + 2
+                depth = 1
+                inner = []
+                while j < len(expr) and depth:
+                    if expr[j] == "(":
+                        depth += 1
+                    elif expr[j] == ")":
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    inner.append(expr[j])
+                    j += 1
+                if len(inner) == 1 and inner[0].isdigit():
+                    reads |= CC_FLAG_READS.get(int(inner[0]), CZNV)
+                else:
+                    reads |= CZNV
+                i = j
+            i += 1
+        return frozenset(reads)
+
+    def eval_simple(stmt: list[str]) -> FlagEffect:
+        eff = EMPTY_EFFECT
+        i = 0
+        m = len(stmt)
+        while i < m:
+            tok = stmt[i]
+            if tok == "CLEAR_CZNV":
+                eff = compose_seq(eff, FlagEffect(must_w=CZNV, may_w=CZNV))
+            elif tok == "COPY_CARRY":
+                eff = compose_seq(eff, FlagEffect(reads=frozenset({"c"}), must_w=frozenset({"x"}), may_w=frozenset({"x"})))
+            elif tok in ("SET_CZNV_ZN", "SET_CZNV_ALL", "SET_CFLG", "SET_CFLG_ALWAYS",
+                         "SET_ZFLG", "SET_NFLG", "SET_NFLG_ALWAYS", "SET_VFLG", "SET_XFLG",
+                         "AOT_MULL", "AOT_EXCEPTION", "AOT_TOOLBOX_TRAP", "cctrue"):
+                if i + 1 < m and stmt[i + 1] == "(":
+                    depth = 1
+                    j = i + 2
+                    args = []
+                    while j < m and depth:
+                        if stmt[j] == "(":
+                            depth += 1
+                        elif stmt[j] == ")":
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        args.append(stmt[j])
+                        j += 1
+                    i = j
+                else:
+                    args = []
+                arg_r = expr_reads(args)
+                if tok in ("SET_CZNV_ZN", "SET_CZNV_ALL"):
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=CZNV, may_w=CZNV))
+                elif tok in ("SET_CFLG", "SET_CFLG_ALWAYS"):
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=frozenset({"c"}), may_w=frozenset({"c"})))
+                elif tok == "SET_ZFLG":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=frozenset({"z"}), may_w=frozenset({"z"})))
+                elif tok in ("SET_NFLG", "SET_NFLG_ALWAYS"):
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=frozenset({"n"}), may_w=frozenset({"n"})))
+                elif tok == "SET_VFLG":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=frozenset({"v"}), may_w=frozenset({"v"})))
+                elif tok == "SET_XFLG":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=frozenset({"x"}), may_w=frozenset({"x"})))
+                elif tok == "AOT_MULL":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=CZNV, may_w=CZNV, has_mull=True))
+                elif tok == "AOT_EXCEPTION":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, exits=True, exc_unwritten=ALL_FLAGS))
+                elif tok == "AOT_TOOLBOX_TRAP":
+                    eff = compose_seq(eff, FlagEffect(reads=arg_r, must_w=CZNV, may_w=CZNV, exc_unwritten=ALL_FLAGS))
+                elif tok == "cctrue":
+                    cc_r = CC_FLAG_READS.get(int(args[0]), CZNV) if len(args) == 1 and args[0].isdigit() else CZNV
+                    eff = compose_seq(eff, FlagEffect(reads=cc_r))
+            elif tok in ("GET_CFLG", "GET_ZFLG", "GET_NFLG", "GET_VFLG", "GET_XFLG"):
+                eff = compose_seq(eff, FlagEffect(reads=frozenset({tok[4].lower()})))
+            i += 1
+        return eff
+
+    def parse_stmt(idx: int) -> tuple[FlagEffect, int]:
+        if idx >= n:
+            return EMPTY_EFFECT, idx
+        tok = tokens[idx]
+        if tok == "{":
+            idx += 1
+            eff = EMPTY_EFFECT
+            while idx < n and tokens[idx] != "}":
+                sub, idx = parse_stmt(idx)
+                eff = compose_seq(eff, sub)
+            if idx < n and tokens[idx] == "}":
+                idx += 1
+            return eff, idx
+        if tok == ";":
+            return EMPTY_EFFECT, idx + 1
+        if tok == "if":
+            cond_toks, idx = read_parens(idx + 1)
+            cond_r = expr_reads(cond_toks)
+            t_eff, idx = parse_stmt(idx)
+            if idx < n and tokens[idx] == "else":
+                e_eff, idx = parse_stmt(idx + 1)
+            else:
+                e_eff = EMPTY_EFFECT
+            return compose_branch(cond_r, t_eff, e_eff), idx
+        if tok in ("while", "for"):
+            cond_toks, idx = read_parens(idx + 1)
+            cond_r = expr_reads(cond_toks)
+            b_eff, idx = parse_stmt(idx)
+            return FlagEffect(cond_r | b_eff.reads, frozenset(), b_eff.may_w, False, b_eff.exc_unwritten, b_eff.has_mull), idx
+        if tok == "switch":
+            _, idx = read_parens(idx + 1)
+            if idx < n and tokens[idx] == "{":
+                depth = 1
+                idx += 1
+                while idx < n and depth:
+                    if tokens[idx] == "{":
+                        depth += 1
+                    elif tokens[idx] == "}":
+                        depth -= 1
+                    idx += 1
+            return FlagEffect(ALL_FLAGS, frozenset(), ALL_FLAGS, False, frozenset(), False), idx
+        start = idx
+        pdepth = 0
+        while idx < n:
+            t = tokens[idx]
+            if t == "(":
+                pdepth += 1
+            elif t == ")":
+                pdepth = max(0, pdepth - 1)
+            elif pdepth == 0 and t in (";", "}"):
+                break
+            idx += 1
+        stmt = tokens[start:idx]
+        if idx < n and tokens[idx] == ";":
+            idx += 1
+        return eval_simple(stmt), idx
+
+    total = EMPTY_EFFECT
+    pos = 0
+    while pos < n:
+        sub, pos = parse_stmt(pos)
+        total = compose_seq(total, sub)
+    return total
+
+
+def insn_flag_effect(insn: Insn) -> FlagEffect:
+    if insn.kind in ("bcc", "dbcc"):
+        return FlagEffect(reads=CC_FLAG_READS.get(insn.cc, CZNV))
+    if insn.kind == "aline":
+        return FlagEffect(must_w=CZNV, may_w=CZNV, exc_unwritten=ALL_FLAGS)
+    if insn.code:
+        return analyze_code_flags(insn.code)
+    return EMPTY_EFFECT
+
+
+def compute_region_liveness(tr: Translator, members: list[Block],
+                            entries: list[Block]) -> tuple[set[str], set[str]]:
+    """Return (live_in_flags, may_write_flags) for a translated region."""
+    effects = {insn.off: insn_flag_effect(insn) for block in members for insn in block.insns}
+    region_may_write = set()
+    for eff in effects.values():
+        region_may_write |= eff.may_w
+    inside = {b.start for b in members}
+    live_in: dict[int, set[str]] = {b.start: set() for b in members}
+    changed = True
+    while changed:
+        changed = False
+        for block in reversed(members):
+            live_out: set[str] = set()
+            if block.taken is not None:
+                if (block.last.relative or tr.is_fixed) and tr.contains(block.taken):
+                    toff = block.taken - tr.base
+                    if toff in inside:
+                        live_out |= live_in[toff]
+                        if toff <= block.last.off:
+                            # Backward edge polls AOT_POLL() and can exit the region.
+                            live_out |= region_may_write
+                    else:
+                        live_out |= region_may_write
+                else:
+                    live_out |= region_may_write
+            if block.fall is not None:
+                if block.fall in inside:
+                    live_out |= live_in[block.fall]
+                else:
+                    live_out |= region_may_write
+            if block.last.kind in ("rts", "bsr", "jsr", "dyn", "aline") or (
+                block.last.kind == "jmp" and block.taken is None
+            ):
+                live_out |= region_may_write
+
+            live = set(live_out)
+            for insn in reversed(block.insns):
+                eff = effects[insn.off]
+                if eff.has_mull:
+                    live = (live - CZNV) | region_may_write | eff.reads
+                else:
+                    live = (live - eff.must_w) | eff.reads | (eff.exc_unwritten & region_may_write)
+            if live != live_in[block.start]:
+                live_in[block.start] = live
+                changed = True
+
+    region_live_in: set[str] = set()
+    for entry_block in entries:
+        region_live_in |= live_in[entry_block.start]
+    return region_live_in, region_may_write
+
+
 class Translator:
     """Translates single instructions of one address space.
 
@@ -288,10 +612,13 @@ class Translator:
     the bytes that are known (all of them when None).
     """
 
-    def __init__(self, image: bytes, base: int, optable, handlers, handler_map, valid: bytes | None = None):
+    def __init__(self, image: bytes, base: int, optable, handlers, handler_map,
+                 valid: bytes | None = None, inline_aline: bool = False):
         self.rom = image
         self.base = base
         self.valid = valid
+        self.is_fixed = valid is None
+        self.inline_aline = inline_aline
         self.optable = optable
         self.handlers = handlers
         self.handler_map = handler_map
@@ -326,6 +653,7 @@ class Translator:
         token = re.compile(
             r"m68k_incpc\s*\(\s*(\d+)\s*\)\s*;"
             r"|get_ibyte\s*\(\s*(\d+)\s*\)"
+            r"|get_iword_s16\s*\(\s*(\d+)\s*\)"
             r"|get_iword\s*\(\s*(\d+)\s*\)"
             r"|get_ilong\s*\(\s*(\d+)\s*\)"
             r"|(next_iword)\s*\(\s*\)"
@@ -342,10 +670,12 @@ class Translator:
             elif m.group(2) is not None:
                 out.append(f"((uae_u32)0x{self.byte(off + advance + int(m.group(2)) + 1):02x}u)")
             elif m.group(3) is not None:
-                out.append(f"((uae_u32)0x{self.word(off + advance + int(m.group(3))):04x}u)")
+                out.append(f"((uae_s32)(uae_s16)0x{self.word(off + advance + int(m.group(3))):04x}u)")
             elif m.group(4) is not None:
-                out.append(f"((uae_u32)0x{self.long(off + advance + int(m.group(4))):08x}u)")
+                out.append(f"((uae_u32)0x{self.word(off + advance + int(m.group(4))):04x}u)")
             elif m.group(5) is not None:
+                out.append(f"((uae_u32)0x{self.long(off + advance + int(m.group(5))):08x}u)")
+            elif m.group(6) is not None:
                 value = self.word(off + advance)
                 advance += 2
                 out.append(f"((uae_u32)0x{value:04x}u)")
@@ -367,7 +697,7 @@ class Translator:
                             displacements.append(0)
                     out.append(f", (uae_s32)0x{displacements[0] & 0xFFFFFFFF:08x}u"
                                f", (uae_s32)0x{displacements[1] & 0xFFFFFFFF:08x}u")
-            elif m.group(6) is not None:
+            elif m.group(7) is not None:
                 value = self.long(off + advance)
                 advance += 4
                 out.append(f"((uae_u32)0x{value:08x}u)")
@@ -377,7 +707,7 @@ class Translator:
         text = "".join(out)
         # A few handlers index the register array themselves.
         text = re.sub(r"\bregs\s*\.\s*regs\s*\[", "AOT_REGS[", text)
-        if re.search(r"\b(m68k_incpc|next_ibyte|get_i(byte|word|long)_prefetch|fill_prefetch\w*)\b", text):
+        if re.search(r"\b(m68k_incpc|next_ibyte|get_i(byte|word|long)(_s16|_prefetch)?|fill_prefetch\w*)\b", text):
             raise Unsupported("unfolded PC access")
         # Labels have function scope and a region holds many instructions.
         self.label_id += 1
@@ -425,6 +755,8 @@ class Translator:
                 result.uses = result.writes = frozenset({result.reg})
             elif result.kind in ("rts", "bsr") or (result.kind == "jsr" and result.target is not None):
                 result.uses = result.writes = stack
+            elif result.kind == "aline":
+                pass  # uses/writes already set by _decode
             elif result.code:
                 found = register_use(result.code)
                 if found is None:
@@ -483,6 +815,13 @@ class Translator:
         info = self.optable.get(opcode)
         if info is None or info.clev > 4:
             if (opcode & 0xF000) == 0xA000:
+                if self.inline_aline and (opcode & 0x0800) != 0:
+                    autopop = bool(opcode & 0x0400)
+                    trap_addr = 0x0E00 + (opcode & 0x03FF) * 4
+                    uses = frozenset({2}) if autopop else frozenset({2, 15})
+                    writes = frozenset() if autopop else frozenset({15})
+                    return Insn(off, opcode, 2, f"A-line Toolbox 0x{opcode:04x}", "aline",
+                                target=trap_addr, cc=1 if autopop else 0, uses=uses, writes=writes)
                 raise Unsupported("A-line trap", 2)
             raise Unsupported("illegal opcode")
         if info.mnemo == "EMULOP":
@@ -706,7 +1045,9 @@ def build_blocks(tr: Translator, insns: dict[int, Insn]) -> dict[int, Block]:
     for off, insn in insns.items():
         if insn.ends_block and off + insn.length in insns:
             leaders.add(off + insn.length)
-        if insn.kind in ("bcc", "bra", "dbcc") and tr.contains(insn.target) and insn.target - tr.base in insns:
+        if (insn.kind in ("bcc", "bra", "dbcc") or
+                (insn.kind == "jmp" and insn.target is not None and (insn.relative or tr.is_fixed))) and \
+                tr.contains(insn.target) and insn.target - tr.base in insns:
             leaders.add(insn.target - tr.base)
     # An instruction is also a leader when no translated instruction falls
     # into it.
@@ -727,7 +1068,8 @@ def build_blocks(tr: Translator, insns: dict[int, Insn]) -> dict[int, Block]:
                 break
         block = Block(start, body, count=sum(i.count for i in body))
         last = block.last
-        if last.kind in ("bcc", "bra", "dbcc"):
+        if last.kind in ("bcc", "bra", "dbcc") or \
+                (last.kind == "jmp" and last.target is not None and (last.relative or tr.is_fixed)):
             block.taken = last.target
         if last.falls_through:
             block.fall = off
@@ -790,16 +1132,34 @@ def choose_entries(tr: Translator, blocks: dict[int, Block], no_entry: set[int])
 
 
 class Emitter:
-    def __init__(self, tr: Translator, blocks: dict[int, Block]):
+    def __init__(self, tr: Translator, blocks: dict[int, Block],
+                 chain_targets: dict[int, tuple[str, int, int]] | None = None):
         self.tr = tr
         self.blocks = blocks
+        self.chain_targets = chain_targets or {}
+        self.chain_sites = 0
         self.lines: list[str] = []
 
     def emit(self, text: str) -> None:
         self.lines.append(text)
 
     def leave(self, address: int, relative: bool) -> str:
-        """Statement leaving the region for a guest address."""
+        """Statement leaving the region for a guest address (or tail-chaining)."""
+        if (relative or self.tr.is_fixed) and self.tr.contains(address) and not address & 1:
+            target_info = self.chain_targets.get(address)
+            if target_info is not None:
+                target_fn, target_op, target_local_off = target_info
+                self.chain_sites += 1
+                if self.tr.is_fixed:
+                    host_pc = f"ROMBaseHost + 0x{target_local_off:x}u"
+                else:
+                    host_pc = f"RAMBaseHost + aot_base + 0x{target_local_off:x}u"
+                return (
+                    f"{{ if (unlikely(AOT_CHAIN_POLL())) {{ AOT_EXIT_REL(0x{address:08x}u); }} "
+                    f"AOT_REGS_OUT(); AOT_FLAGS_OUT(); regs.pc_p = {host_pc}; "
+                    f"aot_extra_instructions += (int32)aot_icount; aot_region_calls++; "
+                    f"{target_fn}(AOT_SWAPPED_OPCODE(0x{target_op:04x}u)); return; }}"
+                )
         if relative and self.tr.contains(address) and not address & 1:
             return f"AOT_EXIT_REL(0x{address:08x}u);"
         if relative:
@@ -809,7 +1169,7 @@ class Emitter:
     def jump(self, block: Block, address: int, from_off: int, relative: bool) -> str:
         """Statement transferring control to a guest address."""
         tr = self.tr
-        if relative and tr.contains(address) and not address & 1:
+        if (relative or tr.is_fixed) and tr.contains(address) and not address & 1:
             off = address - tr.base
             target = self.blocks.get(off)
             if target is not None and target.region == block.region:
@@ -837,8 +1197,7 @@ class Emitter:
             elif insn.kind == "dbcc":
                 self.emit(f"\tif (!cctrue({insn.cc})) {{")
                 self.emit(f"\t\tuae_s16 aot_count = m68k_dreg(regs, {insn.reg});")
-                self.emit(f"\t\tm68k_dreg(regs, {insn.reg}) = (m68k_dreg(regs, {insn.reg}) & ~0xffff)"
-                          f" | ((aot_count - 1) & 0xffff);")
+                self.emit(f"\t\tm68k_dreg_w_set(regs, {insn.reg}, aot_count - 1);")
                 self.emit(f"\t\tif (aot_count) {{ {self.jump(block, insn.target, insn.off, True)} }}")
                 self.emit("\t}")
             elif insn.kind == "bsr" or (insn.kind == "jsr" and insn.target is not None):
@@ -848,6 +1207,10 @@ class Emitter:
                 self.emit(f"\t{self.jump(block, insn.target, insn.off, insn.relative)}")
             elif insn.kind in ("jsr", "jmp", "dyn"):
                 self.emit(insn.code)
+                self.emit("\t__builtin_unreachable();")
+            elif insn.kind == "aline":
+                self.emit(f"\tAOT_TOOLBOX_TRAP(0x{insn.target:08x}u, {insn.cc}, "
+                          f"AOT_PC(0x{here:08x}u), AOT_PC(0x{tr.base + nxt:08x}u), {remaining});")
                 self.emit("\t__builtin_unreachable();")
             elif insn.kind == "rts":
                 self.emit("\tAOT_RTS();")
@@ -909,6 +1272,36 @@ class OpcodeAllocator:
 CACHE_RUN = 16        # cache guest registers in regions that run this long per entry
 
 
+def format_flags_in(flags: set[str]) -> str:
+    if not flags:
+        return "do { } while (0)"
+    parts = []
+    if CZNV <= flags:
+        parts.append("aot_load_cznv(regflags, aot_c, aot_z, aot_n, aot_v);")
+    else:
+        for f in ("c", "z", "n", "v"):
+            if f in flags:
+                parts.append(f"aot_{f} = regflags.{f};")
+    if "x" in flags:
+        parts.append("aot_x = regflags.x;")
+    return "do { " + " ".join(parts) + " } while (0)"
+
+
+def format_flags_out(flags: set[str]) -> str:
+    if not flags:
+        return "do { } while (0)"
+    parts = []
+    if CZNV <= flags:
+        parts.append("aot_store_cznv(regflags, aot_c, aot_z, aot_n, aot_v);")
+    else:
+        for f in ("c", "z", "n", "v"):
+            if f in flags:
+                parts.append(f"regflags.{f} = aot_{f};")
+    if "x" in flags:
+        parts.append("regflags.x = aot_x;")
+    return "do { " + " ".join(parts) + " } while (0)"
+
+
 def region_run(tr: Translator, blocks: dict[int, Block], members: list[Block], counts: Counter) -> float:
     """Instructions a region executes per entry, from the profile."""
     executed = sum(b.count for b in members)
@@ -916,9 +1309,9 @@ def region_run(tr: Translator, blocks: dict[int, Block], members: list[Block], c
     inside = {b.start for b in members}
     for block in members:
         last = block.last
-        target = last.target - tr.base if last.target is not None and last.relative and \
+        target = last.target - tr.base if last.target is not None and (last.relative or tr.is_fixed) and \
             tr.contains(last.target) else None
-        if last.kind in ("rts", "jsr", "bsr", "dyn"):
+        if last.kind in ("rts", "jsr", "bsr", "dyn", "aline"):
             exits += last.count
         elif last.kind in ("bra", "jmp"):
             if target not in inside:
@@ -935,31 +1328,48 @@ def region_run(tr: Translator, blocks: dict[int, Block], members: list[Block], c
 
 
 def emit_region(emitter: Emitter, name: str, members: list[Block], entries: list[Block], enter: str,
-                counts: Counter) -> None:
+                counts: Counter, hot_inline: bool = False) -> None:
     count = sum(len(b.insns) for b in members)
     insns = [i for b in members for i in b.insns]
     run = region_run(emitter.tr, emitter.blocks, members, counts)
     cached = run >= CACHE_RUN and all(i.uses is not None for i in insns)
     uses = sorted(set().union(*(i.uses for i in insns))) if cached else []
     writes = sorted(set().union(*(i.writes for i in insns))) if cached else []
+    live_in, may_write = compute_region_liveness(emitter.tr, members, entries)
+    live_in_label = "".join(f for f in FLAGS if f in live_in) or "-"
+    write_label = "".join(f for f in FLAGS if f in may_write) or "-"
     emitter.emit(f"// {name}: from {emitter.tr.base + members[0].start:08x}, {len(members)} blocks, "
-                 f"{count} instructions, {run:.0f} executed per entry")
+                 f"{count} instructions, {run:.0f} executed per entry, flags in={live_in_label} out={write_label}"
+                 + (" [hot-O2-inline]" if hot_inline else ""))
     emitter.emit("#undef AOT_REGS")
     emitter.emit("#undef AOT_REGS_IN")
     emitter.emit("#undef AOT_REGS_OUT")
+    emitter.emit("#undef AOT_REGS_IS_LOCAL")
     if cached:
         # Guest registers live in locals; leaving the region writes the
         # ones it may have changed.
         emitter.emit("#define AOT_REGS aot_regs")
+        emitter.emit("#define AOT_REGS_IS_LOCAL 1")
         emitter.emit("#define AOT_REGS_IN() do { " +
                      " ".join(f"aot_regs[{r}] = regs.regs[{r}];" for r in uses) + " } while (0)")
         emitter.emit("#define AOT_REGS_OUT() do { " +
                      " ".join(f"regs.regs[{r}] = aot_regs[{r}];" for r in writes) + " } while (0)")
     else:
         emitter.emit("#define AOT_REGS regs.regs")
+        emitter.emit("#define AOT_REGS_IS_LOCAL 0")
         emitter.emit("#define AOT_REGS_IN() do { } while (0)")
         emitter.emit("#define AOT_REGS_OUT() do { } while (0)")
-    emitter.emit(f"AOT_REGION_ATTR static void {name}(uae_u32 opcode)")
+    emitter.emit("#undef AOT_FLAGS_IN")
+    emitter.emit("#undef AOT_FLAGS_OUT")
+    emitter.emit(f"#define AOT_FLAGS_IN() {format_flags_in(live_in)}")
+    emitter.emit(f"#define AOT_FLAGS_OUT() {format_flags_out(may_write)}")
+    if hot_inline:
+        emitter.emit("#undef AOT_INLINE_MEM_FLAG")
+        emitter.emit("#define AOT_INLINE_MEM_FLAG 1")
+        attr = "AOT_HOT_REGION_ATTR"
+    else:
+        attr = "AOT_REGION_ATTR"
+    emitter.emit(f"{attr} static void {name}(uae_u32 opcode)")
     emitter.emit("{")
     emitter.emit(f"\t{enter};")
     if cached:
@@ -977,21 +1387,13 @@ def emit_region(emitter: Emitter, name: str, members: list[Block], entries: list
         emitter.block(block)
     emitter.emit("\tAOT_EPILOGUE;")
     emitter.emit("}")
+    if hot_inline:
+        emitter.emit("#undef AOT_INLINE_MEM_FLAG")
+        emitter.emit("#define AOT_INLINE_MEM_FLAG 0")
 
 
-def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: OpcodeAllocator, stats: dict,
-                 counts: Counter) -> tuple[int, set[int]]:
-    """Return the entry count and instruction offsets in emitted ROM regions."""
-    emitted: set[int] = set()
-    rom = tr.rom
-    all_ranges: list[tuple[int, int]] = []
-    region_rows = []
-    entry_rows = []
-    emitter = Emitter(tr, blocks)
-    out.append("// ---- ROM --------------------------------------------------------------")
-    out.append("#define AOT_PC(address) ((uaecptr)(address))")
-    out.append("#define AOT_EXIT_REL(address) AOT_EXIT_ROM((address) - AOT_ROM_BASE)")
-    out.append("")
+def plan_rom_regions(tr: Translator, regions, blocks, opcodes: OpcodeAllocator, counts: Counter):
+    planned = []
     for index, members in enumerate(regions):
         entries = [b for b in members if b.entry and b.patched]
         if not entries:
@@ -999,21 +1401,113 @@ def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: Opcod
         first = opcodes.take(len(entries))
         if first is None:
             break
-        emitted.update(i.off for b in members for i in b.insns)
-        ranges = merge_ranges([i for b in members for i in b.insns])
+        insns = [i for b in members for i in b.insns]
+        name = f"aot_r{index}"
+        run = region_run(tr, blocks, members, counts)
+        execs = sum(b.count for b in members)
+        planned.append((name, index, members, entries, first, insns, run, execs))
+    return planned
+
+
+def plan_ram_modules(tr: Translator, modules: list[Module], regions, blocks, opcodes: OpcodeAllocator,
+                     counts: Counter):
+    by_module = defaultdict(list)
+    for index, members in enumerate(regions):
+        by_module[members[0].module].append((index, members))
+    planned_modules = []
+    for module in modules:
+        installed = []
+        for index, members in by_module.get(module.index, []):
+            entries = [b for b in members if b.entry and b.patched]
+            if entries:
+                installed.append((index, members, entries))
+        if not installed or opcodes.remaining() < sum(len(entries) for _, _, entries in installed) + 64:
+            continue
+        number = len(planned_modules)
+        insns = [i for _, members, _ in installed for b in members for i in b.insns]
+        origin = min(i.off for i in insns)
+        span = max(i.off + i.length for i in insns) - origin
+        planned_regions = []
+        for index, members, entries in installed:
+            first = opcodes.take(len(entries))
+            name = f"aot_m{number}_r{index}"
+            r_insns = [i for b in members for i in b.insns]
+            run = region_run(tr, blocks, members, counts)
+            execs = sum(b.count for b in members)
+            planned_regions.append((name, index, members, entries, first, r_insns, run, execs))
+        planned_modules.append((number, module, origin, span, insns, planned_regions))
+    return planned_modules
+
+
+def select_hot_inline_regions(rom_planned, ram_planned_modules, min_run: float, max_insns: int,
+                              budget_bytes: int) -> tuple[set[str], int, int]:
+    if budget_bytes <= 0:
+        return set(), 0, 0
+    candidates = []
+    for name, _, _, _, _, insns, run, execs in rom_planned:
+        if run >= min_run and len(insns) <= max_insns:
+            candidates.append((execs, len(insns), name))
+    for _, _, _, _, _, pregions in ram_planned_modules:
+        for name, _, _, _, _, insns, run, execs in pregions:
+            if run >= min_run and len(insns) <= max_insns:
+                candidates.append((execs, len(insns), name))
+    candidates.sort(key=lambda item: (-item[0], item[1], item[2]))
+    chosen: set[str] = set()
+    used_bytes = 0
+    total_execs = 0
+    for execs, n_insns, name in candidates:
+        est_bytes = n_insns * 80 + 96
+        if used_bytes + est_bytes <= budget_bytes:
+            chosen.add(name)
+            used_bytes += est_bytes
+            total_execs += execs
+    return chosen, used_bytes, total_execs
+
+
+def emit_rom(out: list[str], tr: Translator, planned, blocks, entry_infos: list[tuple[int, int]],
+             hot_inline: set[str], enable_chain: bool, stats: dict, counts: Counter) -> tuple[int, set[int]]:
+    """Emit planned ROM regions and tables."""
+    emitted: set[int] = set()
+    rom = tr.rom
+    all_ranges: list[tuple[int, int]] = []
+    region_rows = []
+    entry_rows = []
+    chain_targets: dict[int, tuple[str, int, int]] = {}
+    if enable_chain:
+        for name, _, _, entries, first, _, _, _ in planned:
+            for k, block in enumerate(entries):
+                chain_targets[tr.base + block.start] = (name, first + k, block.start)
+    emitter = Emitter(tr, blocks, chain_targets)
+    out.append("// ---- ROM --------------------------------------------------------------")
+    out.append("#define AOT_PC(address) ((uaecptr)(address))")
+    out.append("#define AOT_EXIT_REL(address) AOT_EXIT_ROM((address) - AOT_ROM_BASE)")
+    out.append("")
+    if enable_chain:
+        for name, _, _, _, _, _, _, _ in planned:
+            attr = "AOT_HOT_REGION_ATTR" if name in hot_inline else "AOT_REGION_ATTR"
+            out.append(f"{attr} static void {name}(uae_u32 opcode);")
+        if planned:
+            out.append("")
+    for name, index, members, entries, first, insns, _, _ in planned:
+        emitted.update(i.off for i in insns)
+        ranges = merge_ranges(insns)
         crc = 0
         for start, length in ranges:
             crc = zlib.crc32(rom[start:start + length], crc)
         region_rows.append((index, len(all_ranges), len(ranges), crc & 0xFFFFFFFF))
         all_ranges += ranges
-        name = f"aot_r{index}"
         emitter.lines = []
-        emitter.emit(f"static const AotEntryInfo {name}_entries[] = {{")
         for block in entries:
-            emitter.emit(f"\t{{ 0x{block.start:x}u, 0x{swap16(block.insns[0].opcode):04x}u }},")
             entry_rows.append((block.start, block.insns[0].opcode, len(region_rows) - 1, name))
-        emitter.emit("};")
-        emit_region(emitter, name, members, entries, f"AOT_ROM_ENTER(0x{first:04x}u, {name}_entries)", counts)
+        if len(entries) == 1:
+            b0 = entries[0]
+            enter = f"AOT_ROM_ENTER_1(0x{b0.start:x}u, AOT_SWAPPED_OPCODE(0x{b0.insns[0].opcode:04x}u))"
+        else:
+            table_base = len(entry_infos)
+            for block in entries:
+                entry_infos.append((block.start, block.insns[0].opcode))
+            enter = f"AOT_ROM_ENTER(0x{first:04x}u, {table_base}u)"
+        emit_region(emitter, name, members, entries, enter, counts, hot_inline=(name in hot_inline))
         out += emitter.lines
         out.append("")
 
@@ -1034,14 +1528,16 @@ def generate_rom(out: list[str], tr: Translator, regions, blocks, opcodes: Opcod
     stats["rom_regions"] = len(region_rows)
     stats["rom_regions_with_cached_registers"] = sum(1 for line in out if line == "#define AOT_REGS aot_regs")
     stats["rom_entries"] = len(entry_rows)
+    stats["rom_single_entry_regions"] = sum(1 for p in planned if len(p[3]) == 1)
+    stats["rom_chain_sites"] = emitter.chain_sites
     stats["rom_verified_bytes"] = sum(length for _, length in all_ranges)
     stats["rom_counts"] = (len(all_ranges), len(region_rows), len(entry_rows))
     return len(entry_rows), emitted
 
 
-def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions, blocks,
-                 opcodes: OpcodeAllocator, stats: dict, counts: Counter) -> tuple[int, set[int]]:
-    """Return the entry count and instruction offsets in emitted RAM modules."""
+def emit_ram(out: list[str], tr: Translator, planned_modules, blocks, entry_infos: list[tuple[int, int]],
+             hot_inline: set[str], enable_chain: bool, stats: dict, counts: Counter) -> tuple[int, set[int]]:
+    """Emit planned RAM modules and tables."""
     emitted: set[int] = set()
     image = tr.rom
     all_ranges: list[tuple[int, int]] = []
@@ -1049,45 +1545,49 @@ def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions,
     entry_rows = []
     anchor_rows = []
     test_rows = []
-    by_module = defaultdict(list)
-    for index, members in enumerate(regions):
-        by_module[members[0].module].append((index, members))
-    emitter = Emitter(tr, blocks)
+    total_chain_sites = 0
+    single_entry_count = 0
+    cached_regions_count = 0
     out.append("// ---- RAM --------------------------------------------------------------")
     out.append("#define AOT_EXIT_REL(address) AOT_EXIT_RAM(AOT_PC(address))")
     out.append("")
-    for module in modules:
-        installed = []
-        for index, members in by_module.get(module.index, []):
-            entries = [b for b in members if b.entry and b.patched]
-            if entries:
-                installed.append((index, members, entries))
-        if not installed or opcodes.remaining() < sum(len(entries) for _, _, entries in installed) + 64:
-            continue
-        number = len(module_rows)
-        insns = [i for _, members, _ in installed for b in members for i in b.insns]
+    for number, module, origin, span, insns, pregions in planned_modules:
         emitted.update(i.off for i in insns)
-        origin = min(i.off for i in insns)
-        span = max(i.off + i.length for i in insns) - origin
-        entry_offsets = {b.start for _, _, entries in installed for b in entries}
+        entry_offsets = {b.start for _, _, _, entries, _, _, _, _ in pregions for b in entries}
         ranges = merge_ranges(insns, entry_offsets)
         checksum = 0x811C9DC5
         for start, length in ranges:
             checksum = sum16(bytes(image[start:start + length]), checksum)
         first_entry = len(entry_rows)
+        chain_targets: dict[int, tuple[str, int, int]] = {}
+        if enable_chain:
+            for name, _, _, entries, first, _, _, _ in pregions:
+                for k, block in enumerate(entries):
+                    chain_targets[block.start] = (name, first + k, block.start - origin)
+        emitter = Emitter(tr, blocks, chain_targets)
         out.append("#undef AOT_PC")
         out.append(f"#define AOT_PC(address) ((uaecptr)(aot_base + ((address) - 0x{origin:08x}u)))")
+        if enable_chain:
+            for name, _, _, _, _, _, _, _ in pregions:
+                attr = "AOT_HOT_REGION_ATTR" if name in hot_inline else "AOT_REGION_ATTR"
+                out.append(f"{attr} static void {name}(uae_u32 opcode);")
         emitter.lines = []
-        for index, members, entries in installed:
-            name = f"aot_m{number}_r{index}"
-            first = opcodes.take(len(entries))
-            emitter.emit(f"static const AotEntryInfo {name}_entries[] = {{")
+        for name, index, members, entries, first, _, _, _ in pregions:
             for block in entries:
-                emitter.emit(f"\t{{ 0x{block.start - origin:x}u, 0x{swap16(block.insns[0].opcode):04x}u }},")
                 entry_rows.append((block.start - origin, block.insns[0].opcode, number, name))
-            emitter.emit("};")
-            emit_region(emitter, name, members, entries,
-                        f"AOT_RAM_ENTER({number}u, 0x{first:04x}u, {name}_entries)", counts)
+            if len(entries) == 1:
+                single_entry_count += 1
+                b0 = entries[0]
+                enter = (f"AOT_RAM_ENTER_1({number}u, 0x{b0.start - origin:x}u, "
+                         f"AOT_SWAPPED_OPCODE(0x{b0.insns[0].opcode:04x}u))")
+            else:
+                table_base = len(entry_infos)
+                for block in entries:
+                    entry_infos.append((block.start - origin, block.insns[0].opcode))
+                enter = f"AOT_RAM_ENTER({number}u, 0x{first:04x}u, {table_base}u)"
+            emit_region(emitter, name, members, entries, enter, counts, hot_inline=(name in hot_inline))
+        cached_regions_count += sum(1 for line in emitter.lines if line == "#define AOT_REGS aot_regs")
+        total_chain_sites += emitter.chain_sites
         out += emitter.lines
         out.append("")
         # Anchors: instruction starts whose next bytes hold no entry opcode,
@@ -1150,7 +1650,10 @@ def generate_ram(out: list[str], tr: Translator, modules: list[Module], regions,
     out.append("#endif")
     out.append("")
     stats["ram_modules"] = len(module_rows)
+    stats["ram_regions_with_cached_registers"] = cached_regions_count
     stats["ram_entries"] = len(entry_rows)
+    stats["ram_single_entry_regions"] = single_entry_count
+    stats["ram_chain_sites"] = total_chain_sites
     stats["ram_anchors"] = len(anchor_rows)
     stats["ram_verified_bytes"] = sum(length for _, length in all_ranges)
     stats["ram_counts"] = (len(all_ranges), len(module_rows), len(entry_rows), len(anchor_rows))
@@ -1213,6 +1716,16 @@ def main() -> int:
                         help="keep guest registers in locals in regions that execute at least this many "
                              "instructions per entry")
     parser.add_argument("--optimize", default="Os", help="GCC optimization level for translated code")
+    parser.add_argument("--chain", action=argparse.BooleanOptionalAction, default=True,
+                        help="tail-call chain static branches/calls between translated regions")
+    parser.add_argument("--inline-aline", action=argparse.BooleanOptionalAction, default=False,
+                        help="inline native Toolbox A-line trap (0xA800..0xAFFF) fast path")
+    parser.add_argument("--hot-inline-limit", type=int, default=12288,
+                        help="estimated byte budget for -O2 + inline-memory tight inner loops (0 disables)")
+    parser.add_argument("--hot-inline-min-run", type=float, default=32.0,
+                        help="minimum executions per entry for hot-loop -O2 + inline memory")
+    parser.add_argument("--hot-inline-max-insns", type=int, default=24,
+                        help="maximum 68k instructions in a hot-loop region")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--report", type=Path)
     args = parser.parse_args()
@@ -1224,8 +1737,8 @@ def main() -> int:
     handler_map = build_handler_map(optable, parse_cpustbl(GENERATED / "cpustbl.cpp"))
     stats: dict = {}
 
-    # ROM
-    tr = Translator(rom, args.rom_base, optable, handlers, handler_map)
+    # ROM planning
+    tr = Translator(rom, args.rom_base, optable, handlers, handler_map, inline_aline=args.inline_aline)
     counts: Counter = Counter()
     for path in args.hot:
         counts += load_counts(path)
@@ -1235,6 +1748,40 @@ def main() -> int:
     choose_entries(tr, blocks, no_entry)
     candidates = select_entries(blocks, regions, args.min_region_insns,
                                 min(args.max_rom_entries, len(PATCH_OPCODES)))
+    opcodes = OpcodeAllocator()
+    rom_planned = plan_rom_regions(tr, regions, blocks, opcodes, counts)
+    rom_planned_entries = sum(len(p[3]) for p in rom_planned)
+
+    # RAM planning
+    ram_counts, image, valid = load_ram_profile(args.ram_profile) if args.ram_profile else (Counter(), b"", b"")
+    for item in args.ram_exclude:
+        low, high = (int(value, 16) for value in item.split(":"))
+        for address in [a for a in ram_counts if low <= a < high]:
+            del ram_counts[address]
+    ram_tr = Translator(bytes(image), 0, optable, handlers, handler_map, bytes(valid),
+                        inline_aline=args.inline_aline)
+    ram_min = args.ram_min_count if args.ram_min_count is not None else args.min_count
+    ram_insns, ram_no_entry, ram_failures = discover(ram_tr, ram_counts, ram_min, True)
+    modules = form_modules(ram_insns, args.module_gap, args.min_region_insns)
+    kept = {}
+    for module in modules:
+        for insn in module.insns:
+            kept[insn.off] = insn
+    ram_blocks = build_blocks(ram_tr, kept)
+    module_of = {insn.off: module.index for module in modules for insn in module.insns}
+    for block in ram_blocks.values():
+        block.module = module_of[block.start]
+    ram_regions = form_regions(ram_tr, ram_blocks, args.max_blocks)
+    choose_entries(ram_tr, ram_blocks, ram_no_entry)
+    ram_candidates = select_entries(ram_blocks, ram_regions, args.min_region_insns,
+                                    max(0, min(args.max_ram_entries, len(PATCH_OPCODES) - rom_planned_entries)))
+    ram_planned = plan_ram_modules(ram_tr, modules, ram_regions, ram_blocks, opcodes, ram_counts)
+
+    hot_inline, hot_est_bytes, hot_execs = select_hot_inline_regions(
+        rom_planned, ram_planned, args.hot_inline_min_run, args.hot_inline_max_insns, args.hot_inline_limit)
+    stats["hot_inline_regions"] = len(hot_inline)
+    stats["hot_inline_estimated_bytes"] = hot_est_bytes
+    stats["hot_inline_executions"] = hot_execs
 
     out: list[str] = []
     out.append("// GENERATED by tools/aot/aot_translate.py. Do not edit and do not commit:")
@@ -1252,35 +1799,19 @@ def main() -> int:
     out.append("")
     out.append("AOT_BLOB_MARK(aot_blob_begin);")
     out.append("")
-    opcodes = OpcodeAllocator()
-    rom_entries, rom_emitted = generate_rom(out, tr, regions, blocks, opcodes, stats, counts)
 
-    # RAM
-    ram_counts, image, valid = load_ram_profile(args.ram_profile) if args.ram_profile else (Counter(), b"", b"")
-    for item in args.ram_exclude:
-        low, high = (int(value, 16) for value in item.split(":"))
-        for address in [a for a in ram_counts if low <= a < high]:
-            del ram_counts[address]
-    ram_tr = Translator(bytes(image), 0, optable, handlers, handler_map, bytes(valid))
-    ram_min = args.ram_min_count if args.ram_min_count is not None else args.min_count
-    ram_insns, ram_no_entry, ram_failures = discover(ram_tr, ram_counts, ram_min, True)
-    modules = form_modules(ram_insns, args.module_gap, args.min_region_insns)
-    kept = {}
-    for module in modules:
-        for insn in module.insns:
-            kept[insn.off] = insn
-    ram_blocks = build_blocks(ram_tr, kept)
-    module_of = {insn.off: module.index for module in modules for insn in module.insns}
-    for block in ram_blocks.values():
-        block.module = module_of[block.start]
-    ram_regions = form_regions(ram_tr, ram_blocks, args.max_blocks)
-    choose_entries(ram_tr, ram_blocks, ram_no_entry)
-    ram_candidates = select_entries(ram_blocks, ram_regions, args.min_region_insns,
-                                    max(0, min(args.max_ram_entries, len(PATCH_OPCODES) - rom_entries)))
-    ram_entries, ram_emitted = generate_ram(out, ram_tr, modules, ram_regions, ram_blocks, opcodes, stats, ram_counts)
+    entry_infos: list[tuple[int, int]] = []
+    rom_entries, rom_emitted = emit_rom(out, tr, rom_planned, blocks, entry_infos, hot_inline,
+                                        args.chain, stats, counts)
+    ram_entries, ram_emitted = emit_ram(out, ram_tr, ram_planned, ram_blocks, entry_infos, hot_inline,
+                                        args.chain, stats, ram_counts)
 
     out.append("AOT_BLOB_MARK(aot_blob_end);")
     out.append("")
+    out.append("static const AotEntryInfo aot_entry_infos[] = {")
+    out += [f"\t{{ 0x{off:x}u, AOT_SWAPPED_OPCODE(0x{orig:04x}u) }},"
+            for off, orig in entry_infos] or ["\t{ 0, 0 },"]
+    out.append("};")
     out.append("static const uae_u16 aot_patch_opcodes[] = {")
     total = rom_entries + ram_entries
     assert total == len(opcodes.assigned)
@@ -1298,6 +1829,7 @@ def main() -> int:
     out.append("\taot_ram_ranges, aot_modules, aot_ram_entries, aot_anchors, aot_module_state,")
     out.append(f"\t{ram_table[0]}u, {ram_table[1]}u, {ram_table[2]}u, {ram_table[3]}u,")
     out.append("\taot_module_code, aot_module_code_offsets,")
+    out.append(f"\taot_entry_infos, {len(entry_infos)}u,")
     out.append("};")
     out.append("#endif  // AOT_ROM")
     out.append("")

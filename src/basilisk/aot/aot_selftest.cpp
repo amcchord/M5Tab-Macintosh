@@ -450,8 +450,12 @@ struct Tester {
 						AotRamForgetAll();
 					} else {
 						entered = AotRamInstallAt(m, base);
-						if (mode == 2)
-							AotCodeChanged();
+						if (mode == 2) {
+							if ((result.runs & 1u) != 0)
+								AotCodeChangedGuestRange(base, 1);
+							else
+								AotCodeChanged();
+						}
 					}
 					apply(initial);
 					aot_extra_instructions = 0;
@@ -494,7 +498,22 @@ struct Tester {
 				const AotRange &range = image.ram_ranges[module.first_range];
 				ram_translated[base + range.offset + range.length - 1] ^= 0x04;
 				memcpy(ram_reference, ram_translated, options.ram_size + kPadding);
-				AotCodeChanged();
+				const bool selective = (result.runs & 1u) != 0;
+				const uae_u32 epoch_before = aot_flush_epoch;
+				if (selective) {
+					// Flushing an unrelated 4 KiB page must not bump epoch or invalidate module m.
+					const uae_u32 far_page = (base + module.span + 0x1fffu) & ~0xfffu;
+					const uae_u32 far_addr = (far_page < options.ram_size) ? far_page : 0u;
+					AotCodeChangedGuestRange(far_addr, 1);
+					if (aot_flush_epoch != epoch_before || image.module_state[m].epoch == 0)
+						result.failures++;
+					// Flushing the modified byte invalidates module m selectively without a global flush.
+					AotCodeChangedGuestRange(base + range.offset + range.length - 1, 1);
+					if (aot_flush_epoch != epoch_before || image.module_state[m].epoch != 0)
+						result.failures++;
+				} else {
+					AotCodeChanged();
+				}
 				apply(initial);
 				aot_extra_instructions = 0;
 				const uae_u32 opcode = do_get_mem_word_unswapped(regs.pc_p);

@@ -57,8 +57,15 @@ struct AotFar {
 	uae_u32 (*ram_entry_slow)(uae_u32 module, uae_u32 offset);
 	void (*mull)(uae_u32 opcode, uae_u32 src, uae_u16 extra);
 	void (*exception)(int nr, uaecptr oldpc);
+	bool (*trap_verify)(void);
 };
 extern const AotFar aot_far;
+
+// One per entry point of a multi-entry region, in entry-opcode order.
+struct AotEntryInfo {
+	uae_u32 offset;          // of the entry instruction: in the ROM, or in its module
+	uae_u32 original;        // its opcode, in the form handlers are called with
+};
 
 struct AotRange {
 	uae_u32 offset;          // of translated instruction bytes: in the ROM, or in a module
@@ -122,6 +129,10 @@ struct AotImage {
 	// Test builds only: the code of each module as it was profiled.
 	const uae_u8 *module_code;
 	const uae_u32 *module_code_offsets;
+
+	// Combined multi-entry descriptor table (copied to PSRAM at AotInstall).
+	const AotEntryInfo *entry_infos;
+	uae_u32 entry_info_count;
 };
 
 struct AotStats {
@@ -135,6 +146,10 @@ struct AotStats {
 	uae_u32 module_checks;         // byte comparisons of a module since start
 	uae_u32 module_rejects;        // checks that failed
 	uae_u32 flushes;               // AotCodeChanged() calls
+	uae_u32 cpusha_narrowed;       // _HLock CPUSHA narrowed to handle range
+	uae_u32 cpusha_global;         // CPUSHA that fell back to AotCodeChanged()
+	uae_u32 range_flushes_skipped; // range flushes with no overlapping AOT page
+	uae_u32 range_invalidations;   // selective per-module invalidations
 	uae_u32 code_bytes;            // translated code
 	uae_u32 code_in_psram;         // 1 when it runs from PSRAM
 	uae_u64 calls;                 // region calls since start
@@ -154,6 +169,15 @@ extern uae_u64 aot_total_instructions;
 // Advances whenever guest code may have changed.
 extern uae_u32 aot_flush_epoch;
 extern AotModuleState aot_module_state[];
+extern const AotEntryInfo *aot_entry_infos_runtime;
+extern uae_u32 aot_cpusha_narrowed;
+extern uae_u32 aot_cpusha_global;
+extern uaecptr aot_trap_vec_cached;
+extern bool aot_trap_vec_native;
+
+#if defined(__riscv) && !defined(MEM_SLOW_DIRECT_CALLS)
+extern "C" void aot_setpc_thunk(void);
+#endif
 
 // Fold the per-batch counters into the running totals (CPU loop, batch end).
 static inline void AotAccount(int32 extra_instructions)
@@ -174,9 +198,13 @@ extern uae_u32 AotOriginalWord(uaecptr address);
 // The guest flushed its instruction cache, or the emulator wrote guest
 // memory that may hold code.
 extern void AotCodeChanged(void);
-// The same for a known range of host memory: counts only if an installed
-// module may lie in it.
+// The same for a known range of host memory or guest RAM: O(1) no-op when
+// no installed module page overlaps [addr, addr + size).
 extern void AotCodeChangedRange(const uae_u8 *host, uae_u32 size);
+extern void AotCodeChangedGuestRange(uaecptr addr, uae_u32 size);
+// CPUSHA cache flush handler: narrows Q650 32-bit _HLock flushes to the
+// locked handle's block range when verified, falling back to AotCodeChanged().
+extern void AotHandleCpusha(void);
 
 // CPU loop, between instructions: if the code at the PC belongs to a
 // translated module that is not installed there, check and install it.
