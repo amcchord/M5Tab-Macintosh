@@ -2,7 +2,7 @@
 
 Run classic Macintosh System 7 through Mac OS 8.1 on an M5Stack Tab5 or Waveshare ESP32-P4-WIFI6-Touch-LCD-10.1. The ESP32-P4 runs Basilisk II. The removable microSD card holds the Macintosh ROM, disks and settings.
 
-**[Download stable v5.4](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4)** · [Flash your board](#flashing-the-firmware) · [Set up a card](#sd-card-setup) · [Screenshot gallery](screenshots.md) · [Release notes](RELEASE_NOTES.md)
+**[Download stable v5.5](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.5)** · [Flash your board](#flashing-the-firmware) · [Set up a card](#sd-card-setup) · [Screenshot gallery](screenshots.md) · [Release notes](RELEASE_NOTES.md)
 
 | Mac OS 8.1 on the Tab5 | Finder on the emulated Macintosh |
 | --- | --- |
@@ -32,15 +32,15 @@ A merged flash replaces the bootloader, any installed launcher and the partition
 
    | Board | Pre-v3 ESP32-P4 | ESP32-P4 v3.1 or later |
    | --- | --- | --- |
-   | M5Stack Tab5 | [Tab5](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-v5.4.bin) | [Tab5 Rev3](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-Rev3-v5.4.bin) |
-   | Waveshare 10.1″ | [Waveshare 10.1](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-Waveshare-P4-10.1-v5.4.bin) | [Waveshare 10.1 Rev3](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.4.bin) |
+   | M5Stack Tab5 | [Tab5](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-v5.5.bin) | [Tab5 Rev3](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-Rev3-v5.5.bin) |
+   | Waveshare 10.1″ | [Waveshare 10.1](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-Waveshare-P4-10.1-v5.5.bin) | [Waveshare 10.1 Rev3](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-Waveshare-P4-10.1-Rev3-v5.5.bin) |
 
-   The optional pre-v3 Tab5 USB Debug build uses a newer Espressif SDK. The release also includes SHA-256 checksums for every download. [USB Debug firmware](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-USB-Debug-v5.4.bin) · [SHA256SUMS](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/SHA256SUMS)
+   The optional pre-v3 Tab5 USB Debug build uses a newer Espressif SDK. The release also includes SHA-256 checksums for every download. [USB Debug firmware](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-USB-Debug-v5.5.bin) · [SHA256SUMS](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/SHA256SUMS)
 
 4. Run this command from the download folder, substituting the filename you chose. This example installs a standard pre-v3 Tab5.
 
    ```sh
-   python -m esptool --chip esp32p4 --port PORT --baud 921600 write-flash 0x0 M5Tab-Macintosh-v5.4.bin
+   python -m esptool --chip esp32p4 --port PORT --baud 921600 write-flash 0x0 M5Tab-Macintosh-v5.5.bin
    ```
 
 ## SD card setup
@@ -76,7 +76,7 @@ Use a FAT32 card and copy the **contents** of the archive’s `sdCard` folder to
 - **Mouse and keyboard.** Tap to click, drag to move an item, or plug a USB keyboard or mouse into the host port. A three-finger tap opens the on-screen keyboard. A four-finger tap opens the game controls. Repeat the gesture to close the overlay. The official Tab5 Keyboard connects to Ext.Port1.
 - **Startup Settings.** Tap the Happy Mac splash after power-on to change disks, RAM, audio, Wi-Fi or shared folders. With a usable disk and no tap, the last configuration boots automatically.
 - **File transfer.** Choose an SD folder under **Shared Folder** in Startup Settings to see it as a volume in Finder. Shut down from Finder before removing the card. [Media, settings and recovery](USER_GUIDE.md)
-- **Power.** On the Tab5, Mac OS 8’s Control Strip shows battery charge and **Special → Sleep** turns off the display. Mac Extras includes the optional Brightness module. [Mac Extras download](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-Mac-Extras-v5.4.zip) · [Install Brightness](POWER_MANAGEMENT.md#installing-the-brightness-module)
+- **Power.** On the Tab5, Mac OS 8’s Control Strip shows battery charge and **Special → Sleep** turns off the display. Mac Extras includes the optional Brightness module. [Mac Extras download](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-Mac-Extras-v5.5.zip) · [Install Brightness](POWER_MANAGEMENT.md#installing-the-brightness-module)
 
 ### Use the Tab5 as a USB card reader
 
@@ -93,7 +93,7 @@ python -m pip install -r tools/requirements.txt
 python tools/mac_control.py --no-reset web-open
 ```
 
-The browser shows the guest screen, memory use and firmware version. **Measure for 15 s** measures the running guest. Pair with `web-open --control` to send clicks, double-clicks and text. The P4 serves the page over the stock C6 radio. Sessions use local HTTP and expire after 30 minutes. [Host Tools download](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.4/M5Tab-Macintosh-Host-Tools-v5.4.zip) · [Browser and USB controls](AUTOMATION.md#wi-fi-console)
+The browser shows the guest screen, memory use and firmware version. **Measure for 15 s** measures the running guest. Pair with `web-open --control` to send clicks, double-clicks and text. The P4 serves the page over the stock C6 radio. Sessions use local HTTP and expire after 30 minutes. [Host Tools download](https://github.com/amcchord/M5Tab-Macintosh/releases/download/v5.5/M5Tab-Macintosh-Host-Tools-v5.5.zip) · [Browser and USB controls](AUTOMATION.md#wi-fi-console)
 
 <img src="screenshots/Tab5-Web-Console.png" alt="Paired browser showing the Macintosh desktop, firmware version, controls and speed measurement" width="640">
 
@@ -104,7 +104,7 @@ The Tab5 uses four-bit SD access when the card supports it. In a System 7.5.3 te
 Use PlatformIO Core 6.1.19 or later and Python 3.10–3.13. The example builds the standard pre-v3 Tab5 firmware from the stable tag. The source-only build runs the 68k interpreter. The release binaries also include translated ROM and system code. [Board build environments and translation tools](USER_GUIDE.md#build-environments)
 
 ```sh
-git clone --branch v5.4 https://github.com/amcchord/M5Tab-Macintosh.git
+git clone --branch v5.5 https://github.com/amcchord/M5Tab-Macintosh.git
 cd M5Tab-Macintosh
 pio run -e esp32p4_pioarduino
 ```

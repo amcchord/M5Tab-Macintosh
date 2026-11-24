@@ -1,37 +1,30 @@
-# 5.4
+# 5.5
 
-The stable firmware uses the same emulator and installer code as 5.4 beta 3. The device and remote console identify this release as 5.4. [Downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4) · [Setup and imaging screenshots](screenshots.md)
+5.5 speeds up the 68k interpreter, indexed display pipeline, and ahead-of-time (AOT) translated code runtime while keeping all v5.4 installer, A/B Wi-Fi update, and remote console features intact. The device and remote console identify this release as 5.5. [Downloads](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.5) · [Performance report](PERFORMANCE_REPORT.md) · [Setup and imaging screenshots](screenshots.md)
 
-## Getting started on a Tab5
+## What is faster in 5.5
 
-Insert a microSD card and boot. When the ROM or startup disk is missing, **Set Up SD Card** opens. Join Wi-Fi, choose Mac OS 8.1 or System 7.5.3, and tap **Download**. The installer needs 1.2 GiB free. The screen shows recent Wi-Fi download speed. The installer checks the compressed data and reads back the expanded files before offering **Start Up**. Interrupted downloads can resume. Existing files with different contents are preserved. [Setup instructions](README.md#sd-card-setup)
+- **68k interpreter (`861d984`):** Packs arithmetic condition codes (`c`/`z`/`n`/`v`) into a single 32-bit `regflags.cznv` word with single-store flag updates and word `cctrue()` tests (`m68k.h`), moves leaf `RTS` (`op_4e75_0_ff`) and split A-line dispatchers (`op_aline_os`, `op_aline_toolbox`) into IRAM (`newcpu.cpp`), and adds pipelined `mem_setpc_slow_thunk` (`memory.cpp`) alongside narrow register stores and sign-extended immediate fetches (`gencpu.c`).
+- **Display pipeline (`6f3e770`):** Adds 32-bit aligned burst indexed tile writers (`ScaleTraits`, `emit_u32_row`, `emit_u16_row`, `writeSingleRowIndexed` in `src/board/panel_surface.h`), caches palette `pairs[]` across frames via `pairs_dirty`, and replaces byte-by-byte dirty clears with row-wise 32-bit `video_dirty_chunks` scans (`src/basilisk/video_esp32.cpp`).
+- **Translated-code runtime & translator (`2a68ad3`, `cd2d430`):** Adds a 4 KB page occupancy bitmap (`aot_page_bitmap`) so clean guest writes skip AOT invalidation in O(1), narrows Quadra 650 `_HLock` `CPUSHA` flushes (`AotHandleCpusha`, narrowing 99.77% of flushes in Stage 2b soak), adds backward-dataflow flag liveness DCE (`compute_region_liveness`), batched `aot_load_cznv`/`aot_store_cznv`, single-entry specialization, direct block chaining, hot-inline region placement, `aot_setpc_thunk`, and extended `AOT STATS` telemetry (`cpusha`, `rskip`, `rinv`).
 
-**SD Card** in Startup Settings shows the mounted filesystem and card size. Formatting requires confirmation and erases the entire card, including other partitions. The Tab5 creates a FAT32 volume suitable for Macintosh disk images. [Storage and benchmarks](SD_STABILITY.md)
+Measured on a Tab5 (ESP32-P4 rev 1.3 at 360 MHz, Mac OS 8 on `/Macintosh8.dsk`, 24 MB guest RAM, Speedometer 4.02):
 
-## Startup disks and remote access
+- **Open-source interpreter + display build (no AOT):** CPU `0.840` (`+7.7%` over v5.4 interpreter `0.780`), Graphics `0.461` (`+2.2%` over `0.451`), full-suite Performance Rating `0.828` (`+9.8%` over `0.754`).
+- **Shipping system-AOT build (`stage2-sys`, ROM + system RAM translated):** Graphics **`1.002`** (`+122%` over interpreter baseline, `+19.9%` over v5.4 system AOT `0.836` on the same disk), full-suite Performance Rating **`1.130`** (CPU `0.840`, Disk `1.973`, Graphics `1.008`, Math `10.804`), Color QuickDraw Monochrome **`6.618 s` (`1.044`)** / 8-bit Color **`11.599 s` (`0.913`)**, Graphics throughput **`12.913` 68k MIPS**, and `30.3 s` cold boot (`22.0 s` since emulator start).
+- **Optional application-profiled build (`stage2-full`):** Reaches **`2.204`** CPU (`+183%` over interpreter baseline, `+37.4%` over Pass 2 `1.604`), **`1.691`** Performance Rating, and **`19.039` 68k MIPS**.
 
-- On supported Mac OS 7.6 through 8.1 boot disks, the guest File Manager checks an unclean HFS volume. For the published System 7.5.3 starter, firmware verifies its filesystem metadata before correcting a duplicate file ID, the allocation of that ID, two file counts, and the shutdown flag. [System 7 repair](HFS_STARTER7.md)
-- Pair a browser over USB for color screenshots, memory and firmware status, and a timed guest-speed measurement. Optional control supports mouse clicks, double-clicks and typing. The stock ESP32-C6 carries Wi-Fi traffic. The ESP32-P4 serves the console. [Browser controls](AUTOMATION.md#wi-fi-console)
-- The optional two-slot flash layout supports USB-authorized firmware updates over Wi-Fi. The P4 verifies the application against the selected board, silicon revision and SHA-256 and reads back the inactive slot before selecting it. [Setup, updates and rollback](WIFI_UPDATE.md)
-- The indexed renderer skips unchanged row runs. A deterministic Finder selection trace used 55% fewer submitted panel bytes at both 1 and 8 bits per pixel, with identical final pixels in the host renderer. [Workload and measurements](EMULATOR_PERFORMANCE.md)
+[Full Pass 3 measurements and `PERF` profiles](PERFORMANCE_REPORT.md#pass-3-interpreter-display-and-aot-optimization--2026-11-2324)
 
-## Hardware checks
+## Hardware and host checks
 
-Both stable pre-v3 Tab5 applications were installed over Wi-Fi on an ESP32-P4 v1.3 with its stock C6 radio. The device verified each application in the inactive slot, restarted and reached Mac OS 8.1 Finder. Both displays matched all 921,600 panel pixels. A paired browser displayed the live Macintosh screen, reported firmware 5.4, and completed a timed guest-speed measurement. All 113 host tests passed. The production-silicon Tab5 and both Waveshare profiles were build-tested.
-
-The following setup and performance measurements were made during the beta 3 device tests.
-
-An attached pre-v3 Tab5 formatted a 29,664 MiB spare card as FAT32 with 32 KiB clusters and restarted into **Set Up SD Card**. With Wi-Fi enabled on the formatted card, four-bit SDMMC read a 4 MiB test file at 10,198 KiB/s and wrote it at 1,369 KiB/s including sync. The previous 10 MHz Arduino SPI interface measured 1,759 KiB/s and 920 KiB/s on the same card. Files were checked again after a restart. [Measurements and commands](SD_STABILITY.md)
-
-The standard Tab5 build received the 3,250,928-byte USB Debug application over its stock C6 Wi-Fi link and selected the verified copy in 23.6 seconds. The board then restarted into that slot. Cancelling a transfer kept the running slot selected. Browser tests covered a color Finder screenshot, a timed guest-speed sample, remote input and session revocation.
-
-Inside System 7.5.3, two runs on the same card delivered about 4.5× the read throughput and 1.6–2.1× the write-and-flush throughput of the legacy SPI run. Every byte in the 4 MiB file verified. The fixed CPU test took about 0.42 seconds in all runs. [Macintosh benchmark results](SD_STABILITY.md#disk-performance-inside-system-753)
-
-Both downloadable systems reached Finder on the spare card. During the Mac OS 8.1 test, setup was cancelled at 181,413,082 bytes. After a firmware update, setup resumed there, checked the compressed file, expanded it and verified the full 1,048,576,000-byte disk from the card. [Installation and display checks](TAB5_HARDWARE_HANDOFF.md#beta-3-on-a-pre-v3-tab5)
+- Both pre-v3 Tab5 applications (`M5Tab-Macintosh-USB-Debug-v5.5-app.bin` in `ota_0` and `M5Tab-Macintosh-v5.5-app.bin` in `ota_1`) were installed over Wi-Fi on an ESP32-P4 v1.3 with its stock ESP32-C6 radio, verified in flash, booted on `/Macintosh8.dsk` to Mac OS 8.1 Finder, passed `PANEL VERIFY` (`0` mismatched out of `921,600` pixels), passed `AOT STATS` (`530/530` ROM regions running from PSRAM, `0` rejects), and reported firmware **`5.5`** (`ota_slots=2`) via `/desk/status`.
+- All five board/silicon release profiles (`esp32p4_pioarduino`, `esp32p4_pioarduino_debug`, `esp32p4_pioarduino_rev3`, `waveshare_p4_101`, `waveshare_p4_101_rev3`) compiled and passed `check_blob.py` (`573,964` bytes, `1,282` functions, `169,208` instructions checked). The Rev3 Tab5 and both Waveshare profiles are build-tested.
+- Host validation passed: `121` Python unit tests (`2` skipped), `43,308,858` native C++ CPU flag/helper checks (`test/test_cpu_flags.cpp`), and host differential AOT verification (`aot_diff --trials 12`: `51,173` runs, `193,464,986` instructions compared, `0` failures, `41` skipped).
 
 ## Choosing a download
 
-Choose the firmware for your board and ESP32-P4 revision. The release has separate images for pre-v3 and v3.1-or-newer Tab5 and Waveshare boards, plus a pre-v3 Tab5 USB Debug build.
+Choose the firmware for your board and ESP32-P4 revision. The release includes separate images for pre-v3 and v3.1-or-newer Tab5 and Waveshare boards, plus a pre-v3 Tab5 USB Debug build.
 
 | Installation | File | Use |
 | --- | --- | --- |
@@ -42,4 +35,4 @@ Choose the firmware for your board and ESP32-P4 revision. The release has separa
 
 Check `SHA256SUMS` and `BUILD-MANIFEST.json` for download hashes, SDK versions, chip limits, and the exact source revision. [USB flashing instructions](README.md#flashing-the-firmware)
 
-The previous stable release was v5.3. Restoring a saved whole-flash backup over USB also restores the previous partition layout. Macintosh disks and saved settings reside on the microSD card. [Download v5.3](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.3)
+The previous stable release was v5.4. [Download v5.4](https://github.com/amcchord/M5Tab-Macintosh/releases/tag/v5.4)
