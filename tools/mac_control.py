@@ -858,13 +858,13 @@ class MacControl:
 
     def _screenshot_read(self, frame_id: str, offset: int, count: int, deadline: float) -> bytes:
         # Reads are idempotent: retry only the damaged/missing block.
-        for attempt in range(5):
+        for attempt in range(8):
             if time.monotonic() >= deadline:
                 break
             if attempt:
                 self._block_retries = getattr(self, "_block_retries", 0) + 1
             self._write(f"SCREENSHOT READ {frame_id} {offset} {count}")
-            reply_timeout = 0.15 if getattr(self, "_uses_usb_jtag", False) else 0.5
+            reply_timeout = 0.35 if getattr(self, "_uses_usb_jtag", False) else 0.5
             for line in self._protocol_lines(min(deadline, time.monotonic() + reply_timeout)):
                 if line.startswith("@B2 ERR SCREENSHOT"):
                     raise ControlError(line[4:])

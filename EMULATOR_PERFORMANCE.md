@@ -33,6 +33,25 @@ reaches the Finder in 49.6 to 49.7 s, against 49.5 s for 5.0.1.
 
 Native QuickDraw acceleration stays disabled, as in 5.0.
 
+### Pass 3 optimization summary (2026-11-23/24)
+
+On `/Macintosh8.dsk` with 24 MB guest RAM (`esp32p4_pioarduino_debug` at 360 MHz;
+see [PERFORMANCE_REPORT.md](PERFORMANCE_REPORT.md#pass-3-interpreter-display-and-aot-optimization--2026-11-2324)
+for full breakdowns and `PERF` profiles):
+
+| Score | v5.4 interp | Stage 1 (open-source) | Stage 2a (ROM + sys RAM) | Stage 2b (+ Speedometer RAM) |
+|---|---:|---:|---:|---:|
+| CPU (3-run median) | 0.780 | 0.840 | 0.840 | 2.204 |
+| Graphics (3-run median) | 0.451 | 0.461 | 1.002 | 1.028 |
+| Full-suite PR (`all`) | 0.754 | 0.828 | 1.130 | 1.691 |
+| Color QuickDraw (1-bit / 8-bit) | 13.764 s / 22.689 s | 13.405 s / 22.004 s | 6.618 s / 11.599 s | 6.464 s / 11.134 s |
+
+Key Pass 3 additions beyond 5.0.1 / Pass 2:
+
+- **Interpreter & memory thunks:** packed `regflags.cznv` (`CLEAR_CZNV` / `SET_CZNV_ZN` / `SET_CZNV_ALL`) and word `cctrue()` tests (`m68k.h`); IRAM leaf `RTS` (`op_4e75_0_ff`); split IRAM A-line handlers (`op_aline_os` and `op_aline_toolbox` in `newcpu.cpp`); `mem_setpc_slow_thunk` (`memory.cpp`); and narrow register stores / sign-extended immediate fetches in `gencpu.c`.
+- **Translated-code runtime & translator:** 4 KB page occupancy bitmap (`aot_page_bitmap`) making range invalidations O(1) skips when clean (`AotCodeChangedGuestRange`), narrowed Quadra 650 `_HLock` flushes (`AotHandleCpusha`), backward-dataflow live-flag DCE (`compute_region_liveness`), batched `aot_load_cznv`/`aot_store_cznv`, single-entry specialization, direct block chaining, hot-inline region placement, `aot_setpc_thunk`, `-fno-stack-protector`, and extended `AOT STATS` (`cpusha`, `rskip`, `rinv`).
+- **Display pipeline:** 32-bit aligned burst indexed tile writers (`ScaleTraits`, `emit_u32_row`, `emit_u16_row`, `writeSingleRowIndexed` in `panel_surface.h`), cached `pairs[]` across frames via `pairs_dirty`, and word-stride 32-bit dirty-chunk clearing in `video_esp32.cpp`.
+
 ## What limits speed on the ESP32-P4
 
 - **Everything large lives in PSRAM.** Guest RAM, ROM, the guest frame
@@ -132,10 +151,17 @@ no cost.
 
 ### PC, prefetch and effective addresses
 
-`m68k_getpc`, `m68k_setpc`, `next_iword` and related helpers in `newcpu.h` are
-forced inline, with RAM and ROM fast paths for branch targets.
+`m68k_getpc`, `m68k_setpc`, `next_iword`, `get_iword_s16` and related helpers in `newcpu.h` are
+forced inline, with RAM and ROM fast paths for branch targets and an out-of-line
+`mem_setpc_slow_thunk` fallback (`memory.cpp`).
 `get_disp_ea_020` handles the common brief-extension-word form inline and calls
 `get_disp_ea_020_full` (in IRAM) for full extension words.
+
+Pass 3 also packs the four arithmetic condition codes (`c`, `z`, `n`, `v`) into a
+single 32-bit `regflags.cznv` word in `m68k.h` so `CLEAR_CZNV`, `SET_CZNV_ZN`,
+`SET_CZNV_ALL` and `cctrue()` operate on one word instead of four separate loads
+and stores, and adds `m68k_dreg_w_set` / `m68k_dreg_b_set` helpers plus a leaf
+IRAM `op_4e75_0_ff` (`RTS`) handler.
 
 ### Native A-line trap dispatch
 
@@ -437,11 +463,15 @@ with touch overlays hidden for the pixel check after a timing run.
 
 ### Packed indexed tile writer
 
-`writePanelIndexedTile2x` reads packed 1-, 2-, 4- or 8-bit guest rows and
-writes the 2×-scaled, rotated RGB565 tile straight into the panel frame
-buffer. A 256-entry table maps each palette index to a 32-bit pair of
-identical RGB565 pixels. Tiles covered by a touch overlay keep the previous
-compositing path.
+`writePanelIndexedTile2x` (backed by `ScaleTraits`, `emit_u32_row`, `emit_u16_row`,
+and `writeSingleRowIndexed` in `panel_surface.h`) reads packed 1-, 2-, 4- or 8-bit
+guest rows and writes the 2×-scaled, rotated RGB565 tile in 32-bit aligned bursts
+straight into the panel frame buffer without divide/multiply or byte-swap helpers.
+A 256-entry `pairs[]` table maps each palette index to a 32-bit pair of identical
+RGB565 pixels and is rebuilt only when `pairs_dirty` is set (palette or depth
+change). `video_dirty_chunks` is drained via row-wise 32-bit atomic exchanges in
+`video_esp32.cpp`. Tiles covered by a touch overlay keep the previous compositing
+path.
 
 ### Uncached scanout writes
 

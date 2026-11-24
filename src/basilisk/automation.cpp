@@ -1260,7 +1260,7 @@ static void processLegacyCommand(char *command)
         AotReadStats(&stats);
         protocolReply("@B2 OK AOT STATS regions=%lu/%lu entries=%lu/%lu modules=%lu/%lu installs=%lu "
                       "checks=%lu rejects=%lu flushes=%lu code=%lu psram=%lu calls=%llu instructions=%llu "
-                      "total=%llu\n",
+                      "total=%llu cpusha=%lu/%lu rskip=%lu rinv=%lu\n",
                       (unsigned long)stats.regions_installed, (unsigned long)stats.regions_total,
                       (unsigned long)stats.entries_installed, (unsigned long)stats.entries_total,
                       (unsigned long)stats.modules_installed, (unsigned long)stats.modules_total,
@@ -1268,7 +1268,9 @@ static void processLegacyCommand(char *command)
                       (unsigned long)stats.module_rejects, (unsigned long)stats.flushes,
                       (unsigned long)stats.code_bytes, (unsigned long)stats.code_in_psram,
                       (unsigned long long)stats.calls, (unsigned long long)stats.instructions,
-                      (unsigned long long)EmulatorInstructionCount());
+                      (unsigned long long)EmulatorInstructionCount(),
+                      (unsigned long)stats.cpusha_narrowed, (unsigned long)stats.cpusha_global,
+                      (unsigned long)stats.range_flushes_skipped, (unsigned long)stats.range_invalidations);
         return;
     }
     if (strcmp(command, "AOTPROF START") == 0) {

@@ -1,5 +1,58 @@
 # M5Tab Macintosh performance optimization report
 
+## Pass 3: interpreter, display, and AOT optimization — 2026-11-23/24
+
+Measured on a Tab5 (ESP32-P4 rev 1.3 at 360 MHz, Mac OS 8 on `/Macintosh8.dsk`,
+24 MB guest RAM, `esp32p4_pioarduino_debug` in `ota_1`, Speedometer 4.02 ratings
+and Color QuickDraw tests):
+
+| Metric | v5.4 interp baseline | Stage 1 (interp + display) | Stage 2a (ROM + sys RAM) | Stage 2b (+ Speedometer RAM) |
+|---|---:|---:|---:|---:|
+| CPU (3-run median) | 0.780 (0.777–0.781) | 0.840 (0.836–0.841) | 0.840 (0.833–0.848) | 2.204 (2.204–2.227) |
+| Graphics (3-run median) | 0.451 (0.450–0.453) | 0.461 (0.460–0.464) | 1.002 (0.997–1.002) | 1.028 (1.008–1.029) |
+| Full-suite PR (`all`) | 0.754 | 0.828 | 1.130 | 1.691 |
+| Full-suite breakdown (CPU / Disk / Gfx / Math) | 0.735 / 1.793 / 0.455 / 9.316 | 0.837 / 2.775 / 0.463 / 10.001 | 0.840 / 1.973 / 1.008 / 10.804 | 2.230 / 1.820 / 1.021 / 12.091 |
+| Color QuickDraw: Monochrome | 13.764 s (`0.502`) | 13.405 s (`0.515`) | 6.618 s (`1.044`) | 6.464 s (`1.069`) |
+| Color QuickDraw: 8-bit Color | 22.689 s (`0.467`) | 22.004 s (`0.481`) | 11.599 s (`0.913`) | 11.134 s (`0.951`) |
+| `PERF` CPU (`68k MIPS` / cyc / insns / IPC) | 5.946 / 60.5 / 42.3 / 0.699 | 6.365 / 56.6 / 39.2 / 0.693 | 7.252 / 49.6 / 27.1 / 0.546 | 19.039 / 18.9 / 16.2 / 0.858 |
+| `PERF` Graphics (`68k MIPS` / cyc / insns / IPC) | 6.399 / 56.3 / 41.7 / 0.741 | 6.573 / 54.8 / 39.8 / 0.726 | 12.913 / 27.9 / 17.6 / 0.632 | 13.497 / 26.7 / 17.7 / 0.662 |
+| Internal SRAM free after boot | 87,792 B | 88,312 B | 81,448 B | 81,140 B |
+
+On the same `/Macintosh8.dsk` disk (with 24 MB guest RAM and `v5.4` system AOT
+scoring `0.836` Graphics / `1.009` PR), Stage 1 raises open-source interpreter
+Performance Rating by `+9.8%` (`0.754` to `0.828`, CPU `+7.7%`, Graphics
+`+2.2%`), Stage 2a raises Graphics by `+122%` over the interpreter baseline
+(`+19.9%` over `v5.4` system AOT) with `30.3 s` cold boot (`22.0 s` since
+emulator start), and Stage 2b reaches `2.204` CPU (`+183%` over the interpreter
+baseline, `+37.4%` over Pass 2 `full-23`'s `1.604`) and `1.691` PR (`+124%`
+over baseline, `+26.7%` over `full-23`'s `1.335`) with `32.1 s` cold boot
+(`23.8 s` since emulator start). Note that Pass 3 profiles ran with
+`--profile-capacity 40000` (640 KB) because the default `200000` (3.2 MB)
+sampler buffer exceeds free PSRAM when 24 MB guest RAM and ~0.6 MB of AOT
+code/tables are both allocated.
+
+### Optimization summary
+
+- **Display pipeline & build polish** (`src/board/panel_surface.h`, `src/basilisk/video_esp32.cpp`, `main/CMakeLists.txt`, `scripts/pre_build.py`, `src/basilisk/uae_cpu/fpu/fpu_ieee.cpp`, `tools/mac_control.py`):
+  - Replaced per-pixel rotated indexed writes with 32-bit aligned burst tile writers (`ScaleTraits`, `emit_u32_row`, `emit_u16_row`, `writeSingleRowIndexed`, chunked stack buffering) eliminating multiply/byte-swap library calls on inner loops; cached palette `pairs[]` across frames via `pairs_dirty` rather than rebuilding every frame.
+  - Replaced byte-by-byte dirty-span clearing in `VideoRefresh` with row-wise 32-bit word OR/exchange scans over `video_dirty_chunks` (`__atomic_exchange_n`).
+  - Added ESP-IDF `main/CMakeLists.txt` warning/path cleanup, `fpu_ieee.cpp` inline portability fix, and higher USB-JTAG screenshot block retry resilience in `tools/mac_control.py`.
+- **68k interpreter fast paths** (`src/basilisk/uae_cpu/{m68k.h,newcpu.h,newcpu.cpp,memory.h,memory.cpp}`, `tools/cpu_gen/gencpu.c`, `cpuemu.cpp`, `compemu.h`):
+  - Packed `c`/`z`/`n`/`v` into a 32-bit `regflags.cznv` word in `flag_struct` with `CLEAR_CZNV`, `SET_CZNV_ZN`, and `SET_CZNV_ALL` single-store updates plus packed `cctrue()` checks; added `m68k_dreg_w_set`, `m68k_dreg_b_set`, and `get_iword_s16` in `gencpu.c`.
+  - Split A-line dispatch into `IRAM_ATTR` handlers `op_aline_os` (`0xA000..0xA7FF`) and `op_aline_toolbox` (`0xA800..0xAFFF`) with shared `native_trap_verify_vector` checks, moved `op_4e75_0_ff` (leaf `RTS`) into IRAM without frame setup, and added pipelined `mem_setpc_slow_thunk` / `mem_slow_setpc_xlate` and improved `mem_slow_*` thunks.
+- **AOT runtime & translator** (`src/basilisk/aot/{aot_runtime.h,aot_runtime.cpp,aot_codegen.h,aot_selftest.cpp}`, `tools/aot/aot_translate.py`, `scripts/aot_build_flags.py`, `src/basilisk/automation.cpp`):
+  - **4 KB page bitmap & narrowed `CPUSHA` invalidation:** `aot_page_bitmap` (8,192 pages covering 32 MB) makes `AotCodeChangedRange` / `AotCodeChangedGuestRange` skip unrelated writes in O(1), while `AotHandleCpusha` narrows Quadra 650 `_HLock` flushes to the locked handle block before falling back to `AotCodeChanged()`. On the full Stage 2b benchmark soak, `AOT STATS` recorded `cpusha=1829364/4289` (99.77% narrowed), `rskip=1848076`, `rinv=3888`, `rejects=0`, and `3,203,266,312` of `3,707,514,216` total 68k instructions (86.4%) executed in translated regions.
+  - **Codegen & translator optimizations:** backward-dataflow flag liveness and dead-flag elimination (`FlagEffect`, `compute_region_liveness`), batched `aot_load_cznv` / `aot_store_cznv`, single-entry specialization (skipping `AotEntryInfo` lookup when a region has one entry), direct intra-module / hot-edge block chaining, hot-inline region selection (`13` regions / `12,288 B` in Stage 2), `aot_setpc_thunk`, `-fno-stack-protector` in `scripts/aot_build_flags.py`, and PSRAM-resident `aot_entry_infos_runtime`.
+
+### Verification and safety
+
+- **Differential & AOT checks:**
+  - Host `aot_diff --trials 12`: Stage 2a `51,173` runs, `193,464,986` instructions compared, `0` failures (`41` skipped); Stage 2b `52,407` runs, `194,766,210` instructions compared, `0` failures (`42` skipped).
+  - On-device `esp32p4_aot_selftest` (Stage 2a): `RESULT PASS runs=26894 failures=0 skipped=56 instructions=95667839`.
+  - `tools/aot/check_blob.py`: `0` issues on both Stage 2a (`573,964 B`, `1,282` funcs, `169,208` insns) and Stage 2b (`598,540 B`, `1,344` funcs, `176,665` insns).
+- **Host unit & display suites:** `test_cpu_flags` (`43,308,858` flag and helper cases PASS), `bench_display_damage` (`1bpp outline 2.05 us`, `1bpp dense 73.19 us`, `8bpp outline 1.44 us`, `8bpp dense 79.97 us`, bit-exact panel hashes), and `unittest discover -s test -p 'test_*.py'`.
+- **On-device panel & stability:** `PANEL VERIFY` found `0` mismatches out of `921,600` pixels after Baseline A, Stage 1, Stage 2a, and Stage 2b runs (in both 1-bit monochrome and 256-color modes); all 5 open-source PlatformIO environments (`esp32p4_pioarduino`, `esp32p4_pioarduino_debug`, `esp32p4_pioarduino_rev3`, `waveshare_p4_101`, `waveshare_p4_101_rev3`) compile cleanly without `aot_rom_generated.cpp`.
+
 ## Translated code pass — 2026-09-27/28
 
 Branch `claude/perf-pass-2`, based on v5.0.1 `94af0b8`. The goal was every
