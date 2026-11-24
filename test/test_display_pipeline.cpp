@@ -169,6 +169,159 @@ static void test_indexed_source_bounds()
     }
 }
 
+static bool refWriteIndexed(uint16_t *fb, int pw, int ph, bool flip,
+                            int x, int y, int w, int h, int scale,
+                            const uint8_t *src, uint32_t stride,
+                            int bits, int first_pixel, const uint32_t *pairs)
+{
+    if (!fb || !src || !pairs || w <= 0 || h <= 0 ||
+        (scale == 2 && ((w | h | y | pw) & 1)) ||
+        (bits != 1 && bits != 2 && bits != 4 && bits != 8) || first_pixel < 0 ||
+        x < 0 || y < 0 || x > ph - w || y > pw - h) return false;
+    const int sw = w / scale;
+    const int sh = h / scale;
+    if (((uint64_t)first_pixel + sw) * bits > (uint64_t)stride * 8) return false;
+    const uint32_t mask = (1u << bits) - 1;
+    for (int r = 0; r < sh; ++r) {
+        for (int c = 0; c < sw; ++c) {
+            const uint64_t bit = ((uint64_t)first_pixel + c) * (uint32_t)bits;
+            const int idx = (src[(size_t)r * stride + (bit >> 3)] >> (8 - bits - (bit & 7))) & mask;
+            const uint16_t color = (uint16_t)(pairs[idx] & 0xFFFFu);
+            for (int dy = 0; dy < scale; ++dy) {
+                for (int dx = 0; dx < scale; ++dx) {
+                    const int lx = x + c * scale + dx;
+                    const int ly = y + r * scale + dy;
+                    const int px = flip ? ly : pw - 1 - ly;
+                    const int py = flip ? ph - 1 - lx : lx;
+                    fb[py * pw + px] = color;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static void test_indexed_exhaustive_and_large()
+{
+    std::vector<uint32_t> pairs(256);
+    for (int i = 0; i < 256; ++i) {
+        const uint16_t c = (uint16_t)rng();
+        pairs[i] = c * 0x00010001u;
+    }
+
+    // Exact-fit source buffers across chunk boundaries, single-row fast path,
+    // all sub-byte first_pixel alignments, odd 1x geometry, and 2-byte-aligned fb.
+    for (int bits : {1, 2, 4, 8}) {
+        const int ppb = 8 / bits;
+        for (bool flip : {false, true}) {
+            for (int sw : {1, 3, 7, 8, 9, 17, 31, 32, 33, 65}) {
+                for (int sh : {1, 2, 5, 39, 40, 41, 81}) {
+                    for (int off_idx = 0; off_idx < 2; ++off_idx) {
+                        const int first = (off_idx == 0) ? (sw % ppb) : (ppb + (sh % ppb) + 1);
+                        const int row_bytes = ((first + sw) * bits + 7) / 8;
+                        const int stride = row_bytes + (sh & 1);
+                        const size_t exact_bytes = (size_t)(sh - 1) * stride + (size_t)row_bytes;
+                        std::vector<uint8_t> src(exact_bytes);
+                        for (auto &v : src) v = (uint8_t)rng();
+
+                        // 2x check (aligned fb and 2-byte-aligned fb)
+                        {
+                            const int pw = 200, ph = 200;
+                            const int w = sw * 2, h = sh * 2;
+                            const int x = 3, y = 4;
+                            std::vector<uint16_t> raw_actual(pw * ph + 1, 0xbeef);
+                            std::vector<uint16_t> raw_ref = raw_actual;
+                            const int fb_off = (sw & 1); // test both 4-aligned and 2-aligned fb
+                            assert(writePanelIndexedTile2x(raw_actual.data() + fb_off, pw, ph, flip,
+                                                           x, y, w, h, src.data(), stride, bits,
+                                                           first, pairs.data()));
+                            assert(refWriteIndexed(raw_ref.data() + fb_off, pw, ph, flip,
+                                                   x, y, w, h, 2, src.data(), stride, bits,
+                                                   first, pairs.data()));
+                            assert(raw_actual == raw_ref);
+                        }
+
+                        // 1x check (odd pw, odd y, odd/even h, 2-byte-aligned fb)
+                        {
+                            const int pw = 101, ph = 101;
+                            const int x = 5, y = 3;
+                            std::vector<uint16_t> raw_actual(pw * ph + 1, 0xbeef);
+                            std::vector<uint16_t> raw_ref = raw_actual;
+                            const int fb_off = (sh & 1);
+                            assert(writePanelIndexedTile1x(raw_actual.data() + fb_off, pw, ph, flip,
+                                                           x, y, sw, sh, src.data(), stride, bits,
+                                                           first, pairs.data()));
+                            assert(refWriteIndexed(raw_ref.data() + fb_off, pw, ph, flip,
+                                                   x, y, sw, sh, 1, src.data(), stride, bits,
+                                                   first, pairs.data()));
+                            assert(raw_actual == raw_ref);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Large full-screen tiles (640x360 at 1x and 2x; 640x400 at 2x).
+    for (int bits : {1, 2, 4, 8}) {
+        for (bool flip : {false, true}) {
+            const int sw = 640, sh = 360;
+            const int first = 3;
+            const int stride = ((first + sw) * bits + 7) / 8 + 3;
+            std::vector<uint8_t> src((size_t)stride * sh);
+            for (auto &v : src) v = (uint8_t)rng();
+
+            // 1x full 640x360
+            {
+                std::vector<uint16_t> actual(360 * 640, 0x1111), ref = actual;
+                assert(writePanelIndexedTile1x(actual.data(), 360, 640, flip, 0, 0, sw, sh,
+                                               src.data(), stride, bits, first, pairs.data()));
+                assert(refWriteIndexed(ref.data(), 360, 640, flip, 0, 0, sw, sh, 1,
+                                       src.data(), stride, bits, first, pairs.data()));
+                assert(actual == ref);
+            }
+            // 2x full 640x360 -> 1280x720
+            {
+                std::vector<uint16_t> actual(720 * 1280, 0x2222), ref = actual;
+                assert(writePanelIndexedTile2x(actual.data(), 720, 1280, flip, 0, 0, sw * 2, sh * 2,
+                                               src.data(), stride, bits, first, pairs.data()));
+                assert(refWriteIndexed(ref.data(), 720, 1280, flip, 0, 0, sw * 2, sh * 2, 2,
+                                       src.data(), stride, bits, first, pairs.data()));
+                assert(actual == ref);
+            }
+        }
+    }
+
+    // Invalid argument / overflow / boundary error checks (must return false and leave panel untouched).
+    std::vector<uint16_t> panel(64 * 64, 0xdead);
+    const std::vector<uint16_t> untouched = panel;
+    uint8_t src_ok[64] = {};
+    assert(!writePanelIndexedTile2x(nullptr, 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 4, nullptr, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, 0, nullptr));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 0, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 0, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 3, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 3, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 63, 64, false, 0, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, -1, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, -2, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 62, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 62, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, -1, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, INT32_MAX, pairs.data()));
+    assert(!writePanelIndexedTile2x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 5, 0, pairs.data()));
+    assert(!writePanelIndexedTile1x(nullptr, 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 0, 4, 4, nullptr, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, 0, nullptr));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, -1, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 8, INT32_MAX, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 61, 0, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 61, 4, 4, src_ok, 8, 8, 0, pairs.data()));
+    assert(!writePanelIndexedTile1x(panel.data(), 64, 64, false, 0, 0, 4, 4, src_ok, 8, 16, 0, pairs.data()));
+    assert(panel == untouched);
+}
+
 // renderTileFromSnapshot must fill exactly the scale-sized buffer that
 // renderAndPushDirtyTiles allocates; a 2x-hardwired expansion would overflow
 // it at PIXEL_SCALE 1 (caught by ASan) and underfill it at 2x.
@@ -399,7 +552,8 @@ static void test_lifecycle()
 int main()
 {
     test_ranges(); test_rotation(); test_indexed_rotation(); test_indexed_1x();
-    test_indexed_source_bounds(); test_render_snapshot(); test_pipeline(); test_lifecycle();
+    test_indexed_source_bounds(); test_indexed_exhaustive_and_large();
+    test_render_snapshot(); test_pipeline(); test_lifecycle();
     puts("PASS: randomized damage, panel rotation, 2x/1x indexed tiles, scaled renderer, "
          "production tile/palette pipeline, retries, splash and lifecycle");
 }

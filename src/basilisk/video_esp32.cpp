@@ -120,6 +120,7 @@ DRAM_ATTR static uint16 palette_rgb565[256];
 
 // Flag to track if palette has changed - avoids unnecessary copies in video task
 static bool palette_changed = true; // protected by frame_spinlock
+static bool pairs_dirty = true;     // video task only: rebuild pairs[] when palette/depth changes
 
 // Dirty tile bitmap - in internal SRAM for fast access during video frame processing
 DRAM_ATTR static uint32 dirty_tiles[(TOTAL_TILES + 31) / 32];          // Bitmap of dirty tiles (read by video task)
@@ -503,23 +504,40 @@ extern "C" void VideoMarkTilesDirtyRect(int px, int py, int pw, int ph)
  */
 static int collectWriteDirtyTiles(uint32 bytes_per_row, int pixels_per_byte, uint32 shift)
 {
-    for (int i = 0; i < VIDEO_DIRTY_CHUNK_WORDS; i++) {
-        if (__atomic_load_n(&video_dirty_chunks[i], __ATOMIC_RELAXED) == 0) continue;
-        // Acquire pairs with the producers' release fence: pixels written
-        // before a flag was set are visible to the render that follows.
-        const uint32 flags = __atomic_exchange_n(&video_dirty_chunks[i], 0, __ATOMIC_ACQ_REL);
-        // In the advertised packed modes, each flag maps directly to one
-        // tile column in one guest row. Four adjacent flags share the row.
-        constexpr uint32 spans_per_row = MAC_SCREEN_WIDTH / VIDEO_DIRTY_SPAN_PIXELS;
-        if (spans_per_row % 4 == 0 && TILE_WIDTH == VIDEO_DIRTY_SPAN_PIXELS &&
-            bytes_per_row == (spans_per_row << shift)) {
-            const uint32 first_span = (uint32)i * 4;
-            const uint32 y = first_span / spans_per_row;
-            const uint32 tile = (y / TILE_HEIGHT) * TILES_X + first_span % spans_per_row;
-            const uint64_t row = UINT64_C(1) << (y % TILE_HEIGHT);
-            for (int byte = 0; byte < 4; ++byte)
-                if ((flags >> (byte * 8)) & 0xff) collectTileRows(tile + byte, row);
-        } else {
+    constexpr uint32 spans_per_row = MAC_SCREEN_WIDTH / VIDEO_DIRTY_SPAN_PIXELS;
+    constexpr uint32 words_per_row = spans_per_row / 4;
+    if (spans_per_row % 4 == 0 && TILE_WIDTH == VIDEO_DIRTY_SPAN_PIXELS &&
+        MAC_SCREEN_HEIGHT * words_per_row == VIDEO_DIRTY_CHUNK_WORDS &&
+        bytes_per_row == (spans_per_row << shift)) {
+        // Fast path: each guest row is words_per_row contiguous chunk words,
+        // and each flag byte maps directly to one tile column in that row.
+        for (int ty = 0; ty < TILES_Y; ++ty) {
+            const uint32 tile_row_base = (uint32)ty * TILES_X;
+            for (int ry = 0; ry < TILE_HEIGHT; ++ry) {
+                const uint32 y = (uint32)ty * TILE_HEIGHT + (uint32)ry;
+                uint32 *row_chunks = &video_dirty_chunks[y * words_per_row];
+                uint32 any = 0;
+                for (uint32 wx = 0; wx < words_per_row; ++wx)
+                    any |= __atomic_load_n(&row_chunks[wx], __ATOMIC_RELAXED);
+                if (any == 0) continue;
+                const uint64_t row_mask = UINT64_C(1) << ry;
+                for (uint32 wx = 0; wx < words_per_row; ++wx) {
+                    if (__atomic_load_n(&row_chunks[wx], __ATOMIC_RELAXED) == 0) continue;
+                    // Acquire pairs with the producers' release fence: pixels written
+                    // before a flag was set are visible to the render that follows.
+                    const uint32 flags = __atomic_exchange_n(&row_chunks[wx], 0, __ATOMIC_ACQ_REL);
+                    const uint32 tile = tile_row_base + wx * 4;
+                    if (flags & 0x000000FFu) collectTileRows(tile, row_mask);
+                    if (flags & 0x0000FF00u) collectTileRows(tile + 1, row_mask);
+                    if (flags & 0x00FF0000u) collectTileRows(tile + 2, row_mask);
+                    if (flags & 0xFF000000u) collectTileRows(tile + 3, row_mask);
+                }
+            }
+        }
+    } else {
+        for (int i = 0; i < VIDEO_DIRTY_CHUNK_WORDS; i++) {
+            if (__atomic_load_n(&video_dirty_chunks[i], __ATOMIC_RELAXED) == 0) continue;
+            const uint32 flags = __atomic_exchange_n(&video_dirty_chunks[i], 0, __ATOMIC_ACQ_REL);
             for (int byte = 0; byte < 4; ++byte) {
                 if (!((flags >> (byte * 8)) & 0xff)) continue;
                 const uint32 offset = (uint32)(i * 4 + byte) << shift;
@@ -579,55 +597,59 @@ static bool frame_is_uniform(const uint8 *src, video_depth depth, uint32 bpr)
 static void snapshotTile(uint8 *src_buffer, int tile_x, int tile_y, uint8 *snapshot,
                          video_depth depth, uint32 bpr)
 {
-    int src_start_x = tile_x * TILE_WIDTH;
-    int src_start_y = tile_y * TILE_HEIGHT;
-    
-    
-    // Copy and decode each row of the tile to the contiguous snapshot buffer
+    const int src_start_x = tile_x * TILE_WIDTH;
+    const int src_start_y = tile_y * TILE_HEIGHT;
     uint8 *dst = snapshot;
-    
-    if (depth == VDEPTH_8BIT) {
-        // 8-bit mode: direct copy, no decoding needed
-        for (int row = 0; row < TILE_HEIGHT; row++) {
-            uint8 *src = src_buffer + (src_start_y + row) * bpr + src_start_x;
-            memcpy(dst, src, TILE_WIDTH);
-            dst += TILE_WIDTH;
-        }
-    } else {
-        // Packed mode: need to decode pixels
-        // For each row, extract the tile's pixel range from the packed source
-        for (int row = 0; row < TILE_HEIGHT; row++) {
-            uint8 *src_row = src_buffer + (src_start_y + row) * bpr;
-            
-            // Decode TILE_WIDTH pixels starting at src_start_x
-            for (int x = 0; x < TILE_WIDTH; x++) {
-                int pixel_x = src_start_x + x;
-                
-                switch (depth) {
-                    case VDEPTH_1BIT: {
-                        int byte_idx = pixel_x / 8;
-                        int bit_idx = 7 - (pixel_x % 8);
-                        *dst++ = (src_row[byte_idx] >> bit_idx) & 0x01;
-                        break;
-                    }
-                    case VDEPTH_2BIT: {
-                        int byte_idx = pixel_x / 4;
-                        int shift = 6 - ((pixel_x % 4) * 2);
-                        *dst++ = (src_row[byte_idx] >> shift) & 0x03;
-                        break;
-                    }
-                    case VDEPTH_4BIT: {
-                        int byte_idx = pixel_x / 2;
-                        int shift = (pixel_x % 2 == 0) ? 4 : 0;
-                        *dst++ = (src_row[byte_idx] >> shift) & 0x0F;
-                        break;
-                    }
-                    default:
-                        *dst++ = src_row[pixel_x];
-                        break;
+    const uint8 *src_base = src_buffer + (uint32)src_start_y * bpr;
+
+    switch (depth) {
+        case VDEPTH_8BIT:
+            for (int row = 0; row < TILE_HEIGHT; ++row, src_base += bpr, dst += TILE_WIDTH)
+                memcpy(dst, src_base + src_start_x, TILE_WIDTH);
+            break;
+        case VDEPTH_4BIT:
+            for (int row = 0; row < TILE_HEIGHT; ++row, src_base += bpr) {
+                const uint8 *s = src_base + (src_start_x >> 1);
+                for (int i = 0; i < TILE_WIDTH / 2; ++i) {
+                    const uint8 b = s[i];
+                    *dst++ = b >> 4;
+                    *dst++ = b & 0x0F;
                 }
             }
-        }
+            break;
+        case VDEPTH_2BIT:
+            for (int row = 0; row < TILE_HEIGHT; ++row, src_base += bpr) {
+                const uint8 *s = src_base + (src_start_x >> 2);
+                for (int i = 0; i < TILE_WIDTH / 4; ++i) {
+                    const uint8 b = s[i];
+                    *dst++ = b >> 6;
+                    *dst++ = (b >> 4) & 0x03;
+                    *dst++ = (b >> 2) & 0x03;
+                    *dst++ = b & 0x03;
+                }
+            }
+            break;
+        case VDEPTH_1BIT:
+            for (int row = 0; row < TILE_HEIGHT; ++row, src_base += bpr) {
+                const uint8 *s = src_base + (src_start_x >> 3);
+                for (int i = 0; i < TILE_WIDTH / 8; ++i) {
+                    const uint8 b = s[i];
+                    dst[0] = (b >> 7) & 0x01;
+                    dst[1] = (b >> 6) & 0x01;
+                    dst[2] = (b >> 5) & 0x01;
+                    dst[3] = (b >> 4) & 0x01;
+                    dst[4] = (b >> 3) & 0x01;
+                    dst[5] = (b >> 2) & 0x01;
+                    dst[6] = (b >> 1) & 0x01;
+                    dst[7] = b & 0x01;
+                    dst += 8;
+                }
+            }
+            break;
+        default:
+            for (int row = 0; row < TILE_HEIGHT; ++row, src_base += bpr, dst += TILE_WIDTH)
+                memcpy(dst, src_base + src_start_x, TILE_WIDTH);
+            break;
     }
 }
 
@@ -722,6 +744,7 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
     DRAM_ATTR static uint8 snapshot[TILE_WIDTH * TILE_HEIGHT];
     DRAM_ATTR static uint16 pixels[TILE_WIDTH * PIXEL_SCALE * TILE_HEIGHT * PIXEL_SCALE];
     DRAM_ATTR static uint32 pairs[256];
+    static int pairs_bits = 0;
     const int w = TILE_WIDTH * PIXEL_SCALE;
     const int h = TILE_HEIGHT * PIXEL_SCALE;
     bool ok = true;
@@ -736,44 +759,58 @@ static void renderAndPushDirtyTiles(uint8 *src_buffer, uint16 *local_palette,
         default: break;
     }
     const bool indexed = bits != 0 && (PIXEL_SCALE == 1 || PIXEL_SCALE == 2);
-    if (indexed) {
-        for (int i = 0; i < (1 << bits); ++i) {
+    if (!BoardDisplay_BeginTiles()) return;
+    if (indexed && (pairs_dirty || pairs_bits != bits)) {
+        const int count = 1 << bits;
+        for (int i = 0; i < count; ++i) {
             // The 2x writer stores one replicated 32-bit pair per source
             // pixel; the 1x writer takes the color in the low halfword.
             pairs[i] = (PIXEL_SCALE == 2) ? (uint32)local_palette[i] * 0x00010001u
                                           : local_palette[i];
         }
+        pairs_bits = bits;
+        pairs_dirty = false;
     }
-    if (!BoardDisplay_BeginTiles()) return;
-    for (int ty = 0; ty < TILES_Y; ++ty) {
-        for (int tx = 0; tx < TILES_X; ++tx) {
-            const int tile = ty * TILES_X + tx;
-            if (!isTileDirty(tile)) continue;
+    constexpr int dirty_words = (TOTAL_TILES + 31) / 32;
+    const uint32_t tile_row_bytes = (uint32_t)w * sizeof(uint16);
+    for (int wi = 0; wi < dirty_words; ++wi) {
+        uint32 wbits = dirty_tiles[wi];
+        while (wbits) {
+            const unsigned bit = __builtin_ctz(wbits);
+            wbits &= wbits - 1;
+            const int tile = wi * 32 + (int)bit;
+            if (tile >= TOTAL_TILES) break;
+            const int ty = tile / TILES_X;
+            const int tx = tile - ty * TILES_X;
+            const int dst_x = tx * w;
+            const int dst_y = ty * h;
             // Guest writes concurrent with rendering set new damage flags,
             // which stay pending until the next frame's acquire exchange.
-            if (indexed && !TouchOverlay_TileCovered(tx * w, ty * h, w, h)) {
+            if (indexed && !TouchOverlay_TileCovered(dst_x, dst_y, w, h)) {
                 // One pass from the guest frame buffer into the panel.
                 uint64_t rows = dirty_rows[tile];
                 // A one-row gap costs less to include than another rotated
                 // tile submission, particularly for alternating scan lines.
                 rows |= (rows << 1) & (rows >> 1);
+                const int tile_y = ty * TILE_HEIGHT;
+                const int first_pixel = tx * TILE_WIDTH;
                 while (rows) {
                     const int first = __builtin_ctzll(rows);
                     const int end = first + __builtin_ctzll(~(rows >> first));
-                    const int y = ty * TILE_HEIGHT + first;
+                    const int y = tile_y + first;
                     const int height = (end - first) * PIXEL_SCALE;
                     const uint8 *src = src_buffer + (uint32)y * bpr;
-                    bytes += w * height * sizeof(uint16);
-                    ok = BoardDisplay_PushIndexedTile(tx * w, y * PIXEL_SCALE, w, height, src, bpr,
-                                                      bits, tx * TILE_WIDTH, pairs) && ok;
+                    bytes += tile_row_bytes * (uint32_t)height;
+                    ok = BoardDisplay_PushIndexedTile(dst_x, y * PIXEL_SCALE, w, height, src, bpr,
+                                                      bits, first_pixel, pairs) && ok;
                     rows &= UINT64_MAX << end;
                 }
             } else {
-                bytes += w * h * sizeof(uint16);
+                bytes += tile_row_bytes * (uint32_t)h;
                 snapshotTile(src_buffer, tx, ty, snapshot, depth, bpr);
                 renderTileFromSnapshot(snapshot, local_palette, pixels);
-                TouchOverlay_CompositeTile(tx * w, ty * h, w, h, pixels);
-                ok = BoardDisplay_PushTile(tx * w, ty * h, w, h, pixels) && ok;
+                TouchOverlay_CompositeTile(dst_x, dst_y, w, h, pixels);
+                ok = BoardDisplay_PushTile(dst_x, dst_y, w, h, pixels) && ok;
             }
             if ((++rendered & 7) == 0) taskYIELD();
         }
@@ -849,6 +886,7 @@ static void renderPendingFrame(uint16 *local_palette)
     if (palette_changed) {
         memcpy(local_palette, palette_rgb565, sizeof(palette_rgb565));
         palette_changed = false;
+        pairs_dirty = true;
     }
     portEXIT_CRITICAL(&frame_spinlock);
 

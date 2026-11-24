@@ -1,6 +1,7 @@
 """Host regressions for clock writes, guest audio ranges and release packaging."""
 import importlib.util
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -126,6 +127,26 @@ class ReleaseImagesTests(unittest.TestCase):
         self.merged.write_bytes(data)
         with self.assertRaises(ValueError):
             release.validate_merged(self.merged, self.root)
+
+
+class ProjectPolishTests(unittest.TestCase):
+    def test_pre_build_banner_is_m5tab_macintosh(self):
+        text = (ROOT / "scripts/pre_build.py").read_text(encoding="utf-8")
+        self.assertNotIn("BigDashVesc", text)
+        self.assertIn("M5Tab-Macintosh Pre-build: Preparing build environment...", text)
+
+    def test_main_cmakelists_sources_exist(self):
+        cmake = (ROOT / "main/CMakeLists.txt").read_text(encoding="utf-8")
+        basilisk_dir = ROOT / "src/basilisk"
+        listed = re.findall(r"\$\{BASILISK_DIR\}/([^\s\)\"]+)", cmake)
+        self.assertGreater(len(listed), 0)
+        for rel in listed:
+            self.assertTrue((basilisk_dir / rel).exists(), f"Missing CMake source: {rel}")
+
+    def test_fpu_ieee_zero_check_uses_bitwise_and(self):
+        text = (ROOT / "src/basilisk/uae_cpu/fpu/fpu_ieee.cpp").read_text(encoding="utf-8")
+        self.assertNotIn("wrd1 && 0x7fff0000", text)
+        self.assertIn("(wrd1 & 0x7fff0000) == 0 && wrd2 == 0 && wrd3 == 0", text)
 
 
 if __name__ == "__main__":
