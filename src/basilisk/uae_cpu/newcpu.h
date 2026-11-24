@@ -93,6 +93,8 @@ struct comptbl {
 #endif
 
 extern void REGPARAM2 op_illg (uae_u32) REGPARAM;
+extern void REGPARAM2 op_aline_os (uae_u32) REGPARAM;
+extern void REGPARAM2 op_aline_toolbox (uae_u32) REGPARAM;
 extern void m68k_dumpstate(uaecptr *nextpc);
 extern void reportCPUCorePerf(uint32 current_time_ms);
 
@@ -135,9 +137,37 @@ extern regstruct *lastint_regs_ptr;
 #define m68k_dreg(r,num) ((r).regs[(num)])
 #define m68k_areg(r,num) (((r).regs + 8)[(num)])
 
+static ALWAYS_INLINE void m68k_dreg_w_set(struct regstruct &r, uae_u32 num, uae_u32 val)
+{
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	const uint16_t v = (uint16_t)val;
+	__builtin_memcpy(&r.regs[num], &v, sizeof(v));
+#else
+	r.regs[num] = (r.regs[num] & ~0xffffu) | (val & 0xffffu);
+#endif
+}
+
+static ALWAYS_INLINE void m68k_dreg_b_set(struct regstruct &r, uae_u32 num, uae_u32 val)
+{
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+	const uint8_t v = (uint8_t)val;
+	__builtin_memcpy(&r.regs[num], &v, sizeof(v));
+#else
+	r.regs[num] = (r.regs[num] & ~0xffu) | (val & 0xffu);
+#endif
+}
+
 #define get_ibyte(o) do_get_mem_byte((uae_u8 *)(regs.pc_p + (o) + 1))
 #define get_iword(o) do_get_mem_word((uae_u16 *)(regs.pc_p + (o)))
 #define get_ilong(o) do_get_mem_long((uae_u32 *)(regs.pc_p + (o)))
+
+static ALWAYS_INLINE uae_s32 get_iword_s16(uae_s32 o)
+{
+	const uae_u8 *p = (const uae_u8 *)(regs.pc_p + (o));
+	uae_s32 b0 = (uae_s8)p[0];
+	UAE_OPAQUE(b0);
+	return (uae_s32)(((uae_u32)b0 << 8) | p[1]);
+}
 
 #ifdef HAVE_GET_WORD_UNSWAPPED
 #define GET_OPCODE (do_get_mem_word_unswapped (regs.pc_p))
@@ -222,7 +252,14 @@ static ALWAYS_INLINE void m68k_setpc (uaecptr newpc)
 	} else if (newpc - ROMBaseMac < ROMSize) {
 		host = ROMBaseHost + (newpc - ROMBaseMac);
 	} else {
+#if defined(__riscv) && !defined(MEM_SLOW_DIRECT_CALLS) && defined(ARDUINO)
+		register uae_u32 mem_a0_ __asm__("a0") = newpc;
+		__asm__ volatile("1: auipc t0, %%pcrel_hi(mem_setpc_slow_thunk)\n\tjalr t0, %%pcrel_lo(1b)(t0)"
+		                 : "+r"(mem_a0_) : : "t0", "memory", MEM_SLOW_FP_CLOBBERS);
+		host = (uae_u8 *)(uintptr)mem_a0_;
+#else
 		host = get_real_address(newpc);
+#endif
 	}
 	regs.pc_p = regs.pc_oldp = host;
 	regs.pc = newpc;
@@ -284,22 +321,26 @@ static ALWAYS_INLINE uae_u32 next_ilong (void)
 
 static ALWAYS_INLINE void m68k_do_rts(void)
 {
-	    m68k_setpc(get_long(m68k_areg(regs, 7)));
-	        m68k_areg(regs, 7) += 4;
+	const uaecptr sp = m68k_areg(regs, 7);
+	const uaecptr pc = get_long(sp);
+	m68k_areg(regs, 7) = sp + 4;
+	m68k_setpc(pc);
 }
- 
+
 static ALWAYS_INLINE void m68k_do_bsr(uaecptr oldpc, uae_s32 offset)
 {
-	    m68k_areg(regs, 7) -= 4;
-	        put_long(m68k_areg(regs, 7), oldpc);
-		    m68k_incpc(offset);
+	const uaecptr sp = m68k_areg(regs, 7) - 4;
+	m68k_areg(regs, 7) = sp;
+	put_long(sp, oldpc);
+	m68k_incpc(offset);
 }
- 
+
 static ALWAYS_INLINE void m68k_do_jsr(uaecptr oldpc, uaecptr dest)
 {
-	    m68k_areg(regs, 7) -= 4;
-	        put_long(m68k_areg(regs, 7), oldpc);
-		    m68k_setpc(dest);
+	const uaecptr sp = m68k_areg(regs, 7) - 4;
+	m68k_areg(regs, 7) = sp;
+	put_long(sp, oldpc);
+	m68k_setpc(dest);
 }
 
 static __inline__ void m68k_setstopped (int stop)

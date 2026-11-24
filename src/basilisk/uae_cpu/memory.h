@@ -184,7 +184,8 @@ static ALWAYS_INLINE uint8 *mem_ram_base(void) {
     __asm__ volatile("1: auipc t0, %%pcrel_hi(" #thunk ")\n\tjalr t0, %%pcrel_lo(1b)(t0)" \
                      : : "r"(mem_a0_), "r"(mem_a1_) : "t0", "memory", MEM_SLOW_FP_CLOBBERS); \
 } while (0)
-// Out-of-line accesses with the RAM case included, for translated code.
+// Out-of-line accesses with the RAM case included, for translated code,
+// and out-of-line cold translation helper for m68k_setpc().
 extern "C" {
 void mem_lget_thunk(void);
 void mem_wget_thunk(void);
@@ -192,6 +193,7 @@ void mem_bget_thunk(void);
 void mem_lput_thunk(void);
 void mem_wput_thunk(void);
 void mem_bput_thunk(void);
+void mem_setpc_slow_thunk(void);
 }
 #define mem_slow_lget_fast(addr) MEM_SLOW_GET(mem_slow_lget_thunk, addr)
 #define mem_slow_wget_fast(addr) MEM_SLOW_GET(mem_slow_wget_thunk, addr)

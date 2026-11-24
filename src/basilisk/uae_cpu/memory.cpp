@@ -247,45 +247,63 @@ MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
 }
 
 MEM_GET_THUNK(mem_slow_lget_thunk, mem_slow_lget, 3,
-    "lbu a0, 0(t2)\n slli a0, a0, 24\n"
-    "lbu t3, 1(t2)\n slli t3, t3, 16\n or a0, a0, t3\n"
-    "lbu t3, 2(t2)\n slli t3, t3, 8\n or a0, a0, t3\n"
-    "lbu t3, 3(t2)\n or a0, a0, t3\n")
+    "lbu a0, 0(t2)\n lbu t1, 1(t2)\n lbu t3, 2(t2)\n lbu t2, 3(t2)\n"
+    "slli a0, a0, 24\n slli t1, t1, 16\n slli t3, t3, 8\n"
+    "or a0, a0, t1\n or t3, t3, t2\n or a0, a0, t3\n")
 MEM_GET_THUNK(mem_slow_wget_thunk, mem_slow_wget, 1,
-    "lbu a0, 0(t2)\n slli a0, a0, 8\n lbu t3, 1(t2)\n or a0, a0, t3\n")
+    "lbu a0, 0(t2)\n lbu t3, 1(t2)\n slli a0, a0, 8\n or a0, a0, t3\n")
 MEM_GET_THUNK(mem_slow_bget_thunk, mem_slow_bget, 0,
     "lbu a0, 0(t2)\n")
 MEM_PUT_THUNK(mem_slow_lput_thunk, mem_slow_lput, 3,
-    "srli t3, a1, 24\n sb t3, 0(t2)\n srli t3, a1, 16\n sb t3, 1(t2)\n"
-    "srli t3, a1, 8\n sb t3, 2(t2)\n sb a1, 3(t2)\n")
+    "srli t3, a1, 24\n srli t4, a1, 16\n sb t3, 0(t2)\n"
+    "srli t3, a1, 8\n sb t4, 1(t2)\n sb a1, 3(t2)\n sb t3, 2(t2)\n")
 MEM_PUT_THUNK(mem_slow_wput_thunk, mem_slow_wput, 1,
-    "srli t3, a1, 8\n sb t3, 0(t2)\n sb a1, 1(t2)\n")
+    "srli t3, a1, 8\n sb a1, 1(t2)\n sb t3, 0(t2)\n")
 MEM_PUT_THUNK(mem_slow_bput_thunk, mem_slow_bput, 0,
     "sb a1, 0(t2)\n")
 #undef MEM_GET_THUNK
 #undef MEM_PUT_THUNK
 
+// Register-preserving cold fallback for m68k_setpc() when newpc lies outside
+// RAM and ROM. Entered with `jalr t0`: a0 = guest PC in, host pointer out in
+// a0; t0 is the return address. Preserves all other integer registers.
+MEM_SLOW_ATTR __attribute__((used, noinline)) uae_u8 *mem_slow_setpc_xlate(uaecptr addr)
+{
+    return get_real_address(addr);
+}
+
+MEM_SLOW_ATTR __attribute__((naked, used)) void mem_setpc_slow_thunk(void)
+{
+    __asm__ volatile(
+        MEM_THUNK_FULL_SAVE
+        "call mem_slow_setpc_xlate\n"
+        MEM_THUNK_FULL_RESTORE
+        "jr t0\n");
+}
+
 // Complete guest memory accesses for translated code (src/basilisk/aot),
 // which is kept compact rather than inlined. Guest RAM first, then the ROM
 // (loads) and the direct-layout frame buffer, all without touching the
 // stack; anything else goes to the thunks above. Same convention, except
-// that t1 and t2 are scratch, and stores may also change a0 and a1.
+// that t1, t2 and t3 are scratch on the fast path (matching AOT_MEM_GET /
+// AOT_MEM_PUT clobbers), and stores may also change a0 and a1.
 #define MEM_AOT_RAM \
         "lui t1, %hi(RAMSize)\n lw t1, %lo(RAMSize)(t1)\n" \
+        "lui t2, %hi(RAMBaseHost)\n lw t2, %lo(RAMBaseHost)(t2)\n" \
         "bgeu a0, t1, 2f\n" \
-        "lui t1, %hi(RAMBaseHost)\n lw t1, %lo(RAMBaseHost)(t1)\n" \
-        "add t1, t1, a0\n"
+        "add t1, t2, a0\n"
 // t1 = a0 - base; to `miss` unless [t1, t1 + extra] lies inside size (in t2).
 #define MEM_AOT_RANGE(base_sym, size_sym, extra, miss) \
-        "lui t1, %hi(" base_sym ")\n lw t1, %lo(" base_sym ")(t1)\n sub t1, a0, t1\n" \
+        "lui t1, %hi(" base_sym ")\n lw t1, %lo(" base_sym ")(t1)\n" \
         "lui t2, %hi(" size_sym ")\n lw t2, %lo(" size_sym ")(t2)\n" \
-        "bgeu t1, t2, " miss "\n addi t2, t2, -" #extra "\n bgeu t1, t2, " miss "\n"
+        "sub t1, a0, t1\n" \
+        "bgeu t1, t2, " miss "\n addi t3, t1, " #extra "\n bgeu t3, t2, " miss "\n"
 #define MEM_AOT_FRAME_RANGE(extra, miss) \
         "lui t1, %hi(MacFrameLayout)\n lw t1, %lo(MacFrameLayout)(t1)\n" \
+        "lui t2, %hi(MacFrameSize)\n lw t2, %lo(MacFrameSize)(t2)\n" \
         "addi t1, t1, -1\n bnez t1, " miss "\n" /* FLAYOUT_DIRECT == 1 */ \
         "lui t1, 0xa0000\n sub t1, a0, t1\n" \
-        "lui t2, %hi(MacFrameSize)\n lw t2, %lo(MacFrameSize)(t2)\n" \
-        "bgeu t1, t2, " miss "\n addi t2, t2, -" #extra "\n bgeu t1, t2, " miss "\n"
+        "bgeu t1, t2, " miss "\n addi t3, t1, " #extra "\n bgeu t3, t2, " miss "\n"
 
 // Loads: a0 = address in, value out. `load_be` reads from t1.
 #define MEM_AOT_GET_THUNK(name, slow, extra, load_be) \
@@ -303,8 +321,8 @@ MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
         "9:\n tail " #slow "\n"); \
 }
 
-// Stores: a0 = address, a1 = value. `store_be` writes a1 to t2 using a0 as
-// scratch. A frame-buffer store publishes its pixels, fences, then sets the
+// Stores: a0 = address, a1 = value. `store_be` writes a1 to t2 using a0 and t3
+// as scratch. A frame-buffer store publishes its pixels, fences, then sets the
 // damage flag of each span it touched, as the thunks above do.
 #define MEM_AOT_PUT_THUNK(name, slow, extra, store_ram, store_frame) \
 MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
@@ -329,20 +347,21 @@ MEM_SLOW_ATTR __attribute__((naked, used)) void name(void) \
 }
 
 MEM_AOT_GET_THUNK(mem_lget_thunk, mem_slow_lget_thunk, 3,
-    "lbu a0, 0(t1)\n lbu t2, 1(t1)\n slli a0, a0, 24\n slli t2, t2, 16\n or a0, a0, t2\n"
-    "lbu t2, 2(t1)\n slli t2, t2, 8\n or a0, a0, t2\n lbu t2, 3(t1)\n or a0, a0, t2\n")
+    "lbu a0, 0(t1)\n lbu t2, 1(t1)\n lbu t3, 2(t1)\n lbu t1, 3(t1)\n"
+    "slli a0, a0, 24\n slli t2, t2, 16\n slli t3, t3, 8\n"
+    "or a0, a0, t2\n or t3, t3, t1\n or a0, a0, t3\n")
 MEM_AOT_GET_THUNK(mem_wget_thunk, mem_slow_wget_thunk, 1,
     "lbu a0, 0(t1)\n lbu t2, 1(t1)\n slli a0, a0, 8\n or a0, a0, t2\n")
 MEM_AOT_GET_THUNK(mem_bget_thunk, mem_slow_bget_thunk, 0,
     "lbu a0, 0(t1)\n")
 MEM_AOT_PUT_THUNK(mem_lput_thunk, mem_slow_lput_thunk, 3,
-    "srli t2, a1, 24\n sb t2, 0(t1)\n srli t2, a1, 16\n sb t2, 1(t1)\n"
-    "srli t2, a1, 8\n sb t2, 2(t1)\n sb a1, 3(t1)\n",
-    "srli a0, a1, 24\n sb a0, 0(t2)\n srli a0, a1, 16\n sb a0, 1(t2)\n"
-    "srli a0, a1, 8\n sb a0, 2(t2)\n sb a1, 3(t2)\n")
+    "srli t2, a1, 24\n srli t3, a1, 16\n sb t2, 0(t1)\n"
+    "srli t2, a1, 8\n sb t3, 1(t1)\n sb a1, 3(t1)\n sb t2, 2(t1)\n",
+    "srli a0, a1, 24\n srli t3, a1, 16\n sb a0, 0(t2)\n"
+    "srli a0, a1, 8\n sb t3, 1(t2)\n sb a1, 3(t2)\n sb a0, 2(t2)\n")
 MEM_AOT_PUT_THUNK(mem_wput_thunk, mem_slow_wput_thunk, 1,
-    "srli t2, a1, 8\n sb t2, 0(t1)\n sb a1, 1(t1)\n",
-    "srli a0, a1, 8\n sb a0, 0(t2)\n sb a1, 1(t2)\n")
+    "srli t2, a1, 8\n sb a1, 1(t1)\n sb t2, 0(t1)\n",
+    "srli a0, a1, 8\n sb a1, 1(t2)\n sb a0, 0(t2)\n")
 MEM_AOT_PUT_THUNK(mem_bput_thunk, mem_slow_bput_thunk, 0,
     "sb a1, 0(t1)\n",
     "sb a1, 0(t2)\n")

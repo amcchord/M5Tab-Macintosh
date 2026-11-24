@@ -16,8 +16,12 @@ static inline void compiler_exit(void) {}
 // The guest's cache instructions (CINV, CPUSH) end up here. Translated RAM
 // code (src/basilisk/aot) checks its bytes again after a flush.
 extern void AotCodeChanged(void);
+extern void AotCodeChangedGuestRange(uaecptr addr, uae_u32 size);
+extern void AotHandleCpusha(void);
 static inline void flush_icache(int n) { (void)n; AotCodeChanged(); }
 static inline void flush_icache_range(uint8 *start, uint32 length) { (void)start; (void)length; AotCodeChanged(); }
+static inline void flush_icache_guest_range(uaecptr addr, uae_u32 length) { AotCodeChangedGuestRange(addr, length); }
+static inline void flush_icache_cpusha(void) { AotHandleCpusha(); }
 
 // JIT cache pointers (stubs)
 #define compiled_code NULL

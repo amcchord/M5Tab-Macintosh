@@ -23,6 +23,8 @@
 #ifndef M68K_FLAGS_H
 #define M68K_FLAGS_H
 
+#include <stdint.h>
+
 #ifdef OPTIMIZED_FLAGS
 
 #if defined(X86_ASSEMBLY) || defined(X86_64_ASSEMBLY) || defined(MSVC_INTRINSICS)
@@ -1014,11 +1016,16 @@ static inline uae_u32 sparc_v9_flag_addx_32(flag_struct *flags, uae_u32 src, uae
 #else
 
 struct flag_struct {
-    unsigned int c;
-    unsigned int z;
-    unsigned int n;
-    unsigned int v; 
-    unsigned int x;
+    union {
+        struct {
+            uint8_t c;
+            uint8_t z;
+            uint8_t n;
+            uint8_t v;
+        };
+        uint32_t cznv;
+    };
+    uint8_t x;
 };
 
 extern struct flag_struct regflags;
@@ -1041,12 +1048,39 @@ extern struct flag_struct regflags;
 #define GET_ZFLG ZFLG
 #define GET_XFLG XFLG
 
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define CLEAR_CZNV (regflags.cznv = 0)
+#define SET_CZNV_ZN(zval, nval) \
+	(regflags.cznv = ((uae_u32)(zval) << 8) | ((uae_u32)(nval) << 16))
+#define SET_CZNV_ALL(cval, zval, nval, vval) \
+	(regflags.cznv = ((uae_u32)(cval)) | ((uae_u32)(zval) << 8) | \
+	                 ((uae_u32)(nval) << 16) | ((uae_u32)(vval) << 24))
+#else
 #define CLEAR_CZNV do { \
  SET_CFLG (0); \
  SET_ZFLG (0); \
  SET_NFLG (0); \
  SET_VFLG (0); \
 } while (0)
+#define SET_CZNV_ZN(zval, nval) do { \
+ const uint8_t _uae_z = (uint8_t)(zval); \
+ const uint8_t _uae_n = (uint8_t)(nval); \
+ SET_CFLG (0); \
+ SET_ZFLG (_uae_z); \
+ SET_NFLG (_uae_n); \
+ SET_VFLG (0); \
+} while (0)
+#define SET_CZNV_ALL(cval, zval, nval, vval) do { \
+ const uint8_t _uae_c = (uint8_t)(cval); \
+ const uint8_t _uae_z = (uint8_t)(zval); \
+ const uint8_t _uae_n = (uint8_t)(nval); \
+ const uint8_t _uae_v = (uint8_t)(vval); \
+ SET_CFLG (_uae_c); \
+ SET_ZFLG (_uae_z); \
+ SET_NFLG (_uae_n); \
+ SET_VFLG (_uae_v); \
+} while (0)
+#endif
 
 #define COPY_CARRY (SET_XFLG (GET_CFLG))
 
@@ -1055,8 +1089,13 @@ static ALWAYS_INLINE int cctrue(const int cc)
     switch(cc){
      case 0: return 1;                       /* T */
      case 1: return 0;                       /* F */
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+     case 2: return (regflags.cznv & 0xFFFFu) == 0; /* HI */
+     case 3: return (regflags.cznv & 0xFFFFu) != 0; /* LS */
+#else
      case 2: return !CFLG && !ZFLG;          /* HI */
      case 3: return CFLG || ZFLG;            /* LS */
+#endif
      case 4: return !CFLG;                   /* CC */
      case 5: return CFLG;                    /* CS */
      case 6: return !ZFLG;                   /* NE */

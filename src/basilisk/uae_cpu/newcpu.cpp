@@ -48,6 +48,20 @@ extern int intlev(void);	// From baisilisk_glue.cpp
 #include "compiler/compemu.h"
 #include "fpu/fpu.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) void AotCodeChangedGuestRange(uaecptr addr, uae_u32 size)
+{
+	(void)addr;
+	(void)size;
+	AotCodeChanged();
+}
+
+__attribute__((weak)) void AotHandleCpusha(void)
+{
+	AotCodeChanged();
+}
+#endif
+
 #if defined(ENABLE_EXCLUSIVE_SPCFLAGS) && !defined(HAVE_HARDWARE_LOCKS)
 B2_mutex *spcflags_lock = NULL;
 #endif
@@ -568,7 +582,7 @@ static volatile uint64_t cpu_prof_flag_stop = 0;
 static volatile uint32_t cpu_prof_last_report_ms = 0;
 #endif
 
-static __inline__ unsigned int cft_map (unsigned int f)
+static ALWAYS_INLINE unsigned int cft_map (unsigned int f)
 {
 #ifndef HAVE_GET_WORD_UNSWAPPED
 	return f;
@@ -608,6 +622,10 @@ static void build_cpufunctbl (void)
 
 	for (opcode = 0; opcode < 65536; opcode++)
 		cpufunctbl[cft_map(opcode)] = op_illg_1;
+	for (opcode = 0xA000; opcode < 0xA800; opcode++)
+		cpufunctbl[cft_map(opcode)] = op_aline_os;
+	for (opcode = 0xA800; opcode < 0xB000; opcode++)
+		cpufunctbl[cft_map(opcode)] = op_aline_toolbox;
 	for (i = 0; tbl[i].handler != NULL; i++) {
 		if (! tbl[i].specific)
 			cpufunctbl[cft_map(tbl[i].opcode)] = tbl[i].handler;
@@ -1105,10 +1123,7 @@ void MakeFromSR (void)
 	regs.m = (regs.sr >> 12) & 1;
 	regs.intmask = (regs.sr >> 8) & 7;
 	SET_XFLG ((regs.sr >> 4) & 1);
-	SET_NFLG ((regs.sr >> 3) & 1);
-	SET_ZFLG ((regs.sr >> 2) & 1);
-	SET_VFLG ((regs.sr >> 1) & 1);
-	SET_CFLG (regs.sr & 1);
+	SET_CZNV_ALL(regs.sr & 1, (regs.sr >> 2) & 1, (regs.sr >> 3) & 1, (regs.sr >> 1) & 1);
 	if (CPUType >= 2) {
 		if (olds != regs.s) {
 			if (olds) {
@@ -1615,11 +1630,8 @@ void m68k_reset (void)
 	regs.stopped = 0;
 	regs.t1 = 0;
 	regs.t0 = 0;
-	SET_ZFLG (0);
+	CLEAR_CZNV;
 	SET_XFLG (0);
-	SET_CFLG (0);
-	SET_VFLG (0);
-	SET_NFLG (0);
 	SPCFLAGS_INIT( 0 );
 	regs.intmask = 7;
 	regs.vbr = regs.sfc = regs.dfc = 0;
@@ -1733,121 +1745,158 @@ static const uae_u32 kOsEpilogueKeepA0 = 0x76;
 static uaecptr trap_vector_checked = 0;
 static bool trap_vector_native = false;
 
-static inline bool native_trap_dispatch_ok(void)
+static __attribute__((noinline)) void native_trap_verify_vector(uaecptr vector)
 {
-	const uaecptr vector = get_long(regs.vbr + 4 * 10);
-	if (vector != trap_vector_checked) {
-		trap_vector_checked = vector;
-		trap_vector_native = true;
-		for (unsigned i = 0; i < sizeof(kTrapDispatcher) / sizeof(kTrapDispatcher[0]); ++i) {
-			// Entry points of translated regions replace ROM opcodes.
-			if (AotOriginalWord(vector + 2 * i) != kTrapDispatcher[i]) {
-				trap_vector_native = false;
-				break;
-			}
+	trap_vector_checked = vector;
+	trap_vector_native = true;
+	for (unsigned i = 0; i < sizeof(kTrapDispatcher) / sizeof(kTrapDispatcher[0]); ++i) {
+		// Entry points of translated regions replace ROM opcodes.
+		if (AotOriginalWord(vector + 2 * i) != kTrapDispatcher[i]) {
+			trap_vector_native = false;
+			break;
 		}
 	}
+}
+
+static ALWAYS_INLINE bool native_trap_dispatch_ok(void)
+{
+	const uaecptr vector = get_long(regs.vbr + 4 * 10);
+	if (unlikely(vector != trap_vector_checked))
+		native_trap_verify_vector(vector);
 	// Exception entry would switch to the supervisor stack and clear T/M;
 	// the shortcut is exact only when those are already in that state.
 	return trap_vector_native && regs.s && !regs.m && !regs.t0 && !regs.t1;
 }
 #endif
 
-void REGPARAM2 op_illg (uae_u32 opcode)
+static ALWAYS_INLINE void aline_dispatch_os(uae_u32 opcode)
 {
-	uaecptr pc = m68k_getpc ();
-
-	if ((opcode & 0xF000) == 0xA000) {
 #if CPU_TRAP_PROFILE
-		trap_profile_counts[opcode & 0x0fff]++;
-		if (opcode == 0xA829)
-			layer_selector_counts[m68k_dreg(regs, 0) & 0xff]++;
+	trap_profile_counts[opcode & 0x0fff]++;
 #endif
 #if CPU_NATIVE_QD_ACCEL
-		if (QuickDrawAccelTryTrap((uint16)opcode))
-			return;
-#endif
-#if CPU_NATIVE_IS_LAYER
-		/*
-		 * LayerDispatch selector 2 (IsLayer) is the hottest A-line operation
-		 * in Speedometer's Color Tests.  System 7 implements it as a single
-		 * GrafPort marker test: port->txSize (offset 0x4a) == 0xdead.
-		 *
-		 * Pascal Toolbox ABI at trap entry:
-		 *   (A7)   = GrafPtr argument (long)
-		 *   4(A7)  = caller-owned Boolean result slot
-		 * The trap pops the argument and leaves the result for the caller.
-		 */
-		if (opcode == 0xA829 && (m68k_dreg(regs, 0) & 0xff) == 0x02) {
-			const uaecptr sp = m68k_areg(regs, 7);
-			if (sp <= RAMSize - 5) {
-				const uaecptr port = get_long(sp);
-				if (port == 0 || port <= RAMSize - 0x4c) {
-					const bool is_layer = port != 0 && get_word(port + 0x4a) == 0xdead;
-					put_byte(sp + 4, is_layer ? 1 : 0);
-					m68k_areg(regs, 7) = sp + 4;
-					m68k_incpc(2);
-					return;
-				}
-			}
-		}
+	if (QuickDrawAccelTryTrap((uint16)opcode))
+		return;
 #endif
 #if CPU_NATIVE_TRAP_DISPATCH
-		if (native_trap_dispatch_ok() && !(opcode & 0x0800)) {
-			// OS trap: the stack, registers and CCR the ROM prologue leaves at
-			// its JSR, including the frame slot the epilogue skips and the
-			// return address it finally pops.
-			uaecptr sp = m68k_areg(regs, 7);
-			MakeSR();
-			put_long(sp - 4, pc + 2);
-			put_word(sp - 6, (pc >> 16) & 0xffff);
-			put_word(sp - 8, regs.sr);
-			put_long(sp - 12, m68k_areg(regs, 2));
-			put_long(sp - 16, m68k_dreg(regs, 2));
-			put_long(sp - 20, m68k_dreg(regs, 1));
-			put_long(sp - 24, m68k_areg(regs, 1));
-			sp -= 24;
-			const bool keep_a0 = (opcode & 0x0100) != 0;
-			uae_u32 flag_value;
-			if (!keep_a0) {
-				sp -= 4;
-				put_long(sp, m68k_areg(regs, 0));
-				flag_value = m68k_areg(regs, 0);		// MOVE.L A0,-(SP)
-			} else {
-				flag_value = (uae_u32)(uae_s32)(uae_s8)opcode;	// MOVE.B D1,D2
-			}
+	if (likely(native_trap_dispatch_ok())) {
+		// OS trap: the stack, registers and CCR the ROM prologue leaves at
+		// its JSR, including the frame slot the epilogue skips and the
+		// return address it finally pops.
+		const uaecptr pc = m68k_getpc();
+		uaecptr sp = m68k_areg(regs, 7);
+		MakeSR();
+		put_long(sp - 4, pc + 2);
+		put_word(sp - 6, (pc >> 16) & 0xffff);
+		put_word(sp - 8, regs.sr);
+		put_long(sp - 12, m68k_areg(regs, 2));
+		put_long(sp - 16, m68k_dreg(regs, 2));
+		put_long(sp - 20, m68k_dreg(regs, 1));
+		put_long(sp - 24, m68k_areg(regs, 1));
+		sp -= 24;
+		const bool keep_a0 = (opcode & 0x0100) != 0;
+		uae_u32 flag_value;
+		if (!keep_a0) {
 			sp -= 4;
-			put_long(sp, trap_vector_checked + (keep_a0 ? kOsEpilogueKeepA0 : kOsEpilogueRestoreA0));
-			m68k_areg(regs, 7) = sp;
-			m68k_areg(regs, 2) = pc + 2;
-			m68k_dreg(regs, 1) = (m68k_dreg(regs, 1) & 0xffff0000) | (opcode & 0xffff);
-			m68k_dreg(regs, 2) = (m68k_dreg(regs, 2) & 0xffff0000) | (opcode & 0x01ff);
-			SET_NFLG(((uae_s32)flag_value) < 0);
-			SET_ZFLG(flag_value == 0);
-			SET_VFLG(0);
-			SET_CFLG(0);
-			m68k_setpc(get_long(0x0400 + (opcode & 0x00ff) * 4));
-			return;
+			flag_value = m68k_areg(regs, 0);
+			put_long(sp, flag_value);			// MOVE.L A0,-(SP)
+		} else {
+			flag_value = (uae_u32)(uae_s32)(uae_s8)opcode;	// MOVE.B D1,D2
 		}
-		if ((opcode & 0x0800) && native_trap_dispatch_ok()) {
-			// Same register, stack and CCR state as the ROM dispatcher leaves:
-			// the routine address from the trap table, the caller's return
-			// address pushed unless auto-pop, and flags from MOVE.L (SP)+,D2.
-			const uaecptr routine = get_long(0x0E00 + (opcode & 0x03FF) * 4);
-			if (!(opcode & 0x0400)) {
-				m68k_areg(regs, 7) -= 4;
-				put_long(m68k_areg(regs, 7), pc + 2);
-			}
-			const uae_u32 d2 = m68k_dreg(regs, 2);
-			SET_NFLG(((uae_s32)d2) < 0);
-			SET_ZFLG(d2 == 0);
-			SET_VFLG(0);
-			SET_CFLG(0);
-			m68k_setpc(routine);
-			return;
-		}
+		sp -= 4;
+		put_long(sp, trap_vector_checked + (keep_a0 ? kOsEpilogueKeepA0 : kOsEpilogueRestoreA0));
+		m68k_areg(regs, 7) = sp;
+		m68k_areg(regs, 2) = pc + 2;
+		m68k_dreg_w_set(regs, 1, opcode);
+		m68k_dreg_w_set(regs, 2, opcode & 0x01ff);
+		SET_CZNV_ZN(flag_value == 0, ((uae_s32)flag_value) < 0);
+		m68k_setpc(get_long(0x0400 + (opcode & 0x00ff) * 4));
+		return;
+	}
 #endif
-		Exception(0xA,0);
+	Exception(0xA, 0);
+}
+
+static ALWAYS_INLINE void aline_dispatch_toolbox(uae_u32 opcode)
+{
+#if CPU_TRAP_PROFILE
+	trap_profile_counts[opcode & 0x0fff]++;
+	if (opcode == 0xA829)
+		layer_selector_counts[m68k_dreg(regs, 0) & 0xff]++;
+#endif
+#if CPU_NATIVE_QD_ACCEL
+	if (QuickDrawAccelTryTrap((uint16)opcode))
+		return;
+#endif
+#if CPU_NATIVE_IS_LAYER
+	/*
+	 * LayerDispatch selector 2 (IsLayer) is the hottest A-line operation
+	 * in Speedometer's Color Tests.  System 7 implements it as a single
+	 * GrafPort marker test: port->txSize (offset 0x4a) == 0xdead.
+	 *
+	 * Pascal Toolbox ABI at trap entry:
+	 *   (A7)   = GrafPtr argument (long)
+	 *   4(A7)  = caller-owned Boolean result slot
+	 * The trap pops the argument and leaves the result for the caller.
+	 */
+	if (opcode == 0xA829 && (m68k_dreg(regs, 0) & 0xff) == 0x02) {
+		const uaecptr sp = m68k_areg(regs, 7);
+		if (sp <= RAMSize - 5) {
+			const uaecptr port = get_long(sp);
+			if (port == 0 || port <= RAMSize - 0x4c) {
+				const bool is_layer = port != 0 && get_word(port + 0x4a) == 0xdead;
+				put_byte(sp + 4, is_layer ? 1 : 0);
+				m68k_areg(regs, 7) = sp + 4;
+				m68k_incpc(2);
+				return;
+			}
+		}
+	}
+#endif
+#if CPU_NATIVE_TRAP_DISPATCH
+	if (likely(native_trap_dispatch_ok())) {
+		// Same register, stack and CCR state as the ROM dispatcher leaves:
+		// the routine address from the trap table, the caller's return
+		// address pushed unless auto-pop, and flags from MOVE.L (SP)+,D2.
+		const uaecptr routine = get_long(0x0E00 + (opcode & 0x03FF) * 4);
+		if (!(opcode & 0x0400)) {
+			const uaecptr sp = m68k_areg(regs, 7) - 4;
+			const uaecptr ret_pc = m68k_getpc() + 2;
+			m68k_areg(regs, 7) = sp;
+			put_long(sp, ret_pc);
+		}
+		const uae_u32 d2 = m68k_dreg(regs, 2);
+		SET_CZNV_ZN(d2 == 0, ((uae_s32)d2) < 0);
+		m68k_setpc(routine);
+		return;
+	}
+#endif
+	Exception(0xA, 0);
+}
+
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
+void REGPARAM2 op_aline_os(uae_u32 opcode)
+{
+	aline_dispatch_os(cft_map(opcode));
+}
+
+#ifdef ARDUINO
+IRAM_ATTR
+#endif
+void REGPARAM2 op_aline_toolbox(uae_u32 opcode)
+{
+	aline_dispatch_toolbox(cft_map(opcode));
+}
+
+void REGPARAM2 op_illg (uae_u32 opcode)
+{
+	if ((opcode & 0xF000) == 0xA000) {
+		if (!(opcode & 0x0800))
+			aline_dispatch_os(opcode);
+		else
+			aline_dispatch_toolbox(opcode);
 		return;
 	}
 
@@ -1856,6 +1905,7 @@ void REGPARAM2 op_illg (uae_u32 opcode)
 		return;
 	}
 
+	uaecptr pc = m68k_getpc ();
 	write_log ("Illegal instruction: %04x at %08x\n", opcode, pc);
 #if USE_JIT && JIT_DEBUG
 	compiler_dumpstate();
